@@ -40,6 +40,8 @@ CMD:
 
 `pwsh .\.local\bootstrap.ps1`
 
+若本机已安装 Visual Studio / MSVC Build Tools，`.local/activate.ps1` 与 `.local/activate.cmd` 应自动接入其桌面编译环境；不得要求执行模型手工切换到 Developer Command Prompt。
+
 未激活本地环境前，不得开始构建、测试、安装依赖或修改构建配置。
 
 ## 1. 目标摘要

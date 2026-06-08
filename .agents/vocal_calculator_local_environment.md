@@ -5,6 +5,7 @@
 本文档记录项目约定的本地环境布局与目标版本。
 为避免把 10GB 级别的 toolchain / SDK / emulator / user-state 提交进 Git，`.local/` 中只有顶层辅助脚本纳入版本控制；实际工具内容、下载缓存和 Android 用户态目录均为本机本地文件。
 如果当前机器尚未准备这些工具，先运行 `.local/bootstrap.ps1` 进行本地初始化；执行模型不得盲目安装新的全局依赖，也不得随意新增 Rust crate。
+Windows 桌面编译所需的 Visual Studio / MSVC Build Tools 视为机器级前置条件，激活脚本应自动探测并导入其环境。
 
 ## 1. 本地工具根目录
 

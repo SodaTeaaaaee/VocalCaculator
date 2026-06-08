@@ -1,5 +1,8 @@
 @echo off
 set "PROJECT_ROOT=%~dp0.."
+set "VSCMD_SKIP_SENDTELEMETRY=1"
+where cl >nul 2>nul
+if errorlevel 1 call :import_msvc
 set "CARGO_HOME=%PROJECT_ROOT%\.local\cargo"
 set "RUSTUP_HOME=%PROJECT_ROOT%\.local\rustup"
 set "JAVA_HOME=%PROJECT_ROOT%\.local\jdk"
@@ -14,3 +17,15 @@ set "PATH=%CARGO_HOME%\bin;%JAVA_HOME%\bin;%ANDROID_SDK_ROOT%\platform-tools;%AN
 if not exist "%ANDROID_USER_HOME%" mkdir "%ANDROID_USER_HOME%"
 if not exist "%ANDROID_AVD_HOME%" mkdir "%ANDROID_AVD_HOME%"
 echo Project environment activated.
+goto :eof
+
+:import_msvc
+for /f "usebackq delims=" %%I in (`powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0find-msvc-devcmd.ps1"`) do (
+    if /i "%%~nxI"=="VsDevCmd.bat" (
+        call "%%~fI" -host_arch=x64 -arch=x64 >nul
+    ) else (
+        call "%%~fI" >nul
+    )
+    goto :eof
+)
+goto :eof

@@ -31,7 +31,7 @@ call .local\bootstrap.cmd
 ```
 
 如果 `.local/` 中还没有实际的 toolchain / SDK 内容，请先完成初始化再激活环境。
-Windows 桌面构建仍可能需要系统里已有 Visual Studio Build Tools / MSVC 工具链；bootstrap 只负责项目本地 Rust / JDK / Android 组件。
+激活脚本会自动探测本机已安装的 Visual Studio / MSVC Build Tools 并导入桌面构建环境；bootstrap 不负责安装它们。
 
 PowerShell:
 
