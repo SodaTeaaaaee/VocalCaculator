@@ -20,11 +20,13 @@
 
 执行前必须先阅读：
 
-1. `.agents/vocal_calculator_goal.md`
-2. `.agents/vocal_calculator_research_sync.md`
-3. `.agents/vocal_calculator_subagent_protocol.md`
-4. `.agents/vocal_calculator_asset_inventory.md`
-5. `.agents/vocal_calculator_local_environment.md`
+1. `.agents/project_execution_checklist.md`
+2. `.agents/phase1_bootstrap_checklist.md`
+3. `.agents/vocal_calculator_goal.md`
+4. `.agents/vocal_calculator_research_sync.md`
+5. `.agents/vocal_calculator_subagent_protocol.md`
+6. `.agents/vocal_calculator_asset_inventory.md`
+7. `.agents/vocal_calculator_local_environment.md`
 
 执行前必须先激活项目本地环境：
 
@@ -43,6 +45,8 @@ CMD:
 若本机已安装 Visual Studio / MSVC Build Tools，`.local/activate.ps1` 与 `.local/activate.cmd` 应自动接入其桌面编译环境；不得要求执行模型手工切换到 Developer Command Prompt。
 
 未激活本地环境前，不得开始构建、测试、安装依赖或修改构建配置。
+
+在开始任何非平凡实现前，必须先阅读 `.agents/project_execution_checklist.md`，并完整执行 `.agents/phase1_bootstrap_checklist.md`。
 
 ## 1. 目标摘要
 

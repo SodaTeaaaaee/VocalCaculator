@@ -2,10 +2,12 @@
 
 主目标文档在 `.agents/`：
 
-1. `.agents/vocal_calculator_goal.md`
-2. `.agents/vocal_calculator_research_sync.md`
-3. `.agents/vocal_calculator_subagent_protocol.md`
-4. `.agents/vocal_calculator_local_environment.md`
+1. `.agents/project_execution_checklist.md`
+2. `.agents/phase1_bootstrap_checklist.md`
+3. `.agents/vocal_calculator_goal.md`
+4. `.agents/vocal_calculator_research_sync.md`
+5. `.agents/vocal_calculator_subagent_protocol.md`
+6. `.agents/vocal_calculator_local_environment.md`
 
 ## 仓库约定
 
