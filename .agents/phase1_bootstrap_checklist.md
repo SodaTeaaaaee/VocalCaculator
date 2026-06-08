@@ -57,6 +57,7 @@
    - `java`
    - `cl`
    - `sdkmanager`
+   - 若 `cargo-apk`、`java` 或 `sdkmanager` 缺失，先尝试 `.local/bootstrap.ps1`；若仍缺失，记录为 Android 子路径阻塞，但不要停止桌面与核心路径
 6. 检查依赖解析是否正常：
    - `cargo metadata --locked --format-version 1`
 7. 检查工作区状态：
@@ -74,6 +75,7 @@
    - 资源与音频资产扫描
    - 构建环境与平台依赖扫描
 10. 要求每个子 agent 把结论同步到 `.agents/sync/`
+    - 若子 agent 或同步失败，主 agent 必须自己写等价同步文件并继续
 11. 主 agent 吸收子 agent 结论后，先写一段简短现状总结，再开始实现
 
 ## 4. 第一笔实现的推荐范围
@@ -111,13 +113,18 @@
 6. 主 agent 已明确下一步只改哪些文件
 7. 尚未发生技术栈漂移、依赖漂移或目标漂移
 
-## 7. 本阶段停止条件
+## 7. 本阶段硬阻塞条件
 
-遇到以下情况必须先停并报告：
+以下情况不得直接停工，必须先修复、降级或记录后继续：
 
-1. `cargo` 不可用
-2. `cl` 不可用
-3. `java` 或 Android SDK 关键命令缺失
-4. `cargo metadata --locked` 失败
-5. 资源目录与资产清单不一致
-6. 子 agent 同步文件缺失
+1. `cl` 不可用：先尝试通过 `.local/activate.ps1` 或系统已安装 MSVC 自动接入；若仍缺失，继续完成非编译类扫描、代码结构设计与可跨平台部分，并把 Windows 构建验证标记为环境阻塞
+2. `java`、`cargo-apk` 或 Android SDK 关键命令缺失：先尝试 `.local/bootstrap.ps1`；若仍缺失，继续完成桌面与核心路径，并把 Android 验证标记为环境阻塞
+3. `cargo metadata --locked` 失败：先定位并修复锁文件、依赖或环境问题；若一时未解，继续做不依赖成功解析的仓库扫描、资源清点、文档与实现规划，但不得谎称环境已就绪
+4. 资源目录与资产清单不一致：继续扫描真实目录，更新 `.agents/` 资产说明，并按“缺失可降级”的策略推进实现
+5. 子 agent 同步文件缺失：主 agent 必须自行补写 `.agents/sync/` 记录并继续
+
+只有以下情况才算本阶段真正硬阻塞：
+
+1. 在执行 `.local/bootstrap.ps1`、环境激活和合理修复后，`cargo` 与 `rustc` 仍不可用
+2. `Cargo.toml`、`Cargo.lock`、`src/` 或 `.agents/` 关键入口缺失且无法自恢复
+3. 仓库无法正常读写，导致无法继续记录、实现或验证

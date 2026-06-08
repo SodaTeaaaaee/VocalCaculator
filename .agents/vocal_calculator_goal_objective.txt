@@ -1,1 +1,32 @@
-请先激活项目本地环境（PowerShell: `. .\.local\activate.ps1`，CMD: `call .local\activate.cmd`），然后阅读 `.agents/vocal_calculator_goal.md`、`.agents/vocal_calculator_research_sync.md`、`.agents/vocal_calculator_subagent_protocol.md`、`.agents/vocal_calculator_asset_inventory.md`、`.agents/vocal_calculator_local_environment.md`，再按文档执行 Vocal Calculator 的最终实现目标。仅允许修改 `Cargo.toml`、`build.rs`、`src/**`、`ui/**`、`resource/**`、`.github/workflows/**`、`.agents/**`、`.cargo/**` 和必要文档。必须优先复用项目已经配置好的本地 Rust/JDK/Android/cargo-apk/vendor 环境，默认不得新增全局依赖，默认不得新增 Rust crate；若确实必须新增依赖，先证明现有白名单不足。必须使用 `Slint + kira + rust_decimal + serde/toml + sysdirs + cargo-apk`，不得改用 Web 前端或第二套 GUI 栈。必须强制使用多个并发子 agent 做研究、实现分片和验证，并把每个子 agent 的结论同步到 `.agents/sync/`。音乐模式必须保留支持，但外部 `AR7778-digitized-MIDI` 资产不得默认视为可公开再分发；应实现“有本地资产包则启用、无资产包则正确降级”的策略。完成前必须运行 `pwsh .agents/verify_vocal_calculator.ps1`，并在最终回复中明确说明：Windows 桌面是否可运行、Android 是否可构建、哪些验证通过、哪些因外部前置条件被阻塞。
+进入 goal 模式，执行这个仓库。
+
+先检查 `.local/` 是否缺少实际工具链或 SDK 内容；若缺少，先运行：
+`pwsh .\.local\bootstrap.ps1`
+
+然后激活项目本地环境：
+PowerShell: `. .\.local\activate.ps1`
+CMD: `call .local\activate.cmd`
+
+把以下文件视为权威入口，并按顺序阅读和执行：
+1. `.agents/vocal_calculator_goal.md`
+2. `.agents/project_execution_checklist.md`
+3. `.agents/phase1_bootstrap_checklist.md`
+4. `.agents/vocal_calculator_subagent_protocol.md`
+5. `.agents/vocal_calculator_research_sync.md`
+6. `.agents/vocal_calculator_asset_inventory.md`
+7. `.agents/vocal_calculator_local_environment.md`
+
+执行要求：
+- `.agents/vocal_calculator_goal.md` 是最高优先级，不得擅自偏离技术栈、平台边界、法律边界、音频策略和写边界。
+- 默认用户会长时间离线；除非桌面主路径在自动 bootstrap、合理修复、官方文档核实和可行降级后仍完全不可继续，否则不要等待确认，也不要中止整个项目。
+- 当前从 Phase 0 和 Phase 1 开始；未完整跑完 `.agents/phase1_bootstrap_checklist.md` 前，不得开始非平凡实现；但完成后若无主路径级硬阻塞，必须自动继续推进 Phase 2 到 Phase 8，直到最终交付完成。
+- 每进入一个非平凡阶段，先尽可能并发派出多个 subagent；能并发的任务不要串行化。
+- 研究必须优先使用官方文档、官方仓库说明、docs.rs、Rust 官方文档、Slint 官方文档、Android 官方文档；非官方资料只能作补充，不能主导技术决策。
+- 每个 subagent 都必须把结论同步到 `.agents/sync/`，主 agent 必须吸收结论后再继续。
+- 仅允许修改 `Cargo.toml`、`build.rs`、`src/**`、`ui/**`、`resource/**`、`.github/workflows/**`、`.agents/**`、`.cargo/**` 和必要文档。
+- 必须优先复用项目已经配置好的本地 Rust/JDK/Android/cargo-apk/vendor 环境；默认不得新增全局依赖，默认不得新增 Rust crate；若确实必须新增，先证明现有白名单不足，再核实官方文档与许可。
+- 必须使用 `Slint + kira + rust_decimal + serde/toml + sysdirs + cargo-apk`，不得改用 Web 前端或第二套 GUI 栈。
+- 音乐模式必须保留支持，但外部 `AR7778-digitized-MIDI` 资产不得默认视为可公开再分发；应实现“有本地资产包则启用、无资产包则正确降级”的策略。
+- Android、签名、模拟器、外部音乐资产、第三方授权等问题默认只阻塞对应子路径；必须继续推进其他可做部分，并把阻塞写入 `.agents/sync/` 与最终说明。
+- 除非遇到主路径级硬阻塞，否则不要先停下来问我；先按 goal 和 checklist 执行。
+- 完成前必须运行 `pwsh .agents/verify_vocal_calculator.ps1`，并在最终汇报中明确说明：Windows 桌面是否可运行、Android 是否可构建、哪些验证通过、哪些因外部前置条件被阻塞。
