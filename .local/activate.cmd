@@ -1,0 +1,16 @@
+@echo off
+set "PROJECT_ROOT=%~dp0.."
+set "CARGO_HOME=%PROJECT_ROOT%\.local\cargo"
+set "RUSTUP_HOME=%PROJECT_ROOT%\.local\rustup"
+set "JAVA_HOME=%PROJECT_ROOT%\.local\jdk"
+set "ANDROID_SDK_ROOT=%PROJECT_ROOT%\.local\android-sdk"
+set "ANDROID_HOME=%ANDROID_SDK_ROOT%"
+set "ANDROID_USER_HOME=%PROJECT_ROOT%\.local\android-home"
+set "ANDROID_AVD_HOME=%ANDROID_USER_HOME%\avd"
+set "ANDROID_NDK_ROOT=%ANDROID_SDK_ROOT%\ndk\27.3.13750724"
+set "CARGO_TARGET_DIR=%PROJECT_ROOT%\target"
+set "RUST_BACKTRACE=1"
+set "PATH=%CARGO_HOME%\bin;%JAVA_HOME%\bin;%ANDROID_SDK_ROOT%\platform-tools;%ANDROID_SDK_ROOT%\emulator;%ANDROID_SDK_ROOT%\cmdline-tools\latest\bin;%PATH%"
+if not exist "%ANDROID_USER_HOME%" mkdir "%ANDROID_USER_HOME%"
+if not exist "%ANDROID_AVD_HOME%" mkdir "%ANDROID_AVD_HOME%"
+echo Project environment activated.

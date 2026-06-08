@@ -1,0 +1,52 @@
+[package]
+name = "vocal_calculator"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+slint = "1.16.1"
+kira = { version = "0.12.1", default-features = false, features = ["cpal", "wav"] }
+rust_decimal = { version = "1.42.0", features = ["serde"] }
+rust_decimal_macros = "1.40.0"
+serde = { version = "1.0.228", features = ["derive"] }
+toml = "1.1.2"
+sysdirs = { version = "0.9.4", features = ["android-auto"] }
+log = "0.4.32"
+env_logger = "0.11.10"
+android_logger = "0.15.1"
+thiserror = "1.0.69"
+anyhow = "1.0.102"
+
+[build-dependencies]
+slint-build = "1.16.1"
+
+[dev-dependencies]
+proptest = "1.11.0"
+rstest = "0.26.1"
+
+[package.metadata.android]
+package = "com.starberry.vocalcalculator"
+build_targets = ["aarch64-linux-android", "x86_64-linux-android"]
+apk_name = "vocal-calculator"
+
+[package.metadata.android.sdk]
+min_sdk_version = 28
+target_sdk_version = 35
+
+[package.metadata.android.application]
+label = "Vocal Calculator"
+theme = "@android:style/Theme.DeviceDefault.NoActionBar"
+
+[package.metadata.android.application.activity]
+config_changes = "orientation|keyboardHidden|screenSize|uiMode|density"
+launch_mode = "singleTop"
+orientation = "portrait"
+resizeable_activity = true
+
+[package.metadata.android.signing.dev]
+path = ".local/android-home/debug.keystore"
+keystore_password = "android"
