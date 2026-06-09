@@ -1,3 +1,3 @@
 fn main() {
-    println!("Hello, world!");
+    vocal_calculator::run_app();
 }

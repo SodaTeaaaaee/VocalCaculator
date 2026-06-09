@@ -2,15 +2,15 @@
 name = "vocal_calculator"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.96"
+rust-version = "1.92"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-slint = "1.16.1"
-kira = { version = "0.12.1", default-features = false, features = ["cpal", "wav"] }
-rust_decimal = { version = "1.42.0", features = ["serde"] }
+slint = { version = "1.16.1", features = ["backend-android-activity-06"] }
+kira = { version = "0.12.1", default-features = false, features = ["cpal", "wav", "pcm"] }
+rust_decimal = { version = "1.42.0", features = ["serde", "maths"] }
 rust_decimal_macros = "1.40.0"
 serde = { version = "1.0.228", features = ["derive"] }
 toml = "1.1.2"

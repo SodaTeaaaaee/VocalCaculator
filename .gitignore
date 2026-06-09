@@ -41,5 +41,11 @@ Thumbs.db
 .local/logs/
 .local/rustup/
 
+# Cloned reference repos used during development
+.local/AR7778-digitized-MIDI/
+
+# Agent planning / sync documents (not source code)
+.agents/
+
 # Rust dependency snapshots are local-only unless we explicitly choose to vendor.
 /vendor/

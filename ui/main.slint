@@ -1,0 +1,363 @@
+import { VerticalBox, Slider } from "std-widgets.slint";
+
+// =====================================================================
+// Skeuomorphic Calculator – GridLayout-based adaptive layout
+// Inspired by Casio SL-300 / Eltex 2000 / Neumorphic calculators
+// =====================================================================
+
+// ---- Skeuomorphic button with gradient bevel ----
+component SkeuBtn inherits Rectangle {
+    in property <string> label;
+    in property <brush> base: #c8c8c8;
+    in property <brush> fg: #333;
+    in property <length> font-size: 18px;
+    callback clicked;
+
+    border-radius: 5px;
+    border-width: 1px;
+    border-color: ta.pressed ? base.darker(30%) : base.darker(18%);
+    background: ta.pressed
+        ? base.darker(12%)
+        : ta.has-hover
+            ? base.darker(3%)
+            : base;
+
+    // Top highlight edge (simulates light from above)
+    Rectangle {
+        x: 1px; y: 1px;
+        width: parent.width - 2px;
+        height: 2px;
+        background: ta.pressed ? transparent : base.brighter(40%);
+        border-radius: 4px;
+    }
+
+    ta := TouchArea { clicked => { root.clicked(); } }
+
+    Text {
+        text: root.label;
+        font-size: root.font-size;
+        color: root.fg;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// ---- Backspace icon drawn as Path ----
+component BackspaceIcon inherits Path {
+    in property <brush> icon-color: #333;
+    width: 22px;
+    height: 16px;
+    viewbox-width: 24;
+    viewbox-height: 20;
+    stroke: icon-color;
+    stroke-width: 2px;
+    fill: transparent;
+    commands: "M 21 3 L 10 3 L 2 10 L 10 17 L 21 17 Z M 8 7 L 14 13 M 14 7 L 8 13";
+}
+
+// ---- About Dialog ----
+export component AboutDialog inherits Dialog {
+    title: "About";
+    preferred-width: 320px;
+    preferred-height: 200px;
+    VerticalBox {
+        Text { text: "Vocal Calculator v0.1.0"; font-size: 16px; font-weight: 700; horizontal-alignment: center; }
+        Text { text: "UI: Slint | Audio: kira | Numerics: rust_decimal"; font-size: 11px; horizontal-alignment: center; color: #666; wrap: word-wrap; }
+        Text { text: "Slint Community License"; font-size: 10px; horizontal-alignment: center; color: #999; }
+    }
+}
+
+// ---- Main calculator window ----
+export component CalculatorWindow inherits Window {
+    preferred-width: 380px;
+    preferred-height: 700px;
+    min-width: 300px;
+    min-height: 520px;
+    title: "Vocal Calculator";
+
+    // Theme
+    in-out property <bool> dark-mode: false;
+    background: dark-mode ? #1a1a1e : #e8e4e0;
+
+    // Data properties
+    in property <string> display-text: "0";
+    in property <string> memory-indicator: "";
+    in property <string> mode-indicator: "Normal";
+    in property <bool> error-state: false;
+    in property <string> history-text: "";
+    in property <string> audio-status: "";
+
+    // ---- Skeuomorphic color palette ----
+    property <brush> body-fill: dark-mode ? #2a2a30 : #c0bab4;
+    property <brush> body-edge: dark-mode ? #3a3a42 : #a8a29c;
+    property <brush> body-inner: dark-mode ? #222228 : #d4cec8;
+    property <brush> lcd-bg: dark-mode ? #2a3a2a : #b8c890;
+    property <brush> lcd-fg: dark-mode ? #a0d0a0 : #2a3a1a;
+    property <brush> lcd-frame: dark-mode ? #1a1a20 : #606850;
+    property <brush> lcd-error-bg: dark-mode ? #3a2020 : #e8b0a0;
+    property <brush> lcd-error-fg: dark-mode ? #ff8080 : #8a2020;
+    property <brush> solar-fill: dark-mode ? #0a0a12 : #1a1a2a;
+    property <brush> solar-cell: dark-mode ? #1a1a28 : #0a0a18;
+    property <brush> btn-digit: dark-mode ? #3a3a42 : #d8d4d0;
+    property <brush> btn-digit-fg: dark-mode ? #d0d0d0 : #2a2a2a;
+    property <brush> btn-op: dark-mode ? #5a4020 : #e8a848;
+    property <brush> btn-op-fg: dark-mode ? #ffd090 : #3a2a10;
+    property <brush> btn-func: dark-mode ? #303038 : #b0aca8;
+    property <brush> btn-func-fg: dark-mode ? #a0a0a0 : #4a4a4a;
+    property <brush> btn-clear: dark-mode ? #5a2020 : #d06050;
+    property <brush> btn-clear-fg: dark-mode ? #ffaaaa : #ffffff;
+    property <brush> btn-ci: dark-mode ? #4a3520 : #d08868;
+    property <brush> btn-ci-fg: dark-mode ? #ffccaa : #ffffff;
+    property <brush> btn-bs: dark-mode ? #4a4020 : #d0b870;
+    property <brush> btn-bs-fg: dark-mode ? #ffddaa : #3a2a10;
+    property <brush> btn-eq: dark-mode ? #1a4070 : #4080c8;
+    property <brush> btn-eq-fg: dark-mode ? #90c0ff : #ffffff;
+    property <brush> btn-memory: dark-mode ? #4a2020 : #c04040;
+    property <brush> status-fg: dark-mode ? #808090 : #706860;
+    property <brush> status-hover: dark-mode ? #3a3a42 : #c0bab4;
+
+    // Callbacks
+    callback digit-pressed(int);
+    callback decimal-point();
+    callback operator-pressed(string);
+    callback equals();
+    callback percent();
+    callback mu();
+    callback square-root();
+    callback backspace();
+    callback clear-input();
+    callback all-clear();
+    callback plus-minus();
+    callback memory-recall();
+    callback memory-add();
+    callback memory-subtract();
+    callback memory-clear();
+    callback switch-audio-mode();
+    callback show-about();
+    callback toggle-theme();
+    callback volume-changed(float);
+
+    // =================================================================
+    // Body
+    // =================================================================
+    Rectangle {
+        x: 10px; y: 10px;
+        width: parent.width - 20px;
+        height: parent.height - 20px;
+        border-radius: 14px;
+        background: body-fill;
+        border-width: 2px;
+        border-color: body-edge;
+
+        // Inner bevel
+        Rectangle {
+            x: 3px; y: 3px;
+            width: parent.width - 6px;
+            height: parent.height - 6px;
+            border-radius: 12px;
+            background: body-inner;
+            border-width: 1px;
+            border-color: dark-mode ? #1a1a20 : #b8b2ac;
+
+            VerticalLayout {
+                padding: 8px;
+                spacing: 4px;
+
+                // ---- Solar panel strip ----
+                Rectangle {
+                    height: 10px;
+                    border-radius: 2px;
+                    background: solar-fill;
+                    HorizontalLayout {
+                        padding: 1px;
+                        spacing: 1px;
+                        Rectangle { background: solar-cell; border-radius: 1px; }
+                        Rectangle { background: solar-cell; border-radius: 1px; }
+                        Rectangle { background: solar-cell; border-radius: 1px; }
+                        Rectangle { background: solar-cell; border-radius: 1px; }
+                        Rectangle { background: solar-cell; border-radius: 1px; }
+                        Rectangle { background: solar-cell; border-radius: 1px; }
+                        Rectangle { background: solar-cell; border-radius: 1px; }
+                        Rectangle { background: solar-cell; border-radius: 1px; }
+                    }
+                }
+
+                // ---- Brand label ----
+                Text {
+                    text: "AR7778  VOCAL CALC";
+                    font-size: 9px;
+                    font-weight: 700;
+                    color: dark-mode ? #505060 : #8a8480;
+                    horizontal-alignment: left;
+                    letter-spacing: 1px;
+                    height: 12px;
+                }
+
+                // ---- Status bar ----
+                HorizontalLayout {
+                    height: 18px;
+                    spacing: 4px;
+                    Text { text: root.memory-indicator; font-size: 10px; color: btn-memory; font-weight: 700; vertical-alignment: center; }
+                    Rectangle { horizontal-stretch: 1; }
+                    Text { text: root.audio-status; font-size: 8px; color: status-fg; vertical-alignment: center; }
+                    Text { text: " "; font-size: 8px; vertical-alignment: center; }
+                    Text { text: root.mode-indicator; font-size: 9px; color: status-fg; vertical-alignment: center; }
+
+                    // Theme toggle
+                    Rectangle {
+                        width: 20px; height: 20px;
+                        border-radius: 3px;
+                        background: tt.has-hover ? status-hover : transparent;
+                        tt := TouchArea { clicked => { root.toggle-theme(); } }
+                        Rectangle {
+                            width: 12px; height: 12px;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            border-radius: 6px;
+                            border-width: 1.5px;
+                            border-color: status-fg;
+                            background: root.dark-mode ? status-fg : transparent;
+                        }
+                    }
+                    // Audio mode
+                    Rectangle {
+                        width: 20px; height: 20px;
+                        border-radius: 3px;
+                        background: mt.has-hover ? status-hover : transparent;
+                        mt := TouchArea { clicked => { root.switch-audio-mode(); } }
+                        Text { text: "\u{266B}"; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; color: status-fg; }
+                    }
+                    // About
+                    Rectangle {
+                        width: 20px; height: 20px;
+                        border-radius: 3px;
+                        background: at.has-hover ? status-hover : transparent;
+                        at := TouchArea { clicked => { root.show-about(); } }
+                        Text { text: "?"; font-size: 11px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; color: status-fg; }
+                    }
+                }
+
+                // ---- Volume slider ----
+                HorizontalLayout {
+                    height: 20px;
+                    spacing: 4px;
+                    Text { text: "\u{1F509}"; font-size: 10px; vertical-alignment: center; color: status-fg; }
+                    Slider {
+                        minimum: 0;
+                        maximum: 100;
+                        value: 80;
+                        changed => { root.volume-changed(self.value / 100.0); }
+                    }
+                    Text { text: "\u{1F50A}"; font-size: 10px; vertical-alignment: center; color: status-fg; }
+                }
+
+                // ---- History ----
+                Text { text: root.history-text; font-size: 10px; color: status-fg; horizontal-alignment: right; height: 14px; }
+
+                // ---- LCD Display ----
+                Rectangle {
+                    height: 64px;
+                    border-radius: 5px;
+                    background: lcd-frame;
+                    border-width: 2px;
+                    border-color: lcd-frame;
+
+                    Rectangle {
+                        x: 3px; y: 3px;
+                        width: parent.width - 6px;
+                        height: parent.height - 6px;
+                        border-radius: 3px;
+                        background: root.error-state ? lcd-error-bg : lcd-bg;
+
+                        Text {
+                            text: root.display-text;
+                            font-size: root.error-state ? 16px : 28px;
+                            font-weight: 600;
+                            color: root.error-state ? lcd-error-fg : lcd-fg;
+                            horizontal-alignment: right;
+                            vertical-alignment: center;
+                            x: 10px;
+                            width: parent.width - 20px;
+                            overflow: elide;
+                        }
+                    }
+                }
+
+                // ---- Button grid (GridLayout for adaptive sizing) ----
+                GridLayout {
+                    spacing: 4px;
+                    vertical-stretch: 1;
+
+                    // Row: MC  MR  M-  M+
+                    Row {
+                        SkeuBtn { label: "MC"; base: btn-func; fg: btn-func-fg; font-size: 10px; clicked => { root.memory-clear(); } }
+                        SkeuBtn { label: "MR"; base: btn-func; fg: btn-func-fg; font-size: 10px; clicked => { root.memory-recall(); } }
+                        SkeuBtn { label: "M-"; base: btn-func; fg: btn-func-fg; font-size: 10px; clicked => { root.memory-subtract(); } }
+                        SkeuBtn { label: "M+"; base: btn-func; fg: btn-func-fg; font-size: 10px; clicked => { root.memory-add(); } }
+                    }
+
+                    // Row: %  √  MU (span 2)
+                    Row {
+                        SkeuBtn { label: "%"; base: btn-func; fg: btn-func-fg; font-size: 12px; clicked => { root.percent(); } }
+                        SkeuBtn { label: "\u{221A}"; base: btn-func; fg: btn-func-fg; font-size: 12px; clicked => { root.square-root(); } }
+                        SkeuBtn { colspan: 2; label: "MU"; base: btn-func; fg: btn-func-fg; font-size: 10px; clicked => { root.mu(); } }
+                    }
+
+                    // Row: AC  C  ⌫  ÷
+                    Row {
+                        SkeuBtn { label: "AC"; base: btn-clear; fg: btn-clear-fg; font-size: 12px; clicked => { root.all-clear(); } }
+                        SkeuBtn { label: "C"; base: btn-ci; fg: btn-ci-fg; font-size: 12px; clicked => { root.clear-input(); } }
+                        // Backspace with Path icon
+                        Rectangle {
+                            border-radius: 5px;
+                            background: bsta.pressed ? btn-bs.darker(12%) : bsta.has-hover ? btn-bs.darker(3%) : btn-bs;
+                            border-width: 1px;
+                            border-color: btn-bs.darker(18%);
+                            Rectangle { x: 1px; y: 1px; width: parent.width - 2px; height: 2px; background: btn-bs.brighter(40%); border-radius: 4px; }
+                            bsta := TouchArea { clicked => { root.backspace(); } }
+                            BackspaceIcon {
+                                icon-color: btn-bs-fg;
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                            }
+                        }
+                        SkeuBtn { label: "\u{00F7}"; base: btn-op; fg: btn-op-fg; font-size: 16px; clicked => { root.operator-pressed("/"); } }
+                    }
+
+                    // Row: 7  8  9  ×
+                    Row {
+                        SkeuBtn { label: "7"; base: btn-digit; fg: btn-digit-fg; clicked => { root.digit-pressed(7); } }
+                        SkeuBtn { label: "8"; base: btn-digit; fg: btn-digit-fg; clicked => { root.digit-pressed(8); } }
+                        SkeuBtn { label: "9"; base: btn-digit; fg: btn-digit-fg; clicked => { root.digit-pressed(9); } }
+                        SkeuBtn { label: "\u{00D7}"; base: btn-op; fg: btn-op-fg; font-size: 16px; clicked => { root.operator-pressed("*"); } }
+                    }
+
+                    // Row: 4  5  6  -
+                    Row {
+                        SkeuBtn { label: "4"; base: btn-digit; fg: btn-digit-fg; clicked => { root.digit-pressed(4); } }
+                        SkeuBtn { label: "5"; base: btn-digit; fg: btn-digit-fg; clicked => { root.digit-pressed(5); } }
+                        SkeuBtn { label: "6"; base: btn-digit; fg: btn-digit-fg; clicked => { root.digit-pressed(6); } }
+                        SkeuBtn { label: "-"; base: btn-op; fg: btn-op-fg; font-size: 16px; clicked => { root.operator-pressed("-"); } }
+                    }
+
+                    // Row: 1  2  3  +
+                    Row {
+                        SkeuBtn { label: "1"; base: btn-digit; fg: btn-digit-fg; clicked => { root.digit-pressed(1); } }
+                        SkeuBtn { label: "2"; base: btn-digit; fg: btn-digit-fg; clicked => { root.digit-pressed(2); } }
+                        SkeuBtn { label: "3"; base: btn-digit; fg: btn-digit-fg; clicked => { root.digit-pressed(3); } }
+                        SkeuBtn { label: "+"; base: btn-op; fg: btn-op-fg; font-size: 16px; clicked => { root.operator-pressed("+"); } }
+                    }
+
+                    // Row: ±  0  .  =
+                    Row {
+                        SkeuBtn { label: "\u{00B1}"; base: btn-func; fg: btn-func-fg; font-size: 14px; clicked => { root.plus-minus(); } }
+                        SkeuBtn { label: "0"; base: btn-digit; fg: btn-digit-fg; clicked => { root.digit-pressed(0); } }
+                        SkeuBtn { label: "."; base: btn-digit; fg: btn-digit-fg; font-size: 16px; clicked => { root.decimal-point(); } }
+                        SkeuBtn { label: "="; base: btn-eq; fg: btn-eq-fg; font-size: 16px; clicked => { root.equals(); } }
+                    }
+                }
+            }
+        }
+    }
+}
