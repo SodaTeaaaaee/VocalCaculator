@@ -13,7 +13,8 @@ component SkeuBtn inherits Rectangle {
     in property <length> font-size: 16px;
     callback clicked;
 
-    border-radius: 16px;
+    // Scaling border-radius: ~28% of the shorter side, preserves roundness at any size
+    border-radius: Math.min(self.width, self.height) * 0.28;
     border-width: 1px;
     border-color: ta.pressed ? base.darker(30%) : base.darker(18%);
     background: ta.pressed
@@ -28,7 +29,7 @@ component SkeuBtn inherits Rectangle {
         width: parent.width - 2px;
         height: 2px;
         background: ta.pressed ? transparent : base.brighter(40%);
-        border-radius: 4px;
+        border-radius: Math.min(parent.width, parent.height) * 0.28;
     }
 
     ta := TouchArea { clicked => { root.clicked(); } }
@@ -139,7 +140,9 @@ export component CalculatorWindow inherits Window {
         x: 10px; y: 10px;
         width: parent.width - 20px;
         height: parent.height - 20px;
-        border-radius: 14px;
+        // Scaling body radius
+        property <length> body-r: Math.min(self.width, self.height) * 0.03;
+        border-radius: self.body-r;
         background: body-fill;
         border-width: 2px;
         border-color: body-edge;
@@ -149,7 +152,7 @@ export component CalculatorWindow inherits Window {
             x: 3px; y: 3px;
             width: parent.width - 6px;
             height: parent.height - 6px;
-            border-radius: 12px;
+            border-radius: Math.max(0px, parent.body-r - 3px);
             background: body-inner;
             border-width: 1px;
             border-color: dark-mode ? #1a1a20 : #b8b2ac;
@@ -201,7 +204,7 @@ export component CalculatorWindow inherits Window {
                     // Theme toggle
                     Rectangle {
                         width: 44px; height: 44px;
-                        border-radius: 3px;
+                        border-radius: Math.min(self.width, self.height) * 0.2;
                         background: tt.has-hover ? status-hover : transparent;
                         tt := TouchArea { clicked => { root.toggle-theme(); } }
                         Text {
@@ -215,7 +218,7 @@ export component CalculatorWindow inherits Window {
                     // Audio mode
                     Rectangle {
                         width: 44px; height: 44px;
-                        border-radius: 3px;
+                        border-radius: Math.min(self.width, self.height) * 0.2;
                         background: mt.has-hover ? status-hover : transparent;
                         mt := TouchArea { clicked => { root.switch-audio-mode(); } }
                         Text { text: "\u{F001}"; font-size: root.icon-font-size; horizontal-alignment: center; vertical-alignment: center; color: status-fg; }
@@ -223,7 +226,7 @@ export component CalculatorWindow inherits Window {
                     // About
                     Rectangle {
                         width: 44px; height: 44px;
-                        border-radius: 3px;
+                        border-radius: Math.min(self.width, self.height) * 0.2;
                         background: at.has-hover ? status-hover : transparent;
                         at := TouchArea { clicked => { root.show-about(); } }
                         Text { text: "\u{F05A}"; font-size: root.icon-font-size; horizontal-alignment: center; vertical-alignment: center; color: status-fg; }
@@ -250,7 +253,8 @@ export component CalculatorWindow inherits Window {
                 // ---- LCD Display ----
                 Rectangle {
                     height: 80px;
-                    border-radius: 12px;
+                    property <length> lcd-r: Math.min(self.width, self.height) * 0.15;
+                    border-radius: self.lcd-r;
                     background: lcd-frame;
                     border-width: 2px;
                     border-color: lcd-frame;
@@ -259,7 +263,7 @@ export component CalculatorWindow inherits Window {
                         x: 3px; y: 3px;
                         width: parent.width - 6px;
                         height: parent.height - 6px;
-                        border-radius: 3px;
+                        border-radius: Math.max(0px, parent.lcd-r - 3px);
                         background: root.error-state ? lcd-error-bg : lcd-bg;
 
                         Text {
@@ -302,11 +306,11 @@ export component CalculatorWindow inherits Window {
                         SkeuBtn { label: "C"; base: btn-ci; fg: btn-ci-fg; font-size: root.btn-font-size; clicked => { root.clear-input(); } }
                         // Backspace button (Nerd Font glyph)
                         Rectangle {
-                            border-radius: 16px;
+                            border-radius: Math.min(self.width, self.height) * 0.28;
                             background: bsta.pressed ? btn-bs.darker(12%) : bsta.has-hover ? btn-bs.darker(3%) : btn-bs;
                             border-width: 1px;
                             border-color: btn-bs.darker(18%);
-                            Rectangle { x: 1px; y: 1px; width: parent.width - 2px; height: 2px; background: btn-bs.brighter(40%); border-radius: 4px; }
+                            Rectangle { x: 1px; y: 1px; width: parent.width - 2px; height: 2px; background: btn-bs.brighter(40%); border-radius: Math.min(parent.width, parent.height) * 0.28; }
                             bsta := TouchArea { clicked => { root.backspace(); } }
                             Text {
                                 text: "\u{232B}";
