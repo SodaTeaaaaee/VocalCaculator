@@ -221,6 +221,7 @@ export component CalculatorWindow inherits Window {
                         tt := TouchArea { clicked => { root.toggle-theme(); } }
                         Text {
                             text: root.dark-mode ? "\u{F185}" : "\u{F186}";
+                            font-family: "JetBrainsMono Nerd Font";
                             font-size: root.status-font-size;
                             horizontal-alignment: center;
                             vertical-alignment: center;
@@ -233,7 +234,7 @@ export component CalculatorWindow inherits Window {
                         border-radius: Math.min(self.width, self.height) * 0.2;
                         background: mt.has-hover ? status-hover : transparent;
                         mt := TouchArea { clicked => { root.switch-audio-mode(); } }
-                        Text { text: "\u{F001}"; font-size: root.status-font-size; horizontal-alignment: center; vertical-alignment: center; color: status-fg; }
+                        Text { text: "\u{F001}"; font-family: "JetBrainsMono Nerd Font"; font-size: root.status-font-size; horizontal-alignment: center; vertical-alignment: center; color: status-fg; }
                     }
                     // About
                     Rectangle {
@@ -241,7 +242,7 @@ export component CalculatorWindow inherits Window {
                         border-radius: Math.min(self.width, self.height) * 0.2;
                         background: at.has-hover ? status-hover : transparent;
                         at := TouchArea { clicked => { root.show-about(); } }
-                        Text { text: "\u{F05A}"; font-size: root.status-font-size; horizontal-alignment: center; vertical-alignment: center; color: status-fg; }
+                        Text { text: "\u{F05A}"; font-family: "JetBrainsMono Nerd Font"; font-size: root.status-font-size; horizontal-alignment: center; vertical-alignment: center; color: status-fg; }
                     }
                 }
 
@@ -249,14 +250,14 @@ export component CalculatorWindow inherits Window {
                 HorizontalLayout {
                     height: root.volume-h;
                     spacing: root.layout-spacing;
-                    Text { text: "\u{F027}"; font-size: root.status-font-size; vertical-alignment: center; color: status-fg; }
+                    Text { text: "\u{F027}"; font-family: "JetBrainsMono Nerd Font"; font-size: root.status-font-size; vertical-alignment: center; color: status-fg; }
                     Slider {
                         minimum: 0;
                         maximum: 100;
                         value: 50;
                         changed => { root.volume-changed(self.value / 100.0); }
                     }
-                    Text { text: "\u{F028}"; font-size: root.status-font-size; vertical-alignment: center; color: status-fg; }
+                    Text { text: "\u{F028}"; font-family: "JetBrainsMono Nerd Font"; font-size: root.status-font-size; vertical-alignment: center; color: status-fg; }
                 }
 
                 // ---- History ----
