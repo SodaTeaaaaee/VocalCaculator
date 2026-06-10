@@ -42,11 +42,15 @@ fn slider_to_decibels(slider: f64) -> Decibels {
     if slider <= 0.0 {
         Decibels::SILENCE
     } else {
-        Decibels((slider - 1.0) as f32 * 60.0)
+        // Perceptually correct volume curve: 20*log10(amplitude)
+        // 0.5 → -6dB (50% amplitude), 0.1 → -20dB, 1.0 → 0dB
+        Decibels(20.0 * (slider as f32).log10())
     }
 }
 
 pub struct VocalAudio {
+    // AudioManager MUST be kept alive -- dropping it kills the audio thread
+    _manager: AudioManager<DefaultBackend>,
     main_track: TrackHandle,
     sounds: Vec<StaticSoundData>,
     wav_bytes: Vec<Vec<u8>>,
@@ -72,7 +76,8 @@ impl VocalAudio {
                 return None;
             }
         };
-        main_track.set_volume(slider_to_decibels(0.8), Tween::default());
+        // Default volume 50%
+        main_track.set_volume(slider_to_decibels(0.5), Tween::default());
         let entries = registry::load_all_sounds();
         let n = entries.len();
         let mut sounds = Vec::with_capacity(n);
@@ -92,6 +97,7 @@ impl VocalAudio {
             .unwrap_or_default()
             .as_nanos() as u64;
         Some(Self {
+            _manager: manager,
             main_track,
             sounds,
             wav_bytes,

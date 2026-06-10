@@ -8,7 +8,7 @@ rust-version = "1.92"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-slint = { version = "1.16.1", features = ["backend-android-activity-06"] }
+slint = { version = "1.16.1", features = ["backend-android-activity-06", "unstable-fontique-08"] }
 kira = { version = "0.12.1", default-features = false, features = ["cpal", "wav", "pcm"] }
 rust_decimal = { version = "1.42.0", features = ["serde", "maths"] }
 rust_decimal_macros = "1.40.0"

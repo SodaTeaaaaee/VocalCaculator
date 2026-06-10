@@ -74,7 +74,7 @@ pub fn event_to_wav_indices(event: &VocalEvent) -> Vec<u16> {
 /// Supports integer part up to 10^12 and up to 12 decimal places.
 /// For values exceeding the natural speech range, falls back to digit-by-digit.
 pub fn decimal_to_speech_wavs(value: &Decimal) -> Vec<u16> {
-    let s = super::format::format_display(value);
+    let s = super::format::format_for_speech(value);
     let mut result = Vec::new();
 
     // Handle negative

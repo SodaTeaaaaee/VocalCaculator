@@ -1,12 +1,8 @@
 use rust_decimal::Decimal;
 use std::str::FromStr;
 
-/// Format a Decimal for display.
-///
-/// Removes trailing zeros, handles negative sign, limits precision.
-pub fn format_display(value: &Decimal) -> String {
-    let s = value.to_string();
-    // Normalize: strip trailing zeros after decimal point
+/// Normalize a Decimal string: strip trailing zeros after decimal point.
+fn normalize(s: &str) -> String {
     if s.contains('.') {
         let trimmed = s.trim_end_matches('0').trim_end_matches('.');
         if trimmed.is_empty() || trimmed == "-" {
@@ -14,6 +10,43 @@ pub fn format_display(value: &Decimal) -> String {
         } else {
             trimmed.to_string()
         }
+    } else {
+        s.to_string()
+    }
+}
+
+/// Format a Decimal for display (LCD, history).
+///
+/// For numbers that fit within 14 characters, uses standard notation.
+/// For longer numbers, switches to scientific notation with ~10 significant digits.
+pub fn format_display(value: &Decimal) -> String {
+    let s = normalize(&value.to_string());
+    if s.len() <= 14 {
+        return s;
+    }
+    format_scientific(value)
+}
+
+/// Format a Decimal for speech decomposition.
+///
+/// Always uses standard notation (no scientific notation) so the speech
+/// engine can parse the integer and decimal parts correctly.
+pub fn format_for_speech(value: &Decimal) -> String {
+    normalize(&value.to_string())
+}
+
+fn format_scientific(value: &Decimal) -> String {
+    let f: f64 = value.to_string().parse().unwrap_or(0.0);
+    if f == 0.0 {
+        return "0".to_string();
+    }
+    // 10 significant digits (9 decimal places in mantissa)
+    let s = format!("{:.9e}", f);
+    if let Some(e_pos) = s.find('e') {
+        let mantissa = &s[..e_pos];
+        let exponent = &s[e_pos..];
+        let trimmed = mantissa.trim_end_matches('0').trim_end_matches('.');
+        format!("{}{}", trimmed, exponent)
     } else {
         s
     }
@@ -53,5 +86,20 @@ mod tests {
     fn format_small_decimal() {
         let d = Decimal::from_str("0.50").unwrap();
         assert_eq!(format_display(&d), "0.5");
+    }
+
+    #[test]
+    fn format_large_integer_scientific() {
+        let d = Decimal::from(123456789012345_i64);
+        let s = format_display(&d);
+        assert!(s.contains('e'), "expected scientific notation, got: {}", s);
+    }
+
+    #[test]
+    fn format_for_speech_no_scientific() {
+        let d = Decimal::from(123456789012345_i64);
+        let s = format_for_speech(&d);
+        assert!(!s.contains('e'), "speech format should not use scientific notation: {}", s);
+        assert_eq!(s, "123456789012345");
     }
 }

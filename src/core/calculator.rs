@@ -146,10 +146,6 @@ impl Calculator {
             self.input.clear();
             self.state = State::Input;
         }
-        // limit input length
-        if self.input.len() >= 16 {
-            return self.result(vec![]);
-        }
         self.input.push(char::from(b'0' + d));
         self.result(vec![VocalEvent::Digit(d)])
     }

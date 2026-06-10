@@ -75,6 +75,14 @@ pub fn run_app() {
         }
     };
 
+    // Register Nerd Font after platform init (first window creates the platform)
+    {
+        let font_data = include_bytes!("../resource/fonts/JetBrainsMonoNerdFont-Regular.ttf").to_vec();
+        let blob = slint::fontique_08::fontique::Blob::new(std::sync::Arc::new(font_data));
+        let mut collection = slint::fontique_08::shared_collection();
+        let _fonts = collection.register_fonts(blob, None);
+    }
+
     if let Err(e) = app.run() {
         log::error!("Application error: {e}");
     }

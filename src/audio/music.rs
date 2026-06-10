@@ -157,7 +157,7 @@ pub fn events_to_tone_indices(events: &[VocalEvent]) -> Vec<usize> {
             VocalEvent::SignPositive => result.push(TONE_C4),
             VocalEvent::Error(_) => result.push(TONE_ERROR),
             VocalEvent::Result(d) => {
-                let s = crate::core::format::format_display(d);
+                let s = crate::core::format::format_for_speech(d);
                 for ch in s.chars() {
                     if ch.is_ascii_digit() {
                         result.push(match ch as u8 - b'0' {

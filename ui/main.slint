@@ -10,10 +10,10 @@ component SkeuBtn inherits Rectangle {
     in property <string> label;
     in property <brush> base: #c8c8c8;
     in property <brush> fg: #333;
-    in property <length> font-size: 18px;
+    in property <length> font-size: 16px;
     callback clicked;
 
-    border-radius: 5px;
+    border-radius: 16px;
     border-width: 1px;
     border-color: ta.pressed ? base.darker(30%) : base.darker(18%);
     background: ta.pressed
@@ -43,19 +43,6 @@ component SkeuBtn inherits Rectangle {
     }
 }
 
-// ---- Backspace icon drawn as Path ----
-component BackspaceIcon inherits Path {
-    in property <brush> icon-color: #333;
-    width: 22px;
-    height: 16px;
-    viewbox-width: 24;
-    viewbox-height: 20;
-    stroke: icon-color;
-    stroke-width: 2px;
-    fill: transparent;
-    commands: "M 21 3 L 10 3 L 2 10 L 10 17 L 21 17 Z M 8 7 L 14 13 M 14 7 L 8 13";
-}
-
 // ---- About Dialog ----
 export component AboutDialog inherits Dialog {
     title: "About";
@@ -70,11 +57,18 @@ export component AboutDialog inherits Dialog {
 
 // ---- Main calculator window ----
 export component CalculatorWindow inherits Window {
+    default-font-family: "JetBrainsMono Nerd Font";
     preferred-width: 380px;
     preferred-height: 700px;
     min-width: 300px;
     min-height: 520px;
     title: "Vocal Calculator";
+
+    // Scalable font sizes derived from window height (external, no layout loop)
+    property <length> btn-font-size: Math.max(14px, self.height * 0.025);
+    property <length> lcd-font-size: Math.max(20px, self.height * 0.04);
+    property <length> status-font-size: Math.max(12px, self.height * 0.022);
+    property <length> icon-font-size: Math.max(16px, self.height * 0.03);
 
     // Theme
     in-out property <bool> dark-mode: false;
@@ -186,79 +180,77 @@ export component CalculatorWindow inherits Window {
                 // ---- Brand label ----
                 Text {
                     text: "AR7778  VOCAL CALC";
-                    font-size: 9px;
+                    font-size: 14px;
                     font-weight: 700;
                     color: dark-mode ? #505060 : #8a8480;
                     horizontal-alignment: left;
                     letter-spacing: 1px;
-                    height: 12px;
+                    height: 16px;
                 }
 
                 // ---- Status bar ----
                 HorizontalLayout {
-                    height: 18px;
+                    height: 44px;
                     spacing: 4px;
-                    Text { text: root.memory-indicator; font-size: 10px; color: btn-memory; font-weight: 700; vertical-alignment: center; }
+                    Text { text: root.memory-indicator; font-size: root.status-font-size; color: btn-memory; font-weight: 700; vertical-alignment: center; }
                     Rectangle { horizontal-stretch: 1; }
-                    Text { text: root.audio-status; font-size: 8px; color: status-fg; vertical-alignment: center; }
+                    Text { text: root.audio-status; font-size: root.status-font-size; color: status-fg; vertical-alignment: center; }
                     Text { text: " "; font-size: 8px; vertical-alignment: center; }
-                    Text { text: root.mode-indicator; font-size: 9px; color: status-fg; vertical-alignment: center; }
+                    Text { text: root.mode-indicator; font-size: root.status-font-size; color: status-fg; vertical-alignment: center; }
 
                     // Theme toggle
                     Rectangle {
-                        width: 20px; height: 20px;
+                        width: 44px; height: 44px;
                         border-radius: 3px;
                         background: tt.has-hover ? status-hover : transparent;
                         tt := TouchArea { clicked => { root.toggle-theme(); } }
-                        Rectangle {
-                            width: 12px; height: 12px;
-                            x: (parent.width - self.width) / 2;
-                            y: (parent.height - self.height) / 2;
-                            border-radius: 6px;
-                            border-width: 1.5px;
-                            border-color: status-fg;
-                            background: root.dark-mode ? status-fg : transparent;
+                        Text {
+                            text: root.dark-mode ? "\u{F185}" : "\u{F186}";
+                            font-size: root.icon-font-size;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            color: status-fg;
                         }
                     }
                     // Audio mode
                     Rectangle {
-                        width: 20px; height: 20px;
+                        width: 44px; height: 44px;
                         border-radius: 3px;
                         background: mt.has-hover ? status-hover : transparent;
                         mt := TouchArea { clicked => { root.switch-audio-mode(); } }
-                        Text { text: "\u{266B}"; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; color: status-fg; }
+                        Text { text: "\u{F001}"; font-size: root.icon-font-size; horizontal-alignment: center; vertical-alignment: center; color: status-fg; }
                     }
                     // About
                     Rectangle {
-                        width: 20px; height: 20px;
+                        width: 44px; height: 44px;
                         border-radius: 3px;
                         background: at.has-hover ? status-hover : transparent;
                         at := TouchArea { clicked => { root.show-about(); } }
-                        Text { text: "?"; font-size: 11px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; color: status-fg; }
+                        Text { text: "\u{F05A}"; font-size: root.icon-font-size; horizontal-alignment: center; vertical-alignment: center; color: status-fg; }
                     }
                 }
 
                 // ---- Volume slider ----
                 HorizontalLayout {
-                    height: 20px;
+                    height: 36px;
                     spacing: 4px;
-                    Text { text: "\u{1F509}"; font-size: 10px; vertical-alignment: center; color: status-fg; }
+                    Text { text: "\u{F027}"; font-size: root.status-font-size; vertical-alignment: center; color: status-fg; }
                     Slider {
                         minimum: 0;
                         maximum: 100;
-                        value: 80;
+                        value: 50;
                         changed => { root.volume-changed(self.value / 100.0); }
                     }
-                    Text { text: "\u{1F50A}"; font-size: 10px; vertical-alignment: center; color: status-fg; }
+                    Text { text: "\u{F028}"; font-size: root.status-font-size; vertical-alignment: center; color: status-fg; }
                 }
 
                 // ---- History ----
-                Text { text: root.history-text; font-size: 10px; color: status-fg; horizontal-alignment: right; height: 14px; }
+                Text { text: root.history-text; font-size: root.status-font-size; color: status-fg; horizontal-alignment: right; height: 18px; }
 
                 // ---- LCD Display ----
                 Rectangle {
-                    height: 64px;
-                    border-radius: 5px;
+                    height: 80px;
+                    border-radius: 12px;
                     background: lcd-frame;
                     border-width: 2px;
                     border-color: lcd-frame;
@@ -272,7 +264,7 @@ export component CalculatorWindow inherits Window {
 
                         Text {
                             text: root.display-text;
-                            font-size: root.error-state ? 16px : 28px;
+                            font-size: root.error-state ? root.status-font-size : root.lcd-font-size;
                             font-weight: 600;
                             color: root.error-state ? lcd-error-fg : lcd-fg;
                             horizontal-alignment: right;
@@ -291,70 +283,75 @@ export component CalculatorWindow inherits Window {
 
                     // Row: MC  MR  M-  M+
                     Row {
-                        SkeuBtn { label: "MC"; base: btn-func; fg: btn-func-fg; font-size: 10px; clicked => { root.memory-clear(); } }
-                        SkeuBtn { label: "MR"; base: btn-func; fg: btn-func-fg; font-size: 10px; clicked => { root.memory-recall(); } }
-                        SkeuBtn { label: "M-"; base: btn-func; fg: btn-func-fg; font-size: 10px; clicked => { root.memory-subtract(); } }
-                        SkeuBtn { label: "M+"; base: btn-func; fg: btn-func-fg; font-size: 10px; clicked => { root.memory-add(); } }
+                        SkeuBtn { label: "MC"; base: btn-func; fg: btn-func-fg; font-size: root.btn-font-size; clicked => { root.memory-clear(); } }
+                        SkeuBtn { label: "MR"; base: btn-func; fg: btn-func-fg; font-size: root.btn-font-size; clicked => { root.memory-recall(); } }
+                        SkeuBtn { label: "M-"; base: btn-func; fg: btn-func-fg; font-size: root.btn-font-size; clicked => { root.memory-subtract(); } }
+                        SkeuBtn { label: "M+"; base: btn-func; fg: btn-func-fg; font-size: root.btn-font-size; clicked => { root.memory-add(); } }
                     }
 
                     // Row: %  √  MU (span 2)
                     Row {
-                        SkeuBtn { label: "%"; base: btn-func; fg: btn-func-fg; font-size: 12px; clicked => { root.percent(); } }
-                        SkeuBtn { label: "\u{221A}"; base: btn-func; fg: btn-func-fg; font-size: 12px; clicked => { root.square-root(); } }
-                        SkeuBtn { colspan: 2; label: "MU"; base: btn-func; fg: btn-func-fg; font-size: 10px; clicked => { root.mu(); } }
+                        SkeuBtn { label: "%"; base: btn-func; fg: btn-func-fg; font-size: root.btn-font-size; clicked => { root.percent(); } }
+                        SkeuBtn { label: "\u{221A}"; base: btn-func; fg: btn-func-fg; font-size: root.btn-font-size; clicked => { root.square-root(); } }
+                        SkeuBtn { colspan: 2; label: "MU"; base: btn-func; fg: btn-func-fg; font-size: root.btn-font-size; clicked => { root.mu(); } }
                     }
 
                     // Row: AC  C  ⌫  ÷
                     Row {
-                        SkeuBtn { label: "AC"; base: btn-clear; fg: btn-clear-fg; font-size: 12px; clicked => { root.all-clear(); } }
-                        SkeuBtn { label: "C"; base: btn-ci; fg: btn-ci-fg; font-size: 12px; clicked => { root.clear-input(); } }
-                        // Backspace with Path icon
+                        SkeuBtn { label: "AC"; base: btn-clear; fg: btn-clear-fg; font-size: root.btn-font-size; clicked => { root.all-clear(); } }
+                        SkeuBtn { label: "C"; base: btn-ci; fg: btn-ci-fg; font-size: root.btn-font-size; clicked => { root.clear-input(); } }
+                        // Backspace button (Nerd Font glyph)
                         Rectangle {
-                            border-radius: 5px;
+                            border-radius: 16px;
                             background: bsta.pressed ? btn-bs.darker(12%) : bsta.has-hover ? btn-bs.darker(3%) : btn-bs;
                             border-width: 1px;
                             border-color: btn-bs.darker(18%);
                             Rectangle { x: 1px; y: 1px; width: parent.width - 2px; height: 2px; background: btn-bs.brighter(40%); border-radius: 4px; }
                             bsta := TouchArea { clicked => { root.backspace(); } }
-                            BackspaceIcon {
-                                icon-color: btn-bs-fg;
+                            Text {
+                                text: "\u{232B}";
+                                font-size: root.btn-font-size;
+                                font-weight: 700;
+                                color: btn-bs-fg;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
                                 x: (parent.width - self.width) / 2;
                                 y: (parent.height - self.height) / 2;
                             }
                         }
-                        SkeuBtn { label: "\u{00F7}"; base: btn-op; fg: btn-op-fg; font-size: 16px; clicked => { root.operator-pressed("/"); } }
+                        SkeuBtn { label: "\u{00F7}"; base: btn-op; fg: btn-op-fg; font-size: root.btn-font-size; clicked => { root.operator-pressed("/"); } }
                     }
 
                     // Row: 7  8  9  ×
                     Row {
-                        SkeuBtn { label: "7"; base: btn-digit; fg: btn-digit-fg; clicked => { root.digit-pressed(7); } }
-                        SkeuBtn { label: "8"; base: btn-digit; fg: btn-digit-fg; clicked => { root.digit-pressed(8); } }
-                        SkeuBtn { label: "9"; base: btn-digit; fg: btn-digit-fg; clicked => { root.digit-pressed(9); } }
-                        SkeuBtn { label: "\u{00D7}"; base: btn-op; fg: btn-op-fg; font-size: 16px; clicked => { root.operator-pressed("*"); } }
+                        SkeuBtn { label: "7"; base: btn-digit; fg: btn-digit-fg; font-size: root.btn-font-size; clicked => { root.digit-pressed(7); } }
+                        SkeuBtn { label: "8"; base: btn-digit; fg: btn-digit-fg; font-size: root.btn-font-size; clicked => { root.digit-pressed(8); } }
+                        SkeuBtn { label: "9"; base: btn-digit; fg: btn-digit-fg; font-size: root.btn-font-size; clicked => { root.digit-pressed(9); } }
+                        SkeuBtn { label: "\u{00D7}"; base: btn-op; fg: btn-op-fg; font-size: root.btn-font-size; clicked => { root.operator-pressed("*"); } }
                     }
 
                     // Row: 4  5  6  -
                     Row {
-                        SkeuBtn { label: "4"; base: btn-digit; fg: btn-digit-fg; clicked => { root.digit-pressed(4); } }
-                        SkeuBtn { label: "5"; base: btn-digit; fg: btn-digit-fg; clicked => { root.digit-pressed(5); } }
-                        SkeuBtn { label: "6"; base: btn-digit; fg: btn-digit-fg; clicked => { root.digit-pressed(6); } }
-                        SkeuBtn { label: "-"; base: btn-op; fg: btn-op-fg; font-size: 16px; clicked => { root.operator-pressed("-"); } }
+                        SkeuBtn { label: "4"; base: btn-digit; fg: btn-digit-fg; font-size: root.btn-font-size; clicked => { root.digit-pressed(4); } }
+                        SkeuBtn { label: "5"; base: btn-digit; fg: btn-digit-fg; font-size: root.btn-font-size; clicked => { root.digit-pressed(5); } }
+                        SkeuBtn { label: "6"; base: btn-digit; fg: btn-digit-fg; font-size: root.btn-font-size; clicked => { root.digit-pressed(6); } }
+                        SkeuBtn { label: "-"; base: btn-op; fg: btn-op-fg; font-size: root.btn-font-size; clicked => { root.operator-pressed("-"); } }
                     }
 
                     // Row: 1  2  3  +
                     Row {
-                        SkeuBtn { label: "1"; base: btn-digit; fg: btn-digit-fg; clicked => { root.digit-pressed(1); } }
-                        SkeuBtn { label: "2"; base: btn-digit; fg: btn-digit-fg; clicked => { root.digit-pressed(2); } }
-                        SkeuBtn { label: "3"; base: btn-digit; fg: btn-digit-fg; clicked => { root.digit-pressed(3); } }
-                        SkeuBtn { label: "+"; base: btn-op; fg: btn-op-fg; font-size: 16px; clicked => { root.operator-pressed("+"); } }
+                        SkeuBtn { label: "1"; base: btn-digit; fg: btn-digit-fg; font-size: root.btn-font-size; clicked => { root.digit-pressed(1); } }
+                        SkeuBtn { label: "2"; base: btn-digit; fg: btn-digit-fg; font-size: root.btn-font-size; clicked => { root.digit-pressed(2); } }
+                        SkeuBtn { label: "3"; base: btn-digit; fg: btn-digit-fg; font-size: root.btn-font-size; clicked => { root.digit-pressed(3); } }
+                        SkeuBtn { label: "+"; base: btn-op; fg: btn-op-fg; font-size: root.btn-font-size; clicked => { root.operator-pressed("+"); } }
                     }
 
                     // Row: ±  0  .  =
                     Row {
-                        SkeuBtn { label: "\u{00B1}"; base: btn-func; fg: btn-func-fg; font-size: 14px; clicked => { root.plus-minus(); } }
-                        SkeuBtn { label: "0"; base: btn-digit; fg: btn-digit-fg; clicked => { root.digit-pressed(0); } }
-                        SkeuBtn { label: "."; base: btn-digit; fg: btn-digit-fg; font-size: 16px; clicked => { root.decimal-point(); } }
-                        SkeuBtn { label: "="; base: btn-eq; fg: btn-eq-fg; font-size: 16px; clicked => { root.equals(); } }
+                        SkeuBtn { label: "\u{00B1}"; base: btn-func; fg: btn-func-fg; font-size: root.btn-font-size; clicked => { root.plus-minus(); } }
+                        SkeuBtn { label: "0"; base: btn-digit; fg: btn-digit-fg; font-size: root.btn-font-size; clicked => { root.digit-pressed(0); } }
+                        SkeuBtn { label: "."; base: btn-digit; fg: btn-digit-fg; font-size: root.btn-font-size; clicked => { root.decimal-point(); } }
+                        SkeuBtn { label: "="; base: btn-eq; fg: btn-eq-fg; font-size: root.btn-font-size; clicked => { root.equals(); } }
                     }
                 }
             }
