@@ -1,4 +1,6 @@
 import { VerticalBox, Slider } from "std-widgets.slint";
+import "../resource/fonts/NotoSansSC-Regular.otf";
+import "../resource/fonts/JetBrainsMonoNerdFont-Regular.ttf";
 
 // =====================================================================
 // Skeuomorphic Calculator – GridLayout-based adaptive layout
@@ -16,21 +18,15 @@ component SkeuBtn inherits Rectangle {
     // Scaling border-radius: ~28% of the shorter side, preserves roundness at any size
     border-radius: Math.min(self.width, self.height) * 0.28;
     border-width: 1px;
-    border-color: ta.pressed ? base.darker(30%) : base.darker(18%);
-    background: ta.pressed
-        ? base.darker(12%)
-        : ta.has-hover
-            ? base.darker(3%)
-            : base;
+    border-color: ta.pressed ? base.darker(40%) : base.darker(25%);
 
-    // Top highlight edge (simulates light from above)
-    Rectangle {
-        x: 1px; y: 1px;
-        width: parent.width - 2px;
-        height: 2px;
-        background: ta.pressed ? transparent : base.brighter(40%);
-        border-radius: Math.min(parent.width, parent.height) * 0.28;
-    }
+    // Convex bevel via linear gradient: lighter top, darker bottom.
+    // No child elements needed — the gradient follows the rounded outline naturally.
+    background: ta.pressed
+        ? base.darker(15%)
+        : ta.has-hover
+            ? @linear-gradient(180deg, base.brighter(12%) 0%, base 40%, base.darker(8%) 100%)
+            : @linear-gradient(180deg, base.brighter(18%) 0%, base.brighter(3%) 35%, base.darker(5%) 100%);
 
     ta := TouchArea { clicked => { root.clicked(); } }
 
@@ -46,30 +42,45 @@ component SkeuBtn inherits Rectangle {
 
 // ---- About Dialog ----
 export component AboutDialog inherits Dialog {
-    title: "About";
+    title: "关于";
     preferred-width: 320px;
     preferred-height: 200px;
     VerticalBox {
-        Text { text: "Vocal Calculator v0.1.0"; font-size: 16px; font-weight: 700; horizontal-alignment: center; }
-        Text { text: "UI: Slint | Audio: kira | Numerics: rust_decimal"; font-size: 11px; horizontal-alignment: center; color: #666; wrap: word-wrap; }
-        Text { text: "Slint Community License"; font-size: 10px; horizontal-alignment: center; color: #999; }
+        Text { text: "语音计算器 v0.1.0"; font-size: 16px; font-weight: 700; horizontal-alignment: center; }
+        Text { text: "界面: Slint | 音频: kira | 精度: rust_decimal"; font-size: 11px; horizontal-alignment: center; color: #666; wrap: word-wrap; }
+        Text { text: "Slint 社区许可证"; font-size: 10px; horizontal-alignment: center; color: #999; }
     }
 }
 
 // ---- Main calculator window ----
 export component CalculatorWindow inherits Window {
-    default-font-family: "JetBrainsMono Nerd Font";
+    default-font-family: "Noto Sans SC";
     preferred-width: 380px;
     preferred-height: 700px;
-    min-width: 300px;
-    min-height: 520px;
-    title: "Vocal Calculator";
+    min-width: 260px;
+    min-height: 460px;
+    title: "语音计算器";
 
-    // Scalable font sizes derived from window height (external, no layout loop)
-    property <length> btn-font-size: Math.max(14px, self.height * 0.025);
-    property <length> lcd-font-size: Math.max(20px, self.height * 0.04);
-    property <length> status-font-size: Math.max(12px, self.height * 0.022);
-    property <length> icon-font-size: Math.max(16px, self.height * 0.03);
+    // ---- Scalable font sizes (derived from window height, with floor) ----
+    property <length> btn-font-size: Math.max(12px, self.height * 0.025);
+    property <length> lcd-font-size: Math.max(16px, self.height * 0.04);
+    property <length> status-font-size: Math.max(10px, self.height * 0.022);
+    property <length> icon-font-size: Math.max(20px, self.height * 0.04);
+    property <length> brand-font-size: Math.max(10px, self.height * 0.02);
+
+    // ---- Scalable layout dimensions (all proportional to window height) ----
+    property <length> body-margin: Math.max(4px, self.height * 0.014);
+    property <length> inner-margin: Math.max(2px, self.height * 0.004);
+    property <length> solar-h: Math.max(4px, self.height * 0.014);
+    property <length> brand-h: Math.max(8px, self.height * 0.023);
+    property <length> status-h: Math.max(24px, self.height * 0.055);
+    property <length> icon-sz: Math.max(36px, self.height * 0.075);
+    property <length> status-icon-sz: Math.max(18px, self.height * 0.035);
+    property <length> volume-h: Math.max(20px, self.height * 0.045);
+    property <length> history-h: Math.max(10px, self.height * 0.022);
+    property <length> lcd-h: Math.max(40px, self.height * 0.1);
+    property <length> layout-spacing: Math.max(2px, self.height * 0.005);
+    property <length> layout-padding: Math.max(4px, self.height * 0.011);
 
     // Theme
     in-out property <bool> dark-mode: false;
@@ -78,7 +89,7 @@ export component CalculatorWindow inherits Window {
     // Data properties
     in property <string> display-text: "0";
     in property <string> memory-indicator: "";
-    in property <string> mode-indicator: "Normal";
+    in property <string> mode-indicator: "普通";
     in property <bool> error-state: false;
     in property <string> history-text: "";
     in property <string> audio-status: "";
@@ -137,9 +148,9 @@ export component CalculatorWindow inherits Window {
     // Body
     // =================================================================
     Rectangle {
-        x: 10px; y: 10px;
-        width: parent.width - 20px;
-        height: parent.height - 20px;
+        x: root.body-margin; y: root.body-margin;
+        width: parent.width - 2 * root.body-margin;
+        height: parent.height - 2 * root.body-margin;
         // Scaling body radius
         property <length> body-r: Math.min(self.width, self.height) * 0.03;
         border-radius: self.body-r;
@@ -149,22 +160,22 @@ export component CalculatorWindow inherits Window {
 
         // Inner bevel
         Rectangle {
-            x: 3px; y: 3px;
-            width: parent.width - 6px;
-            height: parent.height - 6px;
-            border-radius: Math.max(0px, parent.body-r - 3px);
+            x: root.inner-margin; y: root.inner-margin;
+            width: parent.width - 2 * root.inner-margin;
+            height: parent.height - 2 * root.inner-margin;
+            border-radius: Math.max(0px, parent.body-r - root.inner-margin);
             background: body-inner;
             border-width: 1px;
             border-color: dark-mode ? #1a1a20 : #b8b2ac;
 
             VerticalLayout {
-                padding: 8px;
-                spacing: 4px;
+                padding: root.layout-padding;
+                spacing: root.layout-spacing;
 
                 // ---- Solar panel strip ----
                 Rectangle {
-                    height: 10px;
-                    border-radius: 2px;
+                    height: root.solar-h;
+                    border-radius: Math.max(1px, root.solar-h * 0.2);
                     background: solar-fill;
                     HorizontalLayout {
                         padding: 1px;
@@ -182,34 +193,35 @@ export component CalculatorWindow inherits Window {
 
                 // ---- Brand label ----
                 Text {
-                    text: "AR7778  VOCAL CALC";
-                    font-size: 14px;
+                    text: "AR7778  语音计算器";
+                    font-size: root.brand-font-size;
                     font-weight: 700;
                     color: dark-mode ? #505060 : #8a8480;
                     horizontal-alignment: left;
                     letter-spacing: 1px;
-                    height: 16px;
+                    height: root.brand-h;
                 }
 
                 // ---- Status bar ----
                 HorizontalLayout {
-                    height: 44px;
-                    spacing: 4px;
+                    height: root.status-h;
+                    spacing: root.layout-spacing;
+                    padding: 4px;
                     Text { text: root.memory-indicator; font-size: root.status-font-size; color: btn-memory; font-weight: 700; vertical-alignment: center; }
                     Rectangle { horizontal-stretch: 1; }
                     Text { text: root.audio-status; font-size: root.status-font-size; color: status-fg; vertical-alignment: center; }
-                    Text { text: " "; font-size: 8px; vertical-alignment: center; }
+                    Text { text: " "; font-size: Math.max(6px, root.status-font-size * 0.5); vertical-alignment: center; }
                     Text { text: root.mode-indicator; font-size: root.status-font-size; color: status-fg; vertical-alignment: center; }
 
                     // Theme toggle
                     Rectangle {
-                        width: 44px; height: 44px;
+                        width: root.status-icon-sz; height: root.status-icon-sz;
                         border-radius: Math.min(self.width, self.height) * 0.2;
                         background: tt.has-hover ? status-hover : transparent;
                         tt := TouchArea { clicked => { root.toggle-theme(); } }
                         Text {
                             text: root.dark-mode ? "\u{F185}" : "\u{F186}";
-                            font-size: root.icon-font-size;
+                            font-size: root.status-font-size;
                             horizontal-alignment: center;
                             vertical-alignment: center;
                             color: status-fg;
@@ -217,26 +229,26 @@ export component CalculatorWindow inherits Window {
                     }
                     // Audio mode
                     Rectangle {
-                        width: 44px; height: 44px;
+                        width: root.status-icon-sz; height: root.status-icon-sz;
                         border-radius: Math.min(self.width, self.height) * 0.2;
                         background: mt.has-hover ? status-hover : transparent;
                         mt := TouchArea { clicked => { root.switch-audio-mode(); } }
-                        Text { text: "\u{F001}"; font-size: root.icon-font-size; horizontal-alignment: center; vertical-alignment: center; color: status-fg; }
+                        Text { text: "\u{F001}"; font-size: root.status-font-size; horizontal-alignment: center; vertical-alignment: center; color: status-fg; }
                     }
                     // About
                     Rectangle {
-                        width: 44px; height: 44px;
+                        width: root.status-icon-sz; height: root.status-icon-sz;
                         border-radius: Math.min(self.width, self.height) * 0.2;
                         background: at.has-hover ? status-hover : transparent;
                         at := TouchArea { clicked => { root.show-about(); } }
-                        Text { text: "\u{F05A}"; font-size: root.icon-font-size; horizontal-alignment: center; vertical-alignment: center; color: status-fg; }
+                        Text { text: "\u{F05A}"; font-size: root.status-font-size; horizontal-alignment: center; vertical-alignment: center; color: status-fg; }
                     }
                 }
 
                 // ---- Volume slider ----
                 HorizontalLayout {
-                    height: 36px;
-                    spacing: 4px;
+                    height: root.volume-h;
+                    spacing: root.layout-spacing;
                     Text { text: "\u{F027}"; font-size: root.status-font-size; vertical-alignment: center; color: status-fg; }
                     Slider {
                         minimum: 0;
@@ -248,11 +260,11 @@ export component CalculatorWindow inherits Window {
                 }
 
                 // ---- History ----
-                Text { text: root.history-text; font-size: root.status-font-size; color: status-fg; horizontal-alignment: right; height: 18px; }
+                Text { text: root.history-text; font-size: root.status-font-size; color: status-fg; horizontal-alignment: right; height: root.history-h; }
 
                 // ---- LCD Display ----
                 Rectangle {
-                    height: 80px;
+                    height: root.lcd-h;
                     property <length> lcd-r: Math.min(self.width, self.height) * 0.15;
                     border-radius: self.lcd-r;
                     background: lcd-frame;
@@ -273,8 +285,8 @@ export component CalculatorWindow inherits Window {
                             color: root.error-state ? lcd-error-fg : lcd-fg;
                             horizontal-alignment: right;
                             vertical-alignment: center;
-                            x: 10px;
-                            width: parent.width - 20px;
+                            x: Math.max(4px, root.layout-padding * 0.6);
+                            width: parent.width - 2 * Math.max(4px, root.layout-padding * 0.6);
                             overflow: elide;
                         }
                     }
@@ -282,7 +294,7 @@ export component CalculatorWindow inherits Window {
 
                 // ---- Button grid (GridLayout for adaptive sizing) ----
                 GridLayout {
-                    spacing: 4px;
+                    spacing: root.layout-spacing;
                     vertical-stretch: 1;
 
                     // Row: MC  MR  M-  M+
@@ -307,10 +319,13 @@ export component CalculatorWindow inherits Window {
                         // Backspace button (Nerd Font glyph)
                         Rectangle {
                             border-radius: Math.min(self.width, self.height) * 0.28;
-                            background: bsta.pressed ? btn-bs.darker(12%) : bsta.has-hover ? btn-bs.darker(3%) : btn-bs;
                             border-width: 1px;
-                            border-color: btn-bs.darker(18%);
-                            Rectangle { x: 1px; y: 1px; width: parent.width - 2px; height: 2px; background: btn-bs.brighter(40%); border-radius: Math.min(parent.width, parent.height) * 0.28; }
+                            border-color: bsta.pressed ? btn-bs.darker(40%) : btn-bs.darker(25%);
+                            background: bsta.pressed
+                                ? btn-bs.darker(15%)
+                                : bsta.has-hover
+                                    ? @linear-gradient(180deg, btn-bs.brighter(12%) 0%, btn-bs 40%, btn-bs.darker(8%) 100%)
+                                    : @linear-gradient(180deg, btn-bs.brighter(18%) 0%, btn-bs.brighter(3%) 35%, btn-bs.darker(5%) 100%);
                             bsta := TouchArea { clicked => { root.backspace(); } }
                             Text {
                                 text: "\u{232B}";

@@ -31,9 +31,9 @@ pub enum CalcError {
 impl std::fmt::Display for CalcError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::DivideByZero => write!(f, "Cannot divide by zero"),
-            Self::NegativeSquareRoot => write!(f, "Invalid input"),
-            Self::Overflow => write!(f, "Overflow"),
+            Self::DivideByZero => write!(f, "不能除以零"),
+            Self::NegativeSquareRoot => write!(f, "输入无效"),
+            Self::Overflow => write!(f, "溢出"),
         }
     }
 }

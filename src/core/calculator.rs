@@ -79,7 +79,7 @@ impl Calculator {
 
     fn result(&self, events: Vec<VocalEvent>) -> CalcResult {
         let display = if self.state == State::Error {
-            "Error".to_string()
+            "错误".to_string()
         } else if self.input.is_empty() {
             if self.state == State::Idle {
                 "0".to_string()
@@ -543,14 +543,14 @@ mod tests {
     fn divide_by_zero() {
         let mut c = Calculator::new();
         let r = display(&mut c, &["5", "/", "0", "="]);
-        assert_eq!(r, "Error");
+        assert_eq!(r, "错误");
     }
 
     #[test]
     fn sqrt_negative() {
         let mut c = Calculator::new();
         let r = display(&mut c, &["9", "+-", "sqrt"]);
-        assert_eq!(r, "Error");
+        assert_eq!(r, "错误");
     }
 
     #[test]

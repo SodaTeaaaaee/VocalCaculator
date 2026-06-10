@@ -3,9 +3,11 @@ pub mod music;
 pub mod normal;
 pub mod registry;
 
+use std::time::Duration;
+
 use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle};
 use kira::track::{TrackBuilder, TrackHandle};
-use kira::{AudioManager, AudioManagerSettings, DefaultBackend, Decibels, Tween};
+use kira::{AudioManager, AudioManagerSettings, DefaultBackend, Decibels, Easing, StartTime, Tween};
 use music::MusicTones;
 
 use crate::core::token::VocalEvent;
@@ -21,10 +23,10 @@ pub enum AudioMode {
 impl AudioMode {
     pub fn name(self) -> &'static str {
         match self {
-            Self::Normal => "Normal",
-            Self::Broken => "Broken",
-            Self::Music => "Music",
-            Self::Silent => "Silent",
+            Self::Normal => "普通",
+            Self::Broken => "搞怪",
+            Self::Music => "音乐",
+            Self::Silent => "静音",
         }
     }
     pub fn next(self) -> Self {
@@ -45,6 +47,15 @@ fn slider_to_decibels(slider: f64) -> Decibels {
         // Perceptually correct volume curve: 20*log10(amplitude)
         // 0.5 → -6dB (50% amplitude), 0.1 → -20dB, 1.0 → 0dB
         Decibels(20.0 * (slider as f32).log10())
+    }
+}
+
+/// Instant stop tween — zero duration, no fade, no overlap with the next sound.
+fn instant_stop_tween() -> Tween {
+    Tween {
+        start_time: StartTime::Immediate,
+        duration: Duration::from_millis(0),
+        easing: Easing::Linear,
     }
 }
 
@@ -133,8 +144,9 @@ impl VocalAudio {
         if self.mode == AudioMode::Silent {
             return;
         }
+        // Interrupt any currently playing sound instantly (no fade overlap).
         if let Some(ref mut handle) = self.current_handle {
-            handle.stop(Tween::default());
+            handle.stop(instant_stop_tween());
         }
         self.current_handle = None;
         match self.mode {

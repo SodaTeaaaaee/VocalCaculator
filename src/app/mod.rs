@@ -22,9 +22,9 @@ impl App {
         let (audio, status) = match VocalAudio::new() {
             Some(a) => {
                 let n = a.sound_count();
-                (Some(a), format!("Audio OK ({n} sounds)"))
+                (Some(a), format!("音频正常 ({n} 个音效)"))
             }
-            None => (None, "No audio device".to_string()),
+            None => (None, "无音频设备".to_string()),
         };
         let calculator = Calculator::new();
         let app = Self {
@@ -47,9 +47,9 @@ impl App {
         let audio_ref = Rc::new(RefCell::new(self.audio.take()));
 
         w.set_display_text("0".into());
-        w.set_mode_indicator("Normal".into());
+        w.set_mode_indicator("普通".into());
         if audio_ref.borrow().is_none() {
-            w.set_audio_status("No audio device".into());
+            w.set_audio_status("无音频设备".into());
         }
 
         // Helper closure macro to reduce boilerplate
