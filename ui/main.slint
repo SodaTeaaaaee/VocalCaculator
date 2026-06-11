@@ -40,6 +40,15 @@ component SkeuBtn inherits Rectangle {
     }
 }
 
+// ---- Peer info for network overlay ----
+struct PeerInfoSlint {
+    name: string,
+    address: string,
+    is-connected: bool,
+    latency-ms: int,
+    index: int,
+}
+
 // ---- About Dialog ----
 export component AboutDialog inherits Dialog {
     title: "关于";
@@ -94,6 +103,16 @@ export component CalculatorWindow inherits Window {
     in property <string> history-text: "";
     in property <string> audio-status: "";
 
+    // Network status (Phase 5)
+    in property <string> network-status: "";
+    in property <bool> remote-controlled: false;
+    in property <bool> executing-remotely: false;
+    in property <string> connection-info: "";
+    in property <bool> network-panel-visible: false;
+    in property <[PeerInfoSlint]> peers;
+    in property <int> connected-peer-index: -1;
+    in property <bool> scanning: false;
+
     // ---- Skeuomorphic color palette ----
     property <brush> body-fill: dark-mode ? #2a2a30 : #c0bab4;
     property <brush> body-edge: dark-mode ? #3a3a42 : #a8a29c;
@@ -143,6 +162,11 @@ export component CalculatorWindow inherits Window {
     callback show-about();
     callback toggle-theme();
     callback volume-changed(float);
+    callback show-network-settings();
+    callback close-network-settings();
+    callback connect-to-peer(int);
+    callback disconnect-peer(int);
+    callback scan-peers();
 
     // =================================================================
     // Body
@@ -156,7 +180,9 @@ export component CalculatorWindow inherits Window {
         border-radius: self.body-r;
         background: body-fill;
         border-width: 2px;
-        border-color: body-edge;
+        border-color: root.executing-remotely ? #40c040 : root.remote-controlled ? #4080ff : body-edge;
+        drop-shadow-color: root.executing-remotely ? #40c04080 : root.remote-controlled ? #4080ff80 : transparent;
+        drop-shadow-blur: root.remote-controlled || root.executing-remotely ? 8px : 0px;
 
         // Inner bevel
         Rectangle {
@@ -243,6 +269,22 @@ export component CalculatorWindow inherits Window {
                         background: at.has-hover ? status-hover : transparent;
                         at := TouchArea { clicked => { root.show-about(); } }
                         Text { text: "\u{F05A}"; font-family: "JetBrainsMono Nerd Font"; font-size: root.status-font-size; horizontal-alignment: center; vertical-alignment: center; color: status-fg; }
+                    }
+                    // Network status indicator (clickable -> opens settings)
+                    Rectangle {
+                        width: root.status-icon-sz; height: root.status-icon-sz;
+                        border-radius: Math.min(self.width, self.height) * 0.2;
+                        background: nt.has-hover ? status-hover : transparent;
+                        opacity: root.network-status != "" ? 1.0 : 0.3;
+                        nt := TouchArea { clicked => { root.show-network-settings(); } }
+                        Text {
+                            text: root.executing-remotely ? "\u{F0E7}" : root.remote-controlled ? "\u{F0AC}" : "\u{F0C2}";
+                            font-family: "JetBrainsMono Nerd Font";
+                            font-size: root.status-font-size;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            color: root.executing-remotely ? #ffa500 : root.remote-controlled ? #40c040 : status-fg;
+                        }
                     }
                 }
 
@@ -372,6 +414,271 @@ export component CalculatorWindow inherits Window {
                         SkeuBtn { label: "0"; base: btn-digit; fg: btn-digit-fg; font-size: root.btn-font-size; clicked => { root.digit-pressed(0); } }
                         SkeuBtn { label: "."; base: btn-digit; fg: btn-digit-fg; font-size: root.btn-font-size; clicked => { root.decimal-point(); } }
                         SkeuBtn { label: "="; base: btn-eq; fg: btn-eq-fg; font-size: root.btn-font-size; clicked => { root.equals(); } }
+                    }
+                }
+            }
+
+            // =============================================================
+            // Network Settings Overlay
+            // =============================================================
+            if root.network-panel-visible: Rectangle {
+                x: 0; y: 0;
+                width: parent.width;
+                height: parent.height;
+                background: dark-mode ? #1a1a1ecc : #c0bab4cc;
+                border-radius: parent.border-radius;
+
+                // Semi-transparent backdrop touch catcher
+                backdrop := TouchArea { clicked => { } }
+
+                // Card
+                Rectangle {
+                    x: root.layout-padding * 2;
+                    y: root.layout-padding * 2;
+                    width: parent.width - root.layout-padding * 4;
+                    height: parent.height - root.layout-padding * 4;
+                    property <length> card-r: Math.min(self.width, self.height) * 0.04;
+                    border-radius: self.card-r;
+                    background: body-fill;
+                    border-width: 1px;
+                    border-color: body-edge;
+
+                    // Inner bevel for card
+                    Rectangle {
+                        x: 2px; y: 2px;
+                        width: parent.width - 4px;
+                        height: parent.height - 4px;
+                        border-radius: Math.max(0px, parent.card-r - 2px);
+                        background: body-inner;
+                        border-width: 1px;
+                        border-color: dark-mode ? #1a1a20 : #b8b2ac;
+
+                        VerticalLayout {
+                            padding: root.layout-padding;
+                            spacing: root.layout-spacing;
+
+                            // Title bar with close button
+                            HorizontalLayout {
+                                height: root.status-h;
+                                spacing: root.layout-spacing;
+                                Text {
+                                    text: "\u{F0AC} 网络设置";
+                                    font-family: "JetBrainsMono Nerd Font";
+                                    font-size: Math.max(12px, root.status-font-size * 1.3);
+                                    font-weight: 700;
+                                    color: dark-mode ? #d0d0d0 : #2a2a2a;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                }
+                                // Close button
+                                Rectangle {
+                                    width: root.status-icon-sz;
+                                    height: root.status-icon-sz;
+                                    border-radius: Math.min(self.width, self.height) * 0.2;
+                                    background: close-ta.has-hover ? status-hover : transparent;
+                                    close-ta := TouchArea { clicked => { root.close-network-settings(); } }
+                                    Text {
+                                        text: "\u{F00D}";
+                                        font-family: "JetBrainsMono Nerd Font";
+                                        font-size: root.status-font-size;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                        color: status-fg;
+                                    }
+                                }
+                            }
+
+                            // Connection status
+                            Rectangle {
+                                height: root.status-h;
+                                border-radius: Math.min(self.width, self.height) * 0.15;
+                                background: dark-mode ? #222228 : #d4cec8;
+                                border-width: 1px;
+                                border-color: dark-mode ? #3a3a42 : #b8b2ac;
+                                HorizontalLayout {
+                                    padding: root.layout-padding;
+                                    Text {
+                                        text: root.network-status != "" ? root.network-status : "未连接";
+                                        font-size: root.status-font-size;
+                                        color: root.network-status != "" ? (root.executing-remotely ? #40c040 : root.remote-controlled ? #4080ff : status-fg) : (dark-mode ? #808090 : #706860);
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1;
+                                    }
+                                }
+                            }
+
+                            // Connection info (if any)
+                            if root.connection-info != "": Rectangle {
+                                height: root.status-h;
+                                border-radius: Math.min(self.width, self.height) * 0.15;
+                                background: dark-mode ? #222228 : #d4cec8;
+                                border-width: 1px;
+                                border-color: dark-mode ? #3a3a42 : #b8b2ac;
+                                HorizontalLayout {
+                                    padding: root.layout-padding;
+                                    Text {
+                                        text: root.connection-info;
+                                        font-size: root.status-font-size;
+                                        color: status-fg;
+                                        vertical-alignment: center;
+                                        wrap: word-wrap;
+                                    }
+                                }
+                            }
+
+                            // Peer list label + scan button
+                            Rectangle {
+                                height: root.status-h;
+                                HorizontalLayout {
+                                    padding: 2px;
+                                    spacing: 4px;
+                                    Text {
+                                        text: root.scanning ? "扫描中..." : "已连接节点";
+                                        font-size: root.status-font-size;
+                                        font-weight: 600;
+                                        color: dark-mode ? #a0a0a0 : #4a4a4a;
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1;
+                                    }
+                                    SkeuBtn {
+                                        label: "扫描";
+                                        base: dark-mode ? #3a4a3a : #c8d8c8;
+                                        fg: dark-mode ? #a0c0a0 : #2a4a2a;
+                                        font-size: Math.max(9px, root.status-font-size * 0.9);
+                                        width: 56px;
+                                        clicked => { root.scan-peers(); }
+                                    }
+                                }
+                            }
+
+                            // Peer list (scrollable, populated from Rust)
+                            Rectangle {
+                                vertical-stretch: 1;
+                                border-radius: Math.min(self.width, self.height) * 0.02;
+                                background: dark-mode ? #1a1a20 : #e0dcd8;
+                                border-width: 1px;
+                                border-color: dark-mode ? #3a3a42 : #b8b2ac;
+                                clip: true;
+
+                                // Empty state
+                                if root.peers.length == 0: VerticalLayout {
+                                    padding: root.layout-padding;
+                                    Text {
+                                        text: "暂无节点连接";
+                                        font-size: root.status-font-size;
+                                        color: dark-mode ? #606070 : #908880;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                // Peer list
+                                if root.peers.length > 0: Flickable {
+                                    VerticalLayout {
+                                        padding: root.layout-padding;
+                                        spacing: 4px;
+
+                                        for peer[i] in root.peers: Rectangle {
+                                            height: 48px;
+                                            border-radius: Math.min(self.width, self.height) * 0.15;
+                                            background: peer.is-connected
+                                                ? (dark-mode ? #1a3020 : #d8eed8)
+                                                : (dark-mode ? #222228 : #ece8e4);
+                                            border-width: 1px;
+                                            border-color: peer.is-connected
+                                                ? (dark-mode ? #2a5030 : #a0c8a0)
+                                                : (dark-mode ? #3a3a42 : #d0ccc8);
+
+                                            HorizontalLayout {
+                                                padding: 8px;
+                                                spacing: 8px;
+
+                                                // Device icon (Nerd Font)
+                                                Text {
+                                                    text: peer.is-connected ? "\u{F0E7}" : "\u{F108}";
+                                                    font-family: "JetBrainsMono Nerd Font";
+                                                    font-size: Math.max(14px, root.status-font-size * 1.3);
+                                                    color: peer.is-connected
+                                                        ? (dark-mode ? #40c040 : #208020)
+                                                        : (dark-mode ? #606070 : #908880);
+                                                    vertical-alignment: center;
+                                                    width: 24px;
+                                                }
+
+                                                // Name and address
+                                                VerticalLayout {
+                                                    horizontal-stretch: 1;
+                                                    spacing: 2px;
+                                                    alignment: center;
+                                                    Text {
+                                                        text: peer.name;
+                                                        font-size: root.status-font-size;
+                                                        font-weight: 600;
+                                                        color: dark-mode ? #d0d0d0 : #2a2a2a;
+                                                        overflow: elide;
+                                                    }
+                                                    Text {
+                                                        text: peer.address;
+                                                        font-size: Math.max(8px, root.status-font-size * 0.8);
+                                                        color: dark-mode ? #707080 : #807870;
+                                                        overflow: elide;
+                                                    }
+                                                }
+
+                                                // Latency indicator (shown when connected)
+                                                if peer.is-connected && peer.latency-ms >= 0: Text {
+                                                    text: peer.latency-ms < 100 ? "快" : peer.latency-ms < 300 ? "中" : "慢";
+                                                    font-size: Math.max(8px, root.status-font-size * 0.8);
+                                                    color: peer.latency-ms < 100 ? #40c040 : peer.latency-ms < 300 ? #ffa500 : #ff4040;
+                                                    vertical-alignment: center;
+                                                }
+
+                                                // Connect / Disconnect button
+                                                Rectangle {
+                                                    width: 56px;
+                                                    height: 28px;
+                                                    border-radius: Math.min(self.width, self.height) * 0.3;
+                                                    border-width: 1px;
+                                                    background: peer.is-connected
+                                                        ? (peer-btn-ta.pressed
+                                                            ? #3a1818
+                                                            : peer-btn-ta.has-hover
+                                                                ? #5a2828
+                                                                : #4a2020)
+                                                        : (peer-btn-ta.pressed
+                                                            ? #1a3a68
+                                                            : peer-btn-ta.has-hover
+                                                                ? #2a5a98
+                                                                : #3a70b8);
+                                                    border-color: peer.is-connected
+                                                        ? (dark-mode ? #804040 : #a06060)
+                                                        : (dark-mode ? #5080b0 : #2868a8);
+
+                                                    peer-btn-ta := TouchArea {
+                                                        clicked => {
+                                                            if (peer.is-connected) {
+                                                                root.disconnect-peer(peer.index);
+                                                            } else {
+                                                                root.connect-to-peer(peer.index);
+                                                            }
+                                                        }
+                                                    }
+
+                                                    Text {
+                                                        text: peer.is-connected ? "断开" : "连接";
+                                                        font-size: Math.max(9px, root.status-font-size * 0.85);
+                                                        font-weight: 600;
+                                                        color: peer.is-connected ? #ffaaaa : #ffffff;
+                                                        horizontal-alignment: center;
+                                                        vertical-alignment: center;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }

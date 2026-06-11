@@ -1,7 +1,8 @@
 use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 
 /// Binary arithmetic operators.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BinaryOp {
     Add,
     Subtract,

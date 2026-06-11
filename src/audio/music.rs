@@ -33,8 +33,10 @@ const FREQ_E5: f64 = 659.26;
 
 // Tone pool indices
 const TONE_C3: usize = 0;
+#[allow(dead_code)]
 const TONE_D3: usize = 1;
 const TONE_E3: usize = 2;
+#[allow(dead_code)]
 const TONE_F3: usize = 3;
 const TONE_G3: usize = 4;
 const TONE_A3: usize = 5;
@@ -50,6 +52,7 @@ const TONE_C5: usize = 14;
 const TONE_D5: usize = 15;
 const TONE_E5: usize = 16;
 const TONE_CHORD_MAJOR: usize = 17;
+#[allow(dead_code)]
 const TONE_CHORD_DIS: usize = 18;
 const TONE_ASCEND: usize = 19;
 const TONE_DESCEND: usize = 20;

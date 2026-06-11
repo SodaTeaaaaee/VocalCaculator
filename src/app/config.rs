@@ -1,10 +1,38 @@
 use serde::{Deserialize, Serialize};
 
+/// Get the machine hostname, or fall back to "VocalCalc".
+fn get_hostname() -> String {
+    std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_else(|_| "VocalCalc".to_string())
+}
+
+/// Network-related configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkConfig {
+    pub enabled: bool,
+    pub display_name: String,
+    pub allow_remote_control: bool,
+    pub conflict_policy: String,
+}
+
+impl Default for NetworkConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            display_name: get_hostname(),
+            allow_remote_control: true,
+            conflict_policy: "interleaved".to_string(),
+        }
+    }
+}
+
 /// Application configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub audio_mode: String,
     pub music_assets_path: Option<String>,
+    pub network: NetworkConfig,
 }
 
 impl Default for AppConfig {
@@ -12,6 +40,7 @@ impl Default for AppConfig {
         Self {
             audio_mode: "normal".to_string(),
             music_assets_path: None,
+            network: NetworkConfig::default(),
         }
     }
 }

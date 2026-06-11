@@ -3,6 +3,7 @@ use rust_decimal::MathematicalOps;
 use rust_decimal_macros::dec;
 use std::str::FromStr;
 
+use super::action::CalcAction;
 use super::token::*;
 
 /// Result of a calculator action.
@@ -426,6 +427,27 @@ impl Calculator {
         self.state = State::Evaluated;
         self.result(vec![VocalEvent::MemoryClear])
     }
+
+    /// Dispatch a serializable action to the corresponding calculator method.
+    pub fn dispatch(&mut self, action: CalcAction) -> CalcResult {
+        match action {
+            CalcAction::Digit(d) => self.digit(d),
+            CalcAction::DecimalPoint => self.decimal_point(),
+            CalcAction::Operator(op) => self.operator(op),
+            CalcAction::Equals => self.equals(),
+            CalcAction::Percent => self.percent(),
+            CalcAction::Mu => self.mu(),
+            CalcAction::SquareRoot => self.square_root(),
+            CalcAction::Backspace => self.backspace(),
+            CalcAction::Clear => self.clear(),
+            CalcAction::AllClear => self.all_clear(),
+            CalcAction::PlusMinus => self.plus_minus(),
+            CalcAction::MemoryRecall => self.memory_recall(),
+            CalcAction::MemoryAdd => self.memory_add(),
+            CalcAction::MemorySubtract => self.memory_subtract(),
+            CalcAction::MemoryClear => self.memory_clear(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -609,5 +631,56 @@ mod tests {
             display(&mut c, &["0", ".", "1", "+", "0", ".", "2", "="]),
             "0.3"
         );
+    }
+
+    #[test]
+    fn dispatch_matches_direct_calls() {
+        let mut c1 = Calculator::new();
+        let mut c2 = Calculator::new();
+
+        let actions = [
+            CalcAction::Digit(5),
+            CalcAction::Operator(BinaryOp::Add),
+            CalcAction::Digit(3),
+            CalcAction::Equals,
+        ];
+        let direct = [
+            c1.digit(5),
+            c1.operator(BinaryOp::Add),
+            c1.digit(3),
+            c1.equals(),
+        ];
+        for (i, action) in actions.iter().enumerate() {
+            let r = c2.dispatch(*action);
+            assert_eq!(r.display, direct[i].display, "action {} mismatch", i);
+        }
+    }
+
+    #[test]
+    fn dispatch_all_variants_compile() {
+        // Verify every CalcAction variant dispatches without panicking.
+        let mut c = Calculator::new();
+        let actions = [
+            CalcAction::Digit(1),
+            CalcAction::DecimalPoint,
+            CalcAction::Digit(5),
+            CalcAction::Operator(BinaryOp::Add),
+            CalcAction::Digit(2),
+            CalcAction::Equals,
+            CalcAction::Percent,
+            CalcAction::Mu,
+            CalcAction::SquareRoot,
+            CalcAction::Backspace,
+            CalcAction::Clear,
+            CalcAction::AllClear,
+            CalcAction::PlusMinus,
+            CalcAction::MemoryRecall,
+            CalcAction::MemoryAdd,
+            CalcAction::MemorySubtract,
+            CalcAction::MemoryClear,
+        ];
+        for action in actions {
+            c.dispatch(action);
+        }
     }
 }

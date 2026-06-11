@@ -3,6 +3,7 @@
 pub mod app;
 pub mod audio;
 pub mod core;
+pub mod net;
 
 /// Detect whether the OS is running in dark mode.
 ///
