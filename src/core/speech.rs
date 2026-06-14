@@ -37,9 +37,6 @@ pub const WAV_MU: u16 = 29; // 29_0x1D_MU.wav
 pub const WAV_SUM: u16 = 30; // 30_0x1E_总和.wav
 pub const WAV_SQRT: u16 = 31; // 31_0x1F_平方根.wav
 
-/// Total number of normal WAV assets.
-pub const NORMAL_WAV_COUNT: usize = 35;
-
 /// Convert a VocalEvent to a sequence of WAV file indices for normal speech mode.
 pub fn event_to_wav_indices(event: &VocalEvent) -> Vec<u16> {
     match event {
@@ -319,10 +316,163 @@ mod tests {
     }
 
     #[test]
-    fn event_operator() {
+    fn event_decimal_point() {
+        assert_eq!(
+            event_to_wav_indices(&VocalEvent::DecimalPoint),
+            vec![WAV_DIAN]
+        );
+    }
+
+    #[test]
+    fn event_operator_add() {
         assert_eq!(
             event_to_wav_indices(&VocalEvent::Operator(super::super::token::BinaryOp::Add)),
             vec![WAV_ADD]
+        );
+    }
+
+    #[test]
+    fn event_operator_subtract() {
+        assert_eq!(
+            event_to_wav_indices(&VocalEvent::Operator(super::super::token::BinaryOp::Subtract)),
+            vec![WAV_SUBTRACT]
+        );
+    }
+
+    #[test]
+    fn event_operator_multiply() {
+        assert_eq!(
+            event_to_wav_indices(&VocalEvent::Operator(super::super::token::BinaryOp::Multiply)),
+            vec![WAV_MULTIPLY]
+        );
+    }
+
+    #[test]
+    fn event_operator_divide() {
+        assert_eq!(
+            event_to_wav_indices(&VocalEvent::Operator(super::super::token::BinaryOp::Divide)),
+            vec![WAV_DIVIDE]
+        );
+    }
+
+    #[test]
+    fn event_equals() {
+        assert_eq!(
+            event_to_wav_indices(&VocalEvent::Equals),
+            vec![WAV_EQUAL]
+        );
+    }
+
+    #[test]
+    fn event_percent() {
+        assert_eq!(
+            event_to_wav_indices(&VocalEvent::Percent),
+            vec![WAV_PERCENT]
+        );
+    }
+
+    #[test]
+    fn event_mu() {
+        assert_eq!(
+            event_to_wav_indices(&VocalEvent::MU),
+            vec![WAV_MU]
+        );
+    }
+
+    #[test]
+    fn event_square_root() {
+        assert_eq!(
+            event_to_wav_indices(&VocalEvent::SquareRoot),
+            vec![WAV_SQRT]
+        );
+    }
+
+    #[test]
+    fn event_backspace() {
+        assert_eq!(
+            event_to_wav_indices(&VocalEvent::Backspace),
+            vec![WAV_BACKSPACE]
+        );
+    }
+
+    #[test]
+    fn event_clear() {
+        assert_eq!(
+            event_to_wav_indices(&VocalEvent::Clear),
+            vec![WAV_CLEAR]
+        );
+    }
+
+    #[test]
+    fn event_all_clear() {
+        assert_eq!(
+            event_to_wav_indices(&VocalEvent::AllClear),
+            vec![WAV_ZERO]
+        );
+    }
+
+    #[test]
+    fn event_memory_recall() {
+        assert_eq!(
+            event_to_wav_indices(&VocalEvent::MemoryRecall),
+            vec![WAV_MEMORY]
+        );
+    }
+
+    #[test]
+    fn event_memory_add() {
+        assert_eq!(
+            event_to_wav_indices(&VocalEvent::MemoryAdd),
+            vec![WAV_MEMORY]
+        );
+    }
+
+    #[test]
+    fn event_memory_subtract() {
+        assert_eq!(
+            event_to_wav_indices(&VocalEvent::MemorySubtract),
+            vec![WAV_MEMORY]
+        );
+    }
+
+    #[test]
+    fn event_memory_clear() {
+        assert_eq!(
+            event_to_wav_indices(&VocalEvent::MemoryClear),
+            vec![WAV_MEMORY]
+        );
+    }
+
+    #[test]
+    fn event_sign_negative() {
+        assert_eq!(
+            event_to_wav_indices(&VocalEvent::SignNegative),
+            vec![WAV_NEGATIVE]
+        );
+    }
+
+    #[test]
+    fn event_sign_positive() {
+        assert_eq!(
+            event_to_wav_indices(&VocalEvent::SignPositive),
+            vec![WAV_POSITIVE]
+        );
+    }
+
+    #[test]
+    fn event_error() {
+        assert_eq!(
+            event_to_wav_indices(&VocalEvent::Error(super::super::token::CalcError::DivideByZero)),
+            vec![WAV_ERROR]
+        );
+    }
+
+    #[test]
+    fn event_result() {
+        let d = Decimal::from_str("5").unwrap();
+        assert_eq!(
+            event_to_wav_indices(&VocalEvent::Result(d)),
+            vec![5]
         );
     }
 }

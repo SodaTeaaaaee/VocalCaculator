@@ -63,9 +63,6 @@ const SAMPLE_RATE: u32 = 44100;
 const TONE_DURATION: f64 = 0.20;
 const CHORD_DURATION: f64 = 0.30;
 
-/// Maximum corruption probability for broken mode (50%).
-pub const BROKEN_MAX_PROBABILITY: f64 = 0.5;
-
 /// Holds pre-generated musical tones as `StaticSoundData` and raw WAV bytes.
 pub struct MusicTones {
     sounds: Vec<StaticSoundData>,
@@ -125,6 +122,12 @@ impl MusicTones {
 
     pub fn count(&self) -> usize {
         self.sounds.len()
+    }
+}
+
+impl Default for MusicTones {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -198,11 +201,11 @@ fn generate_ar7778_tone(frequency: f64, duration: f64, sample_rate: u32) -> Vec<
         let attenuation = 1.0 / 10f64.powf((mult as f64 + 1.0).ln() / 2.0);
         let env_freq = mult as f64 / duration / 2.0;
 
-        for i in 0..num_samples {
+        for (i, sample) in samples.iter_mut().enumerate() {
             let t = i as f64 / sample_rate as f64;
             let signal = (2.0 * PI * harm_freq * t).sin();
             let envelope = (2.0 * PI * env_freq * t).cos();
-            samples[i] += signal * envelope * attenuation;
+            *sample += signal * envelope * attenuation;
         }
     }
 
@@ -292,4 +295,388 @@ fn write_wav_header(wav: &mut Vec<u8>, file_size: u32, sample_rate: u32, data_si
 fn wav_to_sound_data(wav_bytes: &[u8]) -> StaticSoundData {
     StaticSoundData::from_cursor(Cursor::new(wav_bytes.to_vec()))
         .expect("Failed to create sound data from generated WAV")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::token::{BinaryOp, CalcError, VocalEvent};
+    use rust_decimal::Decimal;
+    use std::str::FromStr;
+
+    // --- events_to_tone_indices: Digit variants ---
+
+    #[test]
+    fn digit_0_maps_to_c3() {
+        assert_eq!(events_to_tone_indices(&[VocalEvent::Digit(0)]), vec![TONE_C3]);
+    }
+
+    #[test]
+    fn digit_1_maps_to_c4() {
+        assert_eq!(events_to_tone_indices(&[VocalEvent::Digit(1)]), vec![TONE_C4]);
+    }
+
+    #[test]
+    fn digit_2_maps_to_d4() {
+        assert_eq!(events_to_tone_indices(&[VocalEvent::Digit(2)]), vec![TONE_D4]);
+    }
+
+    #[test]
+    fn digit_3_maps_to_e4() {
+        assert_eq!(events_to_tone_indices(&[VocalEvent::Digit(3)]), vec![TONE_E4]);
+    }
+
+    #[test]
+    fn digit_4_maps_to_f4() {
+        assert_eq!(events_to_tone_indices(&[VocalEvent::Digit(4)]), vec![TONE_F4]);
+    }
+
+    #[test]
+    fn digit_5_maps_to_g4() {
+        assert_eq!(events_to_tone_indices(&[VocalEvent::Digit(5)]), vec![TONE_G4]);
+    }
+
+    #[test]
+    fn digit_6_maps_to_a4() {
+        assert_eq!(events_to_tone_indices(&[VocalEvent::Digit(6)]), vec![TONE_A4]);
+    }
+
+    #[test]
+    fn digit_7_maps_to_b4() {
+        assert_eq!(events_to_tone_indices(&[VocalEvent::Digit(7)]), vec![TONE_B4]);
+    }
+
+    #[test]
+    fn digit_8_maps_to_c5() {
+        assert_eq!(events_to_tone_indices(&[VocalEvent::Digit(8)]), vec![TONE_C5]);
+    }
+
+    #[test]
+    fn digit_9_maps_to_d5() {
+        assert_eq!(events_to_tone_indices(&[VocalEvent::Digit(9)]), vec![TONE_D5]);
+    }
+
+    // --- events_to_tone_indices: Operator variants ---
+
+    #[test]
+    fn operator_add_maps_to_e5() {
+        assert_eq!(
+            events_to_tone_indices(&[VocalEvent::Operator(BinaryOp::Add)]),
+            vec![TONE_E5]
+        );
+    }
+
+    #[test]
+    fn operator_subtract_maps_to_g3() {
+        assert_eq!(
+            events_to_tone_indices(&[VocalEvent::Operator(BinaryOp::Subtract)]),
+            vec![TONE_G3]
+        );
+    }
+
+    #[test]
+    fn operator_multiply_maps_to_a3() {
+        assert_eq!(
+            events_to_tone_indices(&[VocalEvent::Operator(BinaryOp::Multiply)]),
+            vec![TONE_A3]
+        );
+    }
+
+    #[test]
+    fn operator_divide_maps_to_e3() {
+        assert_eq!(
+            events_to_tone_indices(&[VocalEvent::Operator(BinaryOp::Divide)]),
+            vec![TONE_E3]
+        );
+    }
+
+    // --- events_to_tone_indices: other single-event variants ---
+
+    #[test]
+    fn decimal_point_maps_to_b3() {
+        assert_eq!(
+            events_to_tone_indices(&[VocalEvent::DecimalPoint]),
+            vec![TONE_B3]
+        );
+    }
+
+    #[test]
+    fn equals_maps_to_major_chord() {
+        assert_eq!(
+            events_to_tone_indices(&[VocalEvent::Equals]),
+            vec![TONE_CHORD_MAJOR]
+        );
+    }
+
+    #[test]
+    fn percent_maps_to_g4_and_c5() {
+        assert_eq!(
+            events_to_tone_indices(&[VocalEvent::Percent]),
+            vec![TONE_G4, TONE_C5]
+        );
+    }
+
+    #[test]
+    fn mu_maps_to_f4() {
+        assert_eq!(
+            events_to_tone_indices(&[VocalEvent::MU]),
+            vec![TONE_F4]
+        );
+    }
+
+    #[test]
+    fn square_root_maps_to_ascend() {
+        assert_eq!(
+            events_to_tone_indices(&[VocalEvent::SquareRoot]),
+            vec![TONE_ASCEND]
+        );
+    }
+
+    #[test]
+    fn backspace_maps_to_click() {
+        assert_eq!(
+            events_to_tone_indices(&[VocalEvent::Backspace]),
+            vec![TONE_CLICK]
+        );
+    }
+
+    #[test]
+    fn clear_maps_to_click() {
+        assert_eq!(
+            events_to_tone_indices(&[VocalEvent::Clear]),
+            vec![TONE_CLICK]
+        );
+    }
+
+    #[test]
+    fn all_clear_maps_to_descend() {
+        assert_eq!(
+            events_to_tone_indices(&[VocalEvent::AllClear]),
+            vec![TONE_DESCEND]
+        );
+    }
+
+    #[test]
+    fn memory_events_map_to_e4() {
+        let events = [
+            VocalEvent::MemoryRecall,
+            VocalEvent::MemoryAdd,
+            VocalEvent::MemorySubtract,
+            VocalEvent::MemoryClear,
+        ];
+        for event in events {
+            assert_eq!(
+                events_to_tone_indices(&[event.clone()]),
+                vec![TONE_E4],
+                "{:?} should map to TONE_E4",
+                event
+            );
+        }
+    }
+
+    #[test]
+    fn sign_negative_maps_to_g3() {
+        assert_eq!(
+            events_to_tone_indices(&[VocalEvent::SignNegative]),
+            vec![TONE_G3]
+        );
+    }
+
+    #[test]
+    fn sign_positive_maps_to_c4() {
+        assert_eq!(
+            events_to_tone_indices(&[VocalEvent::SignPositive]),
+            vec![TONE_C4]
+        );
+    }
+
+    // --- events_to_tone_indices: Error variants ---
+
+    #[test]
+    fn error_divide_by_zero_maps_to_error_tone() {
+        assert_eq!(
+            events_to_tone_indices(&[VocalEvent::Error(CalcError::DivideByZero)]),
+            vec![TONE_ERROR]
+        );
+    }
+
+    #[test]
+    fn error_negative_square_root_maps_to_error_tone() {
+        assert_eq!(
+            events_to_tone_indices(&[VocalEvent::Error(CalcError::NegativeSquareRoot)]),
+            vec![TONE_ERROR]
+        );
+    }
+
+    #[test]
+    fn error_overflow_maps_to_error_tone() {
+        assert_eq!(
+            events_to_tone_indices(&[VocalEvent::Error(CalcError::Overflow)]),
+            vec![TONE_ERROR]
+        );
+    }
+
+    // --- events_to_tone_indices: Result variant ---
+
+    #[test]
+    fn result_integer_maps_digits() {
+        // format_for_speech(123) => "123" => digits 1,2,3 => C4,D4,E4
+        let d = Decimal::from(123);
+        assert_eq!(
+            events_to_tone_indices(&[VocalEvent::Result(d)]),
+            vec![TONE_C4, TONE_D4, TONE_E4]
+        );
+    }
+
+    #[test]
+    fn result_single_digit() {
+        let d = Decimal::from(5);
+        assert_eq!(
+            events_to_tone_indices(&[VocalEvent::Result(d)]),
+            vec![TONE_G4]
+        );
+    }
+
+    #[test]
+    fn result_decimal_number() {
+        // format_for_speech(3.14) => "3.14" => digits 3,1,4 => E4,C4,F4
+        let d = Decimal::from_str("3.14").unwrap();
+        assert_eq!(
+            events_to_tone_indices(&[VocalEvent::Result(d)]),
+            vec![TONE_E4, TONE_C4, TONE_F4]
+        );
+    }
+
+    #[test]
+    fn result_zero() {
+        let d = Decimal::ZERO;
+        assert_eq!(
+            events_to_tone_indices(&[VocalEvent::Result(d)]),
+            vec![TONE_C3]
+        );
+    }
+
+    #[test]
+    fn result_negative_number_skips_minus_sign() {
+        // format_for_speech(-42) => "-42" => digits 4,2 => F4,D4 (minus sign skipped)
+        let d = Decimal::from(-42);
+        assert_eq!(
+            events_to_tone_indices(&[VocalEvent::Result(d)]),
+            vec![TONE_F4, TONE_D4]
+        );
+    }
+
+    // --- events_to_tone_indices: empty input ---
+
+    #[test]
+    fn empty_events_produce_empty_indices() {
+        assert_eq!(events_to_tone_indices(&[]), Vec::<usize>::new());
+    }
+
+    // --- events_to_tone_indices: multiple events in sequence ---
+
+    #[test]
+    fn multiple_events_produce_sequential_indices() {
+        let events = vec![
+            VocalEvent::Digit(1),
+            VocalEvent::Operator(BinaryOp::Add),
+            VocalEvent::Digit(2),
+            VocalEvent::Equals,
+        ];
+        assert_eq!(
+            events_to_tone_indices(&events),
+            vec![TONE_C4, TONE_E5, TONE_D4, TONE_CHORD_MAJOR]
+        );
+    }
+
+    // --- MusicTones::new() ---
+
+    #[test]
+    fn music_tones_new_succeeds() {
+        let tones = MusicTones::new();
+        assert_eq!(tones.count(), 23);
+    }
+
+    #[test]
+    fn music_tones_count_is_23() {
+        let tones = MusicTones::new();
+        assert_eq!(tones.count(), 23, "expected 23 tones: 17 notes + major chord + dissonant chord + ascend + descend + click + error");
+    }
+
+    #[test]
+    fn music_tones_get_sound_returns_some_for_valid_indices() {
+        let tones = MusicTones::new();
+        for i in 0..23 {
+            assert!(tones.get_sound(i).is_some(), "get_sound({}) should return Some", i);
+        }
+    }
+
+    #[test]
+    fn music_tones_get_sound_returns_none_out_of_bounds() {
+        let tones = MusicTones::new();
+        assert!(tones.get_sound(23).is_none());
+        assert!(tones.get_sound(100).is_none());
+    }
+
+    #[test]
+    fn music_tones_get_wav_bytes_returns_some_for_valid_indices() {
+        let tones = MusicTones::new();
+        for i in 0..23 {
+            assert!(tones.get_wav_bytes(i).is_some(), "get_wav_bytes({}) should return Some", i);
+        }
+    }
+
+    #[test]
+    fn music_tones_get_wav_bytes_returns_none_out_of_bounds() {
+        let tones = MusicTones::new();
+        assert!(tones.get_wav_bytes(23).is_none());
+    }
+
+    #[test]
+    fn music_tones_wav_bytes_have_valid_wav_header() {
+        let tones = MusicTones::new();
+        for i in 0..23 {
+            let wav = tones.get_wav_bytes(i).unwrap();
+            assert!(wav.len() >= 44, "WAV {} should have at least 44-byte header", i);
+            assert_eq!(&wav[0..4], b"RIFF", "WAV {} should start with RIFF", i);
+            assert_eq!(&wav[8..12], b"WAVE", "WAV {} should contain WAVE fmt", i);
+            assert_eq!(&wav[12..16], b"fmt ", "WAV {} should contain fmt chunk", i);
+        }
+    }
+
+    // --- Internal synthesis function tests ---
+
+    #[test]
+    fn generate_ar7778_tone_produces_correct_sample_count() {
+        let samples = generate_ar7778_tone(440.0, 0.20, 44100);
+        assert_eq!(samples.len(), (44100.0 * 0.20) as usize);
+    }
+
+    #[test]
+    fn generate_ar7778_tone_is_normalized() {
+        let samples = generate_ar7778_tone(440.0, 0.20, 44100);
+        let max_val = samples.iter().map(|s| s.abs()).fold(0.0f64, f64::max);
+        assert!((max_val - 1.0).abs() < 1e-6, "tone should be normalized to peak 1.0, got {}", max_val);
+    }
+
+    #[test]
+    fn generate_tone_wav_starts_with_riff() {
+        let wav = generate_tone_wav(440.0, 0.20, 44100);
+        assert!(wav.len() > 44);
+        assert_eq!(&wav[0..4], b"RIFF");
+    }
+
+    #[test]
+    fn generate_chord_wav_starts_with_riff() {
+        let wav = generate_chord_wav(&[261.63, 329.63, 392.00], 0.30, 44100);
+        assert!(wav.len() > 44);
+        assert_eq!(&wav[0..4], b"RIFF");
+    }
+
+    #[test]
+    fn generate_sweep_wav_starts_with_riff() {
+        let wav = generate_sweep_wav(&[261.63, 329.63, 392.00], 0.08, 44100);
+        assert!(wav.len() > 44);
+        assert_eq!(&wav[0..4], b"RIFF");
+    }
 }

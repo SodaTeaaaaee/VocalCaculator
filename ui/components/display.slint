@@ -1,0 +1,39 @@
+// ---- LCD Display ----
+export component LcdDisplay inherits Rectangle {
+    in property <string> display-text: "0";
+    in property <bool> error-state: false;
+    in property <brush> lcd-bg: #b8c890;
+    in property <brush> lcd-fg: #2a3a1a;
+    in property <brush> lcd-frame: #606850;
+    in property <brush> lcd-error-bg: #e8b0a0;
+    in property <brush> lcd-error-fg: #8a2020;
+    in property <length> lcd-font-size: 16px;
+    in property <length> status-font-size: 10px;
+    in property <length> layout-padding: 4px;
+
+    property <length> lcd-r: Math.min(self.width, self.height) * 0.15;
+    border-radius: self.lcd-r;
+    background: lcd-frame;
+    border-width: 2px;
+    border-color: lcd-frame;
+
+    Rectangle {
+        x: 3px; y: 3px;
+        width: parent.width - 6px;
+        height: parent.height - 6px;
+        border-radius: Math.max(0px, parent.lcd-r - 3px);
+        background: root.error-state ? root.lcd-error-bg : root.lcd-bg;
+
+        Text {
+            text: root.display-text;
+            font-size: root.error-state ? root.status-font-size : root.lcd-font-size;
+            font-weight: 600;
+            color: root.error-state ? root.lcd-error-fg : root.lcd-fg;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+            x: Math.max(4px, root.layout-padding * 0.6);
+            width: parent.width - 2 * Math.max(4px, root.layout-padding * 0.6);
+            overflow: elide;
+        }
+    }
+}

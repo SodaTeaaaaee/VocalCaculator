@@ -22,21 +22,14 @@ impl BinaryOp {
 }
 
 /// Calculation error kinds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
 pub enum CalcError {
+    #[error("不能除以零")]
     DivideByZero,
+    #[error("输入无效")]
     NegativeSquareRoot,
+    #[error("溢出")]
     Overflow,
-}
-
-impl std::fmt::Display for CalcError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::DivideByZero => write!(f, "不能除以零"),
-            Self::NegativeSquareRoot => write!(f, "输入无效"),
-            Self::Overflow => write!(f, "溢出"),
-        }
-    }
 }
 
 /// Semantic vocal events produced by calculator actions.

@@ -1,0 +1,16 @@
+import { VerticalBox, Button } from "std-widgets.slint";
+
+// ---- About Dialog ----
+export component AboutDialog inherits Dialog {
+    in property <string> app-version: "v0.1.0";
+    callback close-about();
+    title: "关于";
+    preferred-width: 320px;
+    preferred-height: 220px;
+    VerticalBox {
+        Text { text: "语音计算器 " + app-version; font-size: 16px; font-weight: 700; horizontal-alignment: center; }
+        Text { text: "界面: Slint | 音频: kira | 精度: rust_decimal"; font-size: 11px; horizontal-alignment: center; color: #666; wrap: word-wrap; }
+        Text { text: "Slint 社区许可证"; font-size: 10px; horizontal-alignment: center; color: #999; }
+        Button { text: "关闭"; clicked => { root.close-about(); } }
+    }
+}

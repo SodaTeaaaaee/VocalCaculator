@@ -1,0 +1,52 @@
+// ---- Skeuomorphic button with gradient bevel ----
+// Supports two modes:
+//   - Text label: SkeuBtn { label: "7"; ... }
+//   - Icon glyph: SkeuBtn { icon: "\u{232B}"; ... }
+export component SkeuBtn inherits Rectangle {
+    in property <string> label;
+    in property <string> icon;
+    in property <brush> base: #c8c8c8;
+    in property <brush> fg: #333;
+    in property <length> font-size: 16px;
+    in property <bool> keyboard-active: false;
+    callback clicked;
+
+    // Scaling border-radius: ~28% of the shorter side, preserves roundness at any size
+    border-radius: Math.min(self.width, self.height) * 0.28;
+    border-width: 1px;
+    property <bool> is-pressed: ta.pressed || root.keyboard-active;
+    border-color: is-pressed ? base.darker(40%) : base.darker(25%);
+
+    // Convex bevel via linear gradient: lighter top, darker bottom.
+    background: is-pressed
+        ? base.darker(15%)
+        : ta.has-hover
+            ? @linear-gradient(180deg, base.brighter(12%) 0%, base 40%, base.darker(8%) 100%)
+            : @linear-gradient(180deg, base.brighter(18%) 0%, base.brighter(3%) 35%, base.darker(5%) 100%);
+
+    ta := TouchArea { clicked => { root.clicked(); } }
+
+    // Text label (hidden when icon is used)
+    Text {
+        visible: root.icon == "";
+        text: root.label;
+        font-size: root.font-size;
+        color: root.fg;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    // Icon glyph (hidden when label is used, centered via absolute positioning)
+    Text {
+        visible: root.icon != "";
+        text: root.icon;
+        font-size: root.font-size;
+        font-weight: 700;
+        color: root.fg;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+    }
+}

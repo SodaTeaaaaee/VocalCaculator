@@ -1,11 +1,5 @@
-//! Per-connection session lifecycle.
-//!
-//! Each TCP connection (inbound or outbound) is managed by a [`run_session`]
-//! task that handles the full protocol lifecycle:
-//!
-//! 1. **Handshake** — Hello / HelloAck / Subscribe exchange
-//! 2. **Steady state** — bidirectional message relay + heartbeat
-//! 3. **Teardown** — connection close, channel drain, cleanup log
+//! Per-connection session lifecycle: handshake dispatch, bidirectional
+//! message relay, heartbeat, and teardown.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -16,20 +10,21 @@ use tokio::sync::mpsc;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 use crate::net::protocol::{
-    NetworkMessage, NodeId, PROTOCOL_VERSION,
-    HEARTBEAT_INTERVAL_SECS, HEARTBEAT_TIMEOUT_SECS,
-    APP_ID, APP_KEY, HmacSha256, PROTOCOL_MAGIC,
+    ConnectionDirection, NetworkCommand, NetworkMessage, NodeId, SessionRegister,
+    PROTOCOL_MAGIC, HEARTBEAT_INTERVAL_SECS, HEARTBEAT_TIMEOUT_SECS,
 };
-use hmac::Mac;
-use crate::net::{NetworkCommand, PeerInfo, SessionRegister};
+use crate::net::state::PeerInfo;
+
+use super::handshake::{server_handshake, client_handshake};
 
 /// Outgoing-message channel sender: the Router pushes messages here,
 /// and the session task forwards them over the TCP wire.
 pub type SessionSender = mpsc::UnboundedSender<NetworkMessage>;
 
-// ---------------------------------------------------------------------------
+/// Framed TCP stream with length-delimited codec.
+pub(super) type FramedStream = Framed<TcpStream, LengthDelimitedCodec>;
+
 // Public entry points
-// ---------------------------------------------------------------------------
 
 /// Run a session for an **accepted** (inbound) TCP connection.
 ///
@@ -88,7 +83,7 @@ pub(crate) async fn run_accepted_session(
         last_seen: std::time::Instant::now(),
     };
 
-    run_session_loop(framed, remote_node_id, command_tx, info).await;
+    run_session_loop(framed, remote_node_id, command_tx, info, ConnectionDirection::Inbound).await;
 }
 
 /// Run a session for an **outgoing** (client-initiated) TCP connection.
@@ -101,16 +96,25 @@ pub(crate) async fn run_connecting_session(
     local_node_id: NodeId,
     local_display_name: String,
     command_tx: mpsc::UnboundedSender<NetworkCommand>,
-) {
+) -> Result<(), String> {
     let framed = Framed::new(stream, LengthDelimitedCodec::new());
 
-    // -- Client-side handshake ------------------------------------------
+    // -- Client-side handshake with 8-second timeout --------------------
     let (remote_node_id, remote_display_name, mut framed) =
-        match client_handshake(framed, local_node_id, &local_display_name).await {
-            Ok(r) => r,
-            Err(e) => {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            client_handshake(framed, local_node_id, &local_display_name),
+        )
+        .await
+        {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
                 log::warn!("Outbound handshake failed to {}: {}", peer_addr, e);
-                return;
+                return Err(format!("handshake: {}", e));
+            }
+            Err(_) => {
+                log::warn!("Outbound handshake timed out to {}", peer_addr);
+                return Err("handshake_timeout".to_string());
             }
         };
 
@@ -124,7 +128,7 @@ pub(crate) async fn run_connecting_session(
     // Send Subscribe to start receiving state updates.
     if let Err(e) = send_msg(&mut framed, &NetworkMessage::Subscribe).await {
         log::warn!("Failed sending Subscribe to {}: {}", remote_node_id, e);
-        return;
+        return Err(format!("subscribe: {}", e));
     }
 
     let info = PeerInfo {
@@ -135,170 +139,11 @@ pub(crate) async fn run_connecting_session(
         last_seen: std::time::Instant::now(),
     };
 
-    run_session_loop(framed, remote_node_id, command_tx, info).await;
+    run_session_loop(framed, remote_node_id, command_tx, info, ConnectionDirection::Outbound).await;
+    Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Handshake helpers
-// ---------------------------------------------------------------------------
-
-type FramedStream = Framed<TcpStream, LengthDelimitedCodec>;
-
-/// Server-side handshake: receive Hello + HMAC, verify, send HelloAck.
-///
-/// 1. Receive Hello (magic-validated by [`recv_msg`]).
-/// 2. Check `app_id` matches [`APP_ID`].
-/// 3. Receive the 32-byte HMAC-SHA256 tag.
-/// 4. Verify the HMAC against the raw Hello bytes.
-/// 5. Send HelloAck (with `app_id`).
-async fn server_handshake(
-    mut framed: FramedStream,
-    local_id: NodeId,
-    local_name: &str,
-) -> Result<(NodeId, String, FramedStream), Box<dyn std::error::Error>> {
-    // -- Receive Hello ----------------------------------------------------
-    let (msg, hello_raw) = recv_msg_with_raw(&mut framed)
-        .await?
-        .ok_or("Connection closed before Hello")?;
-
-    let (remote_id, remote_name, remote_ver, remote_app_id) = match msg {
-        NetworkMessage::Hello {
-            node_id,
-            display_name,
-            protocol_version,
-            app_id,
-        } => (node_id, display_name, protocol_version, app_id),
-        other => return Err(format!("Expected Hello, got {:?}", other).into()),
-    };
-
-    // -- App ID check -----------------------------------------------------
-    if remote_app_id != APP_ID {
-        return Err(format!(
-            "App ID mismatch: remote='{}', local='{}'",
-            remote_app_id, APP_ID,
-        )
-        .into());
-    }
-
-    // -- Protocol version check -------------------------------------------
-    if remote_ver != PROTOCOL_VERSION {
-        let _ = send_msg(
-            &mut framed,
-            &NetworkMessage::HelloAck {
-                node_id: local_id,
-                display_name: local_name.to_string(),
-                protocol_version: 0,
-                app_id: APP_ID.to_string(),
-            },
-        )
-        .await;
-        return Err(format!(
-            "Protocol version mismatch: remote={}, local={}",
-            remote_ver, PROTOCOL_VERSION,
-        )
-        .into());
-    }
-
-    // -- Receive & verify HMAC --------------------------------------------
-    let hmac_bytes = recv_raw(&mut framed)
-        .await?
-        .ok_or("Connection closed before HMAC")?;
-
-    if hmac_bytes.len() != 32 {
-        return Err(format!(
-            "HMAC tag length mismatch: expected 32, got {}",
-            hmac_bytes.len(),
-        )
-        .into());
-    }
-
-    let mut mac =
-        HmacSha256::new_from_slice(APP_KEY).map_err(|e| format!("HMAC init error: {}", e))?;
-    mac.update(&hello_raw);
-    if mac.verify_slice(&hmac_bytes).is_err() {
-        return Err("HMAC verification failed".into());
-    }
-
-    // -- Send HelloAck ----------------------------------------------------
-    send_msg(
-        &mut framed,
-        &NetworkMessage::HelloAck {
-            node_id: local_id,
-            display_name: local_name.to_string(),
-            protocol_version: PROTOCOL_VERSION,
-            app_id: APP_ID.to_string(),
-        },
-    )
-    .await?;
-
-    Ok((remote_id, remote_name, framed))
-}
-
-/// Client-side handshake: send Hello + HMAC, receive HelloAck.
-///
-/// 1. Serialize Hello, compute HMAC-SHA256, send Hello (magic-prefixed)
-///    followed by the raw 32-byte HMAC tag.
-/// 2. Receive HelloAck and verify `app_id`.
-async fn client_handshake(
-    mut framed: FramedStream,
-    local_id: NodeId,
-    local_name: &str,
-) -> Result<(NodeId, String, FramedStream), Box<dyn std::error::Error>> {
-    let hello = NetworkMessage::Hello {
-        node_id: local_id,
-        display_name: local_name.to_string(),
-        protocol_version: PROTOCOL_VERSION,
-        app_id: APP_ID.to_string(),
-    };
-
-    // Compute HMAC over the raw bincode-serialized Hello.
-    let hello_bytes = bincode::serde::encode_to_vec(&hello, bincode::config::standard())?;
-    let mut mac =
-        HmacSha256::new_from_slice(APP_KEY).map_err(|e| format!("HMAC init error: {}", e))?;
-    mac.update(&hello_bytes);
-    let hmac_tag = mac.finalize().into_bytes();
-
-    // Send Hello (magic-prefixed) then raw HMAC.
-    send_msg(&mut framed, &hello).await?;
-    send_raw(&mut framed, &hmac_tag).await?;
-
-    // -- Receive HelloAck -------------------------------------------------
-    let msg = recv_msg(&mut framed)
-        .await?
-        .ok_or("Connection closed before HelloAck")?;
-
-    let (remote_id, remote_name, remote_ver, remote_app_id) = match msg {
-        NetworkMessage::HelloAck {
-            node_id,
-            display_name,
-            protocol_version,
-            app_id,
-        } => (node_id, display_name, protocol_version, app_id),
-        other => return Err(format!("Expected HelloAck, got {:?}", other).into()),
-    };
-
-    if remote_app_id != APP_ID {
-        return Err(format!(
-            "App ID mismatch: remote='{}', local='{}'",
-            remote_app_id, APP_ID,
-        )
-        .into());
-    }
-
-    if remote_ver != PROTOCOL_VERSION {
-        return Err(format!(
-            "Protocol version mismatch: remote={}, local={}",
-            remote_ver, PROTOCOL_VERSION,
-        )
-        .into());
-    }
-
-    Ok((remote_id, remote_name, framed))
-}
-
-// ---------------------------------------------------------------------------
 // Session main loop
-// ---------------------------------------------------------------------------
 
 /// Split the framed stream, spawn the heartbeat task, and run the
 /// bidirectional message relay until the connection closes or times out.
@@ -307,6 +152,7 @@ async fn run_session_loop(
     remote_id: NodeId,
     command_tx: mpsc::UnboundedSender<NetworkCommand>,
     info: PeerInfo,
+    direction: ConnectionDirection,
 ) {
     let (mut writer, mut reader) = framed.split();
     let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel::<NetworkMessage>();
@@ -316,6 +162,7 @@ async fn run_session_loop(
         node_id: remote_id,
         sender: outgoing_tx.clone(),
         info: info.clone(),
+        direction,
     }));
 
     // Shared heartbeat timestamp (seconds elapsed since reference, monotonic).
@@ -452,9 +299,7 @@ async fn run_session_loop(
     let _ = command_tx.send(NetworkCommand::UnregisterSession(remote_id));
 }
 
-// ---------------------------------------------------------------------------
 // Message handling inside the session loop
-// ---------------------------------------------------------------------------
 
 /// Process one incoming message. Returns `false` if the session should close.
 async fn handle_incoming_message(
@@ -494,18 +339,16 @@ async fn handle_incoming_message(
         }
         _ => {
             // Forward to the NetworkManager -> Router bridge.
-            let _ = command_tx.send(NetworkCommand::IncomingMessage(msg));
+            let _ = command_tx.send(NetworkCommand::IncomingMessage(remote_id, msg));
         }
     }
     true
 }
 
-// ---------------------------------------------------------------------------
 // Wire-level helpers (thin wrappers around the framed codec)
-// ---------------------------------------------------------------------------
 
 /// Serialize and send a [`NetworkMessage`] with [`PROTOCOL_MAGIC`] prefix.
-async fn send_msg<S>(
+pub(super) async fn send_msg<S>(
     writer: &mut S,
     msg: &NetworkMessage,
 ) -> Result<(), Box<dyn std::error::Error>>
@@ -523,7 +366,7 @@ where
 
 /// Receive a frame, verify [`PROTOCOL_MAGIC`], and deserialize a
 /// [`NetworkMessage`]. Returns `Ok(None)` on clean close.
-async fn recv_msg(
+pub(super) async fn recv_msg(
     reader: &mut FramedStream,
 ) -> Result<Option<NetworkMessage>, Box<dyn std::error::Error>> {
     match reader.next().await {
@@ -544,51 +387,5 @@ async fn recv_msg(
     }
 }
 
-/// Like [`recv_msg`], but also returns the raw bincode bytes (after magic
-/// stripping) so the caller can compute an HMAC over them.
-async fn recv_msg_with_raw(
-    reader: &mut FramedStream,
-) -> Result<Option<(NetworkMessage, tokio_util::bytes::Bytes)>, Box<dyn std::error::Error>> {
-    match reader.next().await {
-        Some(Ok(bytes)) => {
-            if bytes.len() < PROTOCOL_MAGIC.len()
-                || bytes[..PROTOCOL_MAGIC.len()] != PROTOCOL_MAGIC
-            {
-                return Err("Invalid protocol magic bytes".into());
-            }
-            let bytes = bytes.freeze();
-            let raw = bytes.slice(PROTOCOL_MAGIC.len()..);
-            let (msg, _) = bincode::serde::decode_from_slice(
-                &raw,
-                bincode::config::standard(),
-            )?;
-            Ok(Some((msg, raw)))
-        }
-        Some(Err(e)) => Err(e.into()),
-        None => Ok(None),
-    }
-}
 
-/// Send raw bytes as a single length-delimited frame (no magic prefix).
-/// Used for the HMAC tag during handshake.
-async fn send_raw(
-    framed: &mut FramedStream,
-    data: &[u8],
-) -> Result<(), Box<dyn std::error::Error>> {
-    framed
-        .send(tokio_util::bytes::Bytes::from(data.to_vec()))
-        .await?;
-    Ok(())
-}
 
-/// Receive a single raw frame (no magic checking).
-/// Used for the HMAC tag during handshake.
-async fn recv_raw(
-    reader: &mut FramedStream,
-) -> Result<Option<tokio_util::bytes::Bytes>, Box<dyn std::error::Error>> {
-    match reader.next().await {
-        Some(Ok(bytes)) => Ok(Some(bytes.freeze())),
-        Some(Err(e)) => Err(e.into()),
-        None => Ok(None),
-    }
-}

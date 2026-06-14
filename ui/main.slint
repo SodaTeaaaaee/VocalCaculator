@@ -1,65 +1,16 @@
-import { VerticalBox, Slider } from "std-widgets.slint";
-import "../resource/fonts/NotoSansSC-Regular.otf";
-import "../resource/fonts/JetBrainsMonoNerdFont-Regular.ttf";
+import { Slider } from "std-widgets.slint";
+import { SkeuBtn } from "components/button.slint";
+import { LcdDisplay } from "components/display.slint";
+import { StatusBar } from "components/status-bar.slint";
+import { NetworkPanel } from "components/network-panel.slint";
+import { SettingsPanel } from "components/settings-panel.slint";
+import { AboutDialog } from "components/about-dialog.slint";
+import { PeerInfoSlint } from "theme.slint";
 
 // =====================================================================
 // Skeuomorphic Calculator – GridLayout-based adaptive layout
 // Inspired by Casio SL-300 / Eltex 2000 / Neumorphic calculators
 // =====================================================================
-
-// ---- Skeuomorphic button with gradient bevel ----
-component SkeuBtn inherits Rectangle {
-    in property <string> label;
-    in property <brush> base: #c8c8c8;
-    in property <brush> fg: #333;
-    in property <length> font-size: 16px;
-    callback clicked;
-
-    // Scaling border-radius: ~28% of the shorter side, preserves roundness at any size
-    border-radius: Math.min(self.width, self.height) * 0.28;
-    border-width: 1px;
-    border-color: ta.pressed ? base.darker(40%) : base.darker(25%);
-
-    // Convex bevel via linear gradient: lighter top, darker bottom.
-    // No child elements needed — the gradient follows the rounded outline naturally.
-    background: ta.pressed
-        ? base.darker(15%)
-        : ta.has-hover
-            ? @linear-gradient(180deg, base.brighter(12%) 0%, base 40%, base.darker(8%) 100%)
-            : @linear-gradient(180deg, base.brighter(18%) 0%, base.brighter(3%) 35%, base.darker(5%) 100%);
-
-    ta := TouchArea { clicked => { root.clicked(); } }
-
-    Text {
-        text: root.label;
-        font-size: root.font-size;
-        color: root.fg;
-        font-weight: 700;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-    }
-}
-
-// ---- Peer info for network overlay ----
-struct PeerInfoSlint {
-    name: string,
-    address: string,
-    is-connected: bool,
-    latency-ms: int,
-    index: int,
-}
-
-// ---- About Dialog ----
-export component AboutDialog inherits Dialog {
-    title: "关于";
-    preferred-width: 320px;
-    preferred-height: 200px;
-    VerticalBox {
-        Text { text: "语音计算器 v0.1.0"; font-size: 16px; font-weight: 700; horizontal-alignment: center; }
-        Text { text: "界面: Slint | 音频: kira | 精度: rust_decimal"; font-size: 11px; horizontal-alignment: center; color: #666; wrap: word-wrap; }
-        Text { text: "Slint 社区许可证"; font-size: 10px; horizontal-alignment: center; color: #999; }
-    }
-}
 
 // ---- Main calculator window ----
 export component CalculatorWindow inherits Window {
@@ -69,6 +20,10 @@ export component CalculatorWindow inherits Window {
     min-width: 260px;
     min-height: 460px;
     title: "语音计算器";
+    forward-focus: kbd-focus;
+
+    // App version (set from Rust at runtime)
+    in property <string> app-version: "v0.1.0";
 
     // ---- Scalable font sizes (derived from window height, with floor) ----
     property <length> btn-font-size: Math.max(12px, self.height * 0.025);
@@ -102,8 +57,13 @@ export component CalculatorWindow inherits Window {
     in property <bool> error-state: false;
     in property <string> history-text: "";
     in property <string> audio-status: "";
+    in-out property <bool> audio-muted: false;
 
-    // Network status (Phase 5)
+    // Keyboard visual feedback: set by FocusScope on key-press/release
+    in-out property <string> last-keyboard-action: "";
+    in-out property <bool> keyboard-pressed: false;
+
+    // Network status
     in property <string> network-status: "";
     in property <bool> remote-controlled: false;
     in property <bool> executing-remotely: false;
@@ -112,6 +72,22 @@ export component CalculatorWindow inherits Window {
     in property <[PeerInfoSlint]> peers;
     in property <int> connected-peer-index: -1;
     in property <bool> scanning: false;
+    in-out property <bool> allow-remote-control: true;
+
+    // About dialog visibility
+    in-out property <bool> about-visible: false;
+
+    // Settings panel
+    in property <bool> settings-panel-visible: false;
+    in property <string> settings-display-name: "";
+    in property <string> settings-save-status: "";
+
+    // Routing matrix
+    in property <int> matrix-size: 0;
+    in property <[string]> peer-names: [];
+    in property <int> my-index: -1;
+    in property <[bool]> matrix-cells: [];
+    callback route-toggled(int, int, bool);
 
     // ---- Skeuomorphic color palette ----
     property <brush> body-fill: dark-mode ? #2a2a30 : #c0bab4;
@@ -160,13 +136,20 @@ export component CalculatorWindow inherits Window {
     callback memory-clear();
     callback switch-audio-mode();
     callback show-about();
+    callback close-about();
     callback toggle-theme();
     callback volume-changed(float);
+    callback toggle-mute();
+    callback show-settings();
+    callback close-settings();
+    callback save-display-name(string);
     callback show-network-settings();
     callback close-network-settings();
-    callback connect-to-peer(int);
-    callback disconnect-peer(int);
+    callback connect-to-peer(string);
+    callback disconnect-peer(string);
     callback scan-peers();
+    callback toggle-remote-control();
+    callback keyboard-action(string);
 
     // =================================================================
     // Body
@@ -175,12 +158,11 @@ export component CalculatorWindow inherits Window {
         x: root.body-margin; y: root.body-margin;
         width: parent.width - 2 * root.body-margin;
         height: parent.height - 2 * root.body-margin;
-        // Scaling body radius
         property <length> body-r: Math.min(self.width, self.height) * 0.03;
         border-radius: self.body-r;
-        background: body-fill;
+        background: root.body-fill;
         border-width: 2px;
-        border-color: root.executing-remotely ? #40c040 : root.remote-controlled ? #4080ff : body-edge;
+        border-color: root.executing-remotely ? #40c040 : root.remote-controlled ? #4080ff : root.body-edge;
         drop-shadow-color: root.executing-remotely ? #40c04080 : root.remote-controlled ? #4080ff80 : transparent;
         drop-shadow-blur: root.remote-controlled || root.executing-remotely ? 8px : 0px;
 
@@ -190,9 +172,9 @@ export component CalculatorWindow inherits Window {
             width: parent.width - 2 * root.inner-margin;
             height: parent.height - 2 * root.inner-margin;
             border-radius: Math.max(0px, parent.body-r - root.inner-margin);
-            background: body-inner;
+            background: root.body-inner;
             border-width: 1px;
-            border-color: dark-mode ? #1a1a20 : #b8b2ac;
+            border-color: root.dark-mode ? #1a1a20 : #b8b2ac;
 
             VerticalLayout {
                 padding: root.layout-padding;
@@ -202,18 +184,11 @@ export component CalculatorWindow inherits Window {
                 Rectangle {
                     height: root.solar-h;
                     border-radius: Math.max(1px, root.solar-h * 0.2);
-                    background: solar-fill;
+                    background: root.solar-fill;
                     HorizontalLayout {
                         padding: 1px;
                         spacing: 1px;
-                        Rectangle { background: solar-cell; border-radius: 1px; }
-                        Rectangle { background: solar-cell; border-radius: 1px; }
-                        Rectangle { background: solar-cell; border-radius: 1px; }
-                        Rectangle { background: solar-cell; border-radius: 1px; }
-                        Rectangle { background: solar-cell; border-radius: 1px; }
-                        Rectangle { background: solar-cell; border-radius: 1px; }
-                        Rectangle { background: solar-cell; border-radius: 1px; }
-                        Rectangle { background: solar-cell; border-radius: 1px; }
+                        for _i in 8: Rectangle { background: root.solar-cell; border-radius: 1px; }
                     }
                 }
 
@@ -222,117 +197,82 @@ export component CalculatorWindow inherits Window {
                     text: "AR7778  语音计算器";
                     font-size: root.brand-font-size;
                     font-weight: 700;
-                    color: dark-mode ? #505060 : #8a8480;
+                    color: root.dark-mode ? #505060 : #8a8480;
                     horizontal-alignment: left;
                     letter-spacing: 1px;
                     height: root.brand-h;
                 }
 
                 // ---- Status bar ----
-                HorizontalLayout {
+                StatusBar {
                     height: root.status-h;
-                    spacing: root.layout-spacing;
-                    padding: 4px;
-                    Text { text: root.memory-indicator; font-size: root.status-font-size; color: btn-memory; font-weight: 700; vertical-alignment: center; }
-                    Rectangle { horizontal-stretch: 1; }
-                    Text { text: root.audio-status; font-size: root.status-font-size; color: status-fg; vertical-alignment: center; }
-                    Text { text: " "; font-size: Math.max(6px, root.status-font-size * 0.5); vertical-alignment: center; }
-                    Text { text: root.mode-indicator; font-size: root.status-font-size; color: status-fg; vertical-alignment: center; }
-
-                    // Theme toggle
-                    Rectangle {
-                        width: root.status-icon-sz; height: root.status-icon-sz;
-                        border-radius: Math.min(self.width, self.height) * 0.2;
-                        background: tt.has-hover ? status-hover : transparent;
-                        tt := TouchArea { clicked => { root.toggle-theme(); } }
-                        Text {
-                            text: root.dark-mode ? "\u{F185}" : "\u{F186}";
-                            font-family: "JetBrainsMono Nerd Font";
-                            font-size: root.status-font-size;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                            color: status-fg;
-                        }
-                    }
-                    // Audio mode
-                    Rectangle {
-                        width: root.status-icon-sz; height: root.status-icon-sz;
-                        border-radius: Math.min(self.width, self.height) * 0.2;
-                        background: mt.has-hover ? status-hover : transparent;
-                        mt := TouchArea { clicked => { root.switch-audio-mode(); } }
-                        Text { text: "\u{F001}"; font-family: "JetBrainsMono Nerd Font"; font-size: root.status-font-size; horizontal-alignment: center; vertical-alignment: center; color: status-fg; }
-                    }
-                    // About
-                    Rectangle {
-                        width: root.status-icon-sz; height: root.status-icon-sz;
-                        border-radius: Math.min(self.width, self.height) * 0.2;
-                        background: at.has-hover ? status-hover : transparent;
-                        at := TouchArea { clicked => { root.show-about(); } }
-                        Text { text: "\u{F05A}"; font-family: "JetBrainsMono Nerd Font"; font-size: root.status-font-size; horizontal-alignment: center; vertical-alignment: center; color: status-fg; }
-                    }
-                    // Network status indicator (clickable -> opens settings)
-                    Rectangle {
-                        width: root.status-icon-sz; height: root.status-icon-sz;
-                        border-radius: Math.min(self.width, self.height) * 0.2;
-                        background: nt.has-hover ? status-hover : transparent;
-                        opacity: root.network-status != "" ? 1.0 : 0.3;
-                        nt := TouchArea { clicked => { root.show-network-settings(); } }
-                        Text {
-                            text: root.executing-remotely ? "\u{F0E7}" : root.remote-controlled ? "\u{F0AC}" : "\u{F0C2}";
-                            font-family: "JetBrainsMono Nerd Font";
-                            font-size: root.status-font-size;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                            color: root.executing-remotely ? #ffa500 : root.remote-controlled ? #40c040 : status-fg;
-                        }
-                    }
+                    memory-indicator: root.memory-indicator;
+                    audio-status: root.audio-status;
+                    mode-indicator: root.mode-indicator;
+                    network-status: root.network-status;
+                    dark-mode: root.dark-mode;
+                    remote-controlled: root.remote-controlled;
+                    executing-remotely: root.executing-remotely;
+                    status-font-size: root.status-font-size;
+                    status-icon-sz: root.status-icon-sz;
+                    layout-spacing: root.layout-spacing;
+                    status-fg: root.status-fg;
+                    status-hover: root.status-hover;
+                    btn-memory: root.btn-memory;
+                    toggle-theme => { root.toggle-theme(); }
+                    switch-audio-mode => { root.switch-audio-mode(); }
+                    show-about => { root.show-about(); }
+                    show-network-settings => { root.show-network-settings(); }
+                    show-settings => { root.show-settings(); }
                 }
 
-                // ---- Volume slider ----
+                // ---- Volume slider with mute toggle ----
                 HorizontalLayout {
                     height: root.volume-h;
                     spacing: root.layout-spacing;
-                    Text { text: "\u{F027}"; font-family: "JetBrainsMono Nerd Font"; font-size: root.status-font-size; vertical-alignment: center; color: status-fg; }
+                    Text { text: "\u{F027}"; font-family: "JetBrainsMono Nerd Font"; font-size: root.status-font-size; vertical-alignment: center; color: root.status-fg; }
+                    // Mute toggle button
+                    Rectangle {
+                        width: self.height;
+                        background: touch.pressed ? #80808040 : touch.has-hover ? #80808020 : transparent;
+                        border-radius: self.height * 0.2;
+                        touch := TouchArea {
+                            clicked => { root.toggle-mute(); }
+                        }
+                        Text {
+                            text: root.audio-muted ? "\u{F026}" : "\u{F027}";
+                            font-family: "JetBrainsMono Nerd Font";
+                            font-size: root.status-font-size;
+                            vertical-alignment: center;
+                            horizontal-alignment: center;
+                            color: root.audio-muted ? root.btn-clear : root.status-fg;
+                        }
+                    }
                     Slider {
                         minimum: 0;
                         maximum: 100;
                         value: 50;
                         changed => { root.volume-changed(self.value / 100.0); }
                     }
-                    Text { text: "\u{F028}"; font-family: "JetBrainsMono Nerd Font"; font-size: root.status-font-size; vertical-alignment: center; color: status-fg; }
+                    Text { text: "\u{F028}"; font-family: "JetBrainsMono Nerd Font"; font-size: root.status-font-size; vertical-alignment: center; color: root.status-fg; }
                 }
 
                 // ---- History ----
-                Text { text: root.history-text; font-size: root.status-font-size; color: status-fg; horizontal-alignment: right; height: root.history-h; }
+                Text { text: root.history-text; font-size: root.status-font-size; color: root.status-fg; horizontal-alignment: right; height: root.history-h; }
 
                 // ---- LCD Display ----
-                Rectangle {
+                LcdDisplay {
                     height: root.lcd-h;
-                    property <length> lcd-r: Math.min(self.width, self.height) * 0.15;
-                    border-radius: self.lcd-r;
-                    background: lcd-frame;
-                    border-width: 2px;
-                    border-color: lcd-frame;
-
-                    Rectangle {
-                        x: 3px; y: 3px;
-                        width: parent.width - 6px;
-                        height: parent.height - 6px;
-                        border-radius: Math.max(0px, parent.lcd-r - 3px);
-                        background: root.error-state ? lcd-error-bg : lcd-bg;
-
-                        Text {
-                            text: root.display-text;
-                            font-size: root.error-state ? root.status-font-size : root.lcd-font-size;
-                            font-weight: 600;
-                            color: root.error-state ? lcd-error-fg : lcd-fg;
-                            horizontal-alignment: right;
-                            vertical-alignment: center;
-                            x: Math.max(4px, root.layout-padding * 0.6);
-                            width: parent.width - 2 * Math.max(4px, root.layout-padding * 0.6);
-                            overflow: elide;
-                        }
-                    }
+                    display-text: root.display-text;
+                    error-state: root.error-state;
+                    lcd-bg: root.lcd-bg;
+                    lcd-fg: root.lcd-fg;
+                    lcd-frame: root.lcd-frame;
+                    lcd-error-bg: root.lcd-error-bg;
+                    lcd-error-fg: root.lcd-error-fg;
+                    lcd-font-size: root.lcd-font-size;
+                    status-font-size: root.status-font-size;
+                    layout-padding: root.layout-padding;
                 }
 
                 // ---- Button grid (GridLayout for adaptive sizing) ----
@@ -342,78 +282,58 @@ export component CalculatorWindow inherits Window {
 
                     // Row: MC  MR  M-  M+
                     Row {
-                        SkeuBtn { label: "MC"; base: btn-func; fg: btn-func-fg; font-size: root.btn-font-size; clicked => { root.memory-clear(); } }
-                        SkeuBtn { label: "MR"; base: btn-func; fg: btn-func-fg; font-size: root.btn-font-size; clicked => { root.memory-recall(); } }
-                        SkeuBtn { label: "M-"; base: btn-func; fg: btn-func-fg; font-size: root.btn-font-size; clicked => { root.memory-subtract(); } }
-                        SkeuBtn { label: "M+"; base: btn-func; fg: btn-func-fg; font-size: root.btn-font-size; clicked => { root.memory-add(); } }
+                        SkeuBtn { label: "MC"; base: root.btn-func; fg: root.btn-func-fg; font-size: root.btn-font-size; keyboard-active: root.keyboard-pressed && root.last-keyboard-action == "memory-clear"; clicked => { root.memory-clear(); } }
+                        SkeuBtn { label: "MR"; base: root.btn-func; fg: root.btn-func-fg; font-size: root.btn-font-size; keyboard-active: root.keyboard-pressed && root.last-keyboard-action == "memory-recall"; clicked => { root.memory-recall(); } }
+                        SkeuBtn { label: "M-"; base: root.btn-func; fg: root.btn-func-fg; font-size: root.btn-font-size; keyboard-active: root.keyboard-pressed && root.last-keyboard-action == "memory-subtract"; clicked => { root.memory-subtract(); } }
+                        SkeuBtn { label: "M+"; base: root.btn-func; fg: root.btn-func-fg; font-size: root.btn-font-size; clicked => { root.memory-add(); } }
                     }
 
                     // Row: %  √  MU (span 2)
                     Row {
-                        SkeuBtn { label: "%"; base: btn-func; fg: btn-func-fg; font-size: root.btn-font-size; clicked => { root.percent(); } }
-                        SkeuBtn { label: "\u{221A}"; base: btn-func; fg: btn-func-fg; font-size: root.btn-font-size; clicked => { root.square-root(); } }
-                        SkeuBtn { colspan: 2; label: "MU"; base: btn-func; fg: btn-func-fg; font-size: root.btn-font-size; clicked => { root.mu(); } }
+                        SkeuBtn { label: "%"; base: root.btn-func; fg: root.btn-func-fg; font-size: root.btn-font-size; keyboard-active: root.keyboard-pressed && root.last-keyboard-action == "percent"; clicked => { root.percent(); } }
+                        SkeuBtn { label: "\u{221A}"; base: root.btn-func; fg: root.btn-func-fg; font-size: root.btn-font-size; keyboard-active: root.keyboard-pressed && root.last-keyboard-action == "sqrt"; clicked => { root.square-root(); } }
+                        SkeuBtn { colspan: 2; label: "MU"; base: root.btn-func; fg: root.btn-func-fg; font-size: root.btn-font-size; keyboard-active: root.keyboard-pressed && root.last-keyboard-action == "mu"; clicked => { root.mu(); } }
                     }
 
                     // Row: AC  C  ⌫  ÷
                     Row {
-                        SkeuBtn { label: "AC"; base: btn-clear; fg: btn-clear-fg; font-size: root.btn-font-size; clicked => { root.all-clear(); } }
-                        SkeuBtn { label: "C"; base: btn-ci; fg: btn-ci-fg; font-size: root.btn-font-size; clicked => { root.clear-input(); } }
+                        SkeuBtn { label: "AC"; base: root.btn-clear; fg: root.btn-clear-fg; font-size: root.btn-font-size; keyboard-active: root.keyboard-pressed && root.last-keyboard-action == "all-clear"; clicked => { root.all-clear(); } }
+                        SkeuBtn { label: "C"; base: root.btn-ci; fg: root.btn-ci-fg; font-size: root.btn-font-size; keyboard-active: root.keyboard-pressed && root.last-keyboard-action == "clear"; clicked => { root.clear-input(); } }
                         // Backspace button (Nerd Font glyph)
-                        Rectangle {
-                            border-radius: Math.min(self.width, self.height) * 0.28;
-                            border-width: 1px;
-                            border-color: bsta.pressed ? btn-bs.darker(40%) : btn-bs.darker(25%);
-                            background: bsta.pressed
-                                ? btn-bs.darker(15%)
-                                : bsta.has-hover
-                                    ? @linear-gradient(180deg, btn-bs.brighter(12%) 0%, btn-bs 40%, btn-bs.darker(8%) 100%)
-                                    : @linear-gradient(180deg, btn-bs.brighter(18%) 0%, btn-bs.brighter(3%) 35%, btn-bs.darker(5%) 100%);
-                            bsta := TouchArea { clicked => { root.backspace(); } }
-                            Text {
-                                text: "\u{232B}";
-                                font-size: root.btn-font-size;
-                                font-weight: 700;
-                                color: btn-bs-fg;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                                x: (parent.width - self.width) / 2;
-                                y: (parent.height - self.height) / 2;
-                            }
-                        }
-                        SkeuBtn { label: "\u{00F7}"; base: btn-op; fg: btn-op-fg; font-size: root.btn-font-size; clicked => { root.operator-pressed("/"); } }
+                        SkeuBtn { icon: "\u{232B}"; base: root.btn-bs; fg: root.btn-bs-fg; font-size: root.btn-font-size; keyboard-active: root.keyboard-pressed && root.last-keyboard-action == "backspace"; clicked => { root.backspace(); } }
+                        SkeuBtn { label: "\u{00F7}"; base: root.btn-op; fg: root.btn-op-fg; font-size: root.btn-font-size; keyboard-active: root.keyboard-pressed && root.last-keyboard-action == "divide"; clicked => { root.operator-pressed("/"); } }
                     }
 
                     // Row: 7  8  9  ×
                     Row {
-                        SkeuBtn { label: "7"; base: btn-digit; fg: btn-digit-fg; font-size: root.btn-font-size; clicked => { root.digit-pressed(7); } }
-                        SkeuBtn { label: "8"; base: btn-digit; fg: btn-digit-fg; font-size: root.btn-font-size; clicked => { root.digit-pressed(8); } }
-                        SkeuBtn { label: "9"; base: btn-digit; fg: btn-digit-fg; font-size: root.btn-font-size; clicked => { root.digit-pressed(9); } }
-                        SkeuBtn { label: "\u{00D7}"; base: btn-op; fg: btn-op-fg; font-size: root.btn-font-size; clicked => { root.operator-pressed("*"); } }
+                        SkeuBtn { label: "7"; base: root.btn-digit; fg: root.btn-digit-fg; font-size: root.btn-font-size; keyboard-active: root.keyboard-pressed && root.last-keyboard-action == "digit:7"; clicked => { root.digit-pressed(7); } }
+                        SkeuBtn { label: "8"; base: root.btn-digit; fg: root.btn-digit-fg; font-size: root.btn-font-size; keyboard-active: root.keyboard-pressed && root.last-keyboard-action == "digit:8"; clicked => { root.digit-pressed(8); } }
+                        SkeuBtn { label: "9"; base: root.btn-digit; fg: root.btn-digit-fg; font-size: root.btn-font-size; keyboard-active: root.keyboard-pressed && root.last-keyboard-action == "digit:9"; clicked => { root.digit-pressed(9); } }
+                        SkeuBtn { label: "\u{00D7}"; base: root.btn-op; fg: root.btn-op-fg; font-size: root.btn-font-size; keyboard-active: root.keyboard-pressed && root.last-keyboard-action == "multiply"; clicked => { root.operator-pressed("*"); } }
                     }
 
                     // Row: 4  5  6  -
                     Row {
-                        SkeuBtn { label: "4"; base: btn-digit; fg: btn-digit-fg; font-size: root.btn-font-size; clicked => { root.digit-pressed(4); } }
-                        SkeuBtn { label: "5"; base: btn-digit; fg: btn-digit-fg; font-size: root.btn-font-size; clicked => { root.digit-pressed(5); } }
-                        SkeuBtn { label: "6"; base: btn-digit; fg: btn-digit-fg; font-size: root.btn-font-size; clicked => { root.digit-pressed(6); } }
-                        SkeuBtn { label: "-"; base: btn-op; fg: btn-op-fg; font-size: root.btn-font-size; clicked => { root.operator-pressed("-"); } }
+                        SkeuBtn { label: "4"; base: root.btn-digit; fg: root.btn-digit-fg; font-size: root.btn-font-size; keyboard-active: root.keyboard-pressed && root.last-keyboard-action == "digit:4"; clicked => { root.digit-pressed(4); } }
+                        SkeuBtn { label: "5"; base: root.btn-digit; fg: root.btn-digit-fg; font-size: root.btn-font-size; keyboard-active: root.keyboard-pressed && root.last-keyboard-action == "digit:5"; clicked => { root.digit-pressed(5); } }
+                        SkeuBtn { label: "6"; base: root.btn-digit; fg: root.btn-digit-fg; font-size: root.btn-font-size; keyboard-active: root.keyboard-pressed && root.last-keyboard-action == "digit:6"; clicked => { root.digit-pressed(6); } }
+                        SkeuBtn { label: "-"; base: root.btn-op; fg: root.btn-op-fg; font-size: root.btn-font-size; keyboard-active: root.keyboard-pressed && root.last-keyboard-action == "subtract"; clicked => { root.operator-pressed("-"); } }
                     }
 
                     // Row: 1  2  3  +
                     Row {
-                        SkeuBtn { label: "1"; base: btn-digit; fg: btn-digit-fg; font-size: root.btn-font-size; clicked => { root.digit-pressed(1); } }
-                        SkeuBtn { label: "2"; base: btn-digit; fg: btn-digit-fg; font-size: root.btn-font-size; clicked => { root.digit-pressed(2); } }
-                        SkeuBtn { label: "3"; base: btn-digit; fg: btn-digit-fg; font-size: root.btn-font-size; clicked => { root.digit-pressed(3); } }
-                        SkeuBtn { label: "+"; base: btn-op; fg: btn-op-fg; font-size: root.btn-font-size; clicked => { root.operator-pressed("+"); } }
+                        SkeuBtn { label: "1"; base: root.btn-digit; fg: root.btn-digit-fg; font-size: root.btn-font-size; keyboard-active: root.keyboard-pressed && root.last-keyboard-action == "digit:1"; clicked => { root.digit-pressed(1); } }
+                        SkeuBtn { label: "2"; base: root.btn-digit; fg: root.btn-digit-fg; font-size: root.btn-font-size; keyboard-active: root.keyboard-pressed && root.last-keyboard-action == "digit:2"; clicked => { root.digit-pressed(2); } }
+                        SkeuBtn { label: "3"; base: root.btn-digit; fg: root.btn-digit-fg; font-size: root.btn-font-size; keyboard-active: root.keyboard-pressed && root.last-keyboard-action == "digit:3"; clicked => { root.digit-pressed(3); } }
+                        SkeuBtn { label: "+"; base: root.btn-op; fg: root.btn-op-fg; font-size: root.btn-font-size; keyboard-active: root.keyboard-pressed && root.last-keyboard-action == "add"; clicked => { root.operator-pressed("+"); } }
                     }
 
                     // Row: ±  0  .  =
                     Row {
-                        SkeuBtn { label: "\u{00B1}"; base: btn-func; fg: btn-func-fg; font-size: root.btn-font-size; clicked => { root.plus-minus(); } }
-                        SkeuBtn { label: "0"; base: btn-digit; fg: btn-digit-fg; font-size: root.btn-font-size; clicked => { root.digit-pressed(0); } }
-                        SkeuBtn { label: "."; base: btn-digit; fg: btn-digit-fg; font-size: root.btn-font-size; clicked => { root.decimal-point(); } }
-                        SkeuBtn { label: "="; base: btn-eq; fg: btn-eq-fg; font-size: root.btn-font-size; clicked => { root.equals(); } }
+                        SkeuBtn { label: "\u{00B1}"; base: root.btn-func; fg: root.btn-func-fg; font-size: root.btn-font-size; keyboard-active: root.keyboard-pressed && root.last-keyboard-action == "plus-minus"; clicked => { root.plus-minus(); } }
+                        SkeuBtn { label: "0"; base: root.btn-digit; fg: root.btn-digit-fg; font-size: root.btn-font-size; keyboard-active: root.keyboard-pressed && root.last-keyboard-action == "digit:0"; clicked => { root.digit-pressed(0); } }
+                        SkeuBtn { label: "."; base: root.btn-digit; fg: root.btn-digit-fg; font-size: root.btn-font-size; keyboard-active: root.keyboard-pressed && root.last-keyboard-action == "decimal-point"; clicked => { root.decimal-point(); } }
+                        SkeuBtn { label: "="; base: root.btn-eq; fg: root.btn-eq-fg; font-size: root.btn-font-size; keyboard-active: root.keyboard-pressed && root.last-keyboard-action == "equals"; clicked => { root.equals(); } }
                     }
                 }
             }
@@ -421,267 +341,161 @@ export component CalculatorWindow inherits Window {
             // =============================================================
             // Network Settings Overlay
             // =============================================================
-            if root.network-panel-visible: Rectangle {
+            if root.network-panel-visible: NetworkPanel {
                 x: 0; y: 0;
                 width: parent.width;
                 height: parent.height;
-                background: dark-mode ? #1a1a1ecc : #c0bab4cc;
-                border-radius: parent.border-radius;
-
-                // Semi-transparent backdrop touch catcher
-                backdrop := TouchArea { clicked => { } }
-
-                // Card
-                Rectangle {
-                    x: root.layout-padding * 2;
-                    y: root.layout-padding * 2;
-                    width: parent.width - root.layout-padding * 4;
-                    height: parent.height - root.layout-padding * 4;
-                    property <length> card-r: Math.min(self.width, self.height) * 0.04;
-                    border-radius: self.card-r;
-                    background: body-fill;
-                    border-width: 1px;
-                    border-color: body-edge;
-
-                    // Inner bevel for card
-                    Rectangle {
-                        x: 2px; y: 2px;
-                        width: parent.width - 4px;
-                        height: parent.height - 4px;
-                        border-radius: Math.max(0px, parent.card-r - 2px);
-                        background: body-inner;
-                        border-width: 1px;
-                        border-color: dark-mode ? #1a1a20 : #b8b2ac;
-
-                        VerticalLayout {
-                            padding: root.layout-padding;
-                            spacing: root.layout-spacing;
-
-                            // Title bar with close button
-                            HorizontalLayout {
-                                height: root.status-h;
-                                spacing: root.layout-spacing;
-                                Text {
-                                    text: "\u{F0AC} 网络设置";
-                                    font-family: "JetBrainsMono Nerd Font";
-                                    font-size: Math.max(12px, root.status-font-size * 1.3);
-                                    font-weight: 700;
-                                    color: dark-mode ? #d0d0d0 : #2a2a2a;
-                                    vertical-alignment: center;
-                                    horizontal-stretch: 1;
-                                }
-                                // Close button
-                                Rectangle {
-                                    width: root.status-icon-sz;
-                                    height: root.status-icon-sz;
-                                    border-radius: Math.min(self.width, self.height) * 0.2;
-                                    background: close-ta.has-hover ? status-hover : transparent;
-                                    close-ta := TouchArea { clicked => { root.close-network-settings(); } }
-                                    Text {
-                                        text: "\u{F00D}";
-                                        font-family: "JetBrainsMono Nerd Font";
-                                        font-size: root.status-font-size;
-                                        horizontal-alignment: center;
-                                        vertical-alignment: center;
-                                        color: status-fg;
-                                    }
-                                }
-                            }
-
-                            // Connection status
-                            Rectangle {
-                                height: root.status-h;
-                                border-radius: Math.min(self.width, self.height) * 0.15;
-                                background: dark-mode ? #222228 : #d4cec8;
-                                border-width: 1px;
-                                border-color: dark-mode ? #3a3a42 : #b8b2ac;
-                                HorizontalLayout {
-                                    padding: root.layout-padding;
-                                    Text {
-                                        text: root.network-status != "" ? root.network-status : "未连接";
-                                        font-size: root.status-font-size;
-                                        color: root.network-status != "" ? (root.executing-remotely ? #40c040 : root.remote-controlled ? #4080ff : status-fg) : (dark-mode ? #808090 : #706860);
-                                        vertical-alignment: center;
-                                        horizontal-stretch: 1;
-                                    }
-                                }
-                            }
-
-                            // Connection info (if any)
-                            if root.connection-info != "": Rectangle {
-                                height: root.status-h;
-                                border-radius: Math.min(self.width, self.height) * 0.15;
-                                background: dark-mode ? #222228 : #d4cec8;
-                                border-width: 1px;
-                                border-color: dark-mode ? #3a3a42 : #b8b2ac;
-                                HorizontalLayout {
-                                    padding: root.layout-padding;
-                                    Text {
-                                        text: root.connection-info;
-                                        font-size: root.status-font-size;
-                                        color: status-fg;
-                                        vertical-alignment: center;
-                                        wrap: word-wrap;
-                                    }
-                                }
-                            }
-
-                            // Peer list label + scan button
-                            Rectangle {
-                                height: root.status-h;
-                                HorizontalLayout {
-                                    padding: 2px;
-                                    spacing: 4px;
-                                    Text {
-                                        text: root.scanning ? "扫描中..." : "已连接节点";
-                                        font-size: root.status-font-size;
-                                        font-weight: 600;
-                                        color: dark-mode ? #a0a0a0 : #4a4a4a;
-                                        vertical-alignment: center;
-                                        horizontal-stretch: 1;
-                                    }
-                                    SkeuBtn {
-                                        label: "扫描";
-                                        base: dark-mode ? #3a4a3a : #c8d8c8;
-                                        fg: dark-mode ? #a0c0a0 : #2a4a2a;
-                                        font-size: Math.max(9px, root.status-font-size * 0.9);
-                                        width: 56px;
-                                        clicked => { root.scan-peers(); }
-                                    }
-                                }
-                            }
-
-                            // Peer list (scrollable, populated from Rust)
-                            Rectangle {
-                                vertical-stretch: 1;
-                                border-radius: Math.min(self.width, self.height) * 0.02;
-                                background: dark-mode ? #1a1a20 : #e0dcd8;
-                                border-width: 1px;
-                                border-color: dark-mode ? #3a3a42 : #b8b2ac;
-                                clip: true;
-
-                                // Empty state
-                                if root.peers.length == 0: VerticalLayout {
-                                    padding: root.layout-padding;
-                                    Text {
-                                        text: "暂无节点连接";
-                                        font-size: root.status-font-size;
-                                        color: dark-mode ? #606070 : #908880;
-                                        horizontal-alignment: center;
-                                        vertical-alignment: center;
-                                    }
-                                }
-
-                                // Peer list
-                                if root.peers.length > 0: Flickable {
-                                    VerticalLayout {
-                                        padding: root.layout-padding;
-                                        spacing: 4px;
-
-                                        for peer[i] in root.peers: Rectangle {
-                                            height: 48px;
-                                            border-radius: Math.min(self.width, self.height) * 0.15;
-                                            background: peer.is-connected
-                                                ? (dark-mode ? #1a3020 : #d8eed8)
-                                                : (dark-mode ? #222228 : #ece8e4);
-                                            border-width: 1px;
-                                            border-color: peer.is-connected
-                                                ? (dark-mode ? #2a5030 : #a0c8a0)
-                                                : (dark-mode ? #3a3a42 : #d0ccc8);
-
-                                            HorizontalLayout {
-                                                padding: 8px;
-                                                spacing: 8px;
-
-                                                // Device icon (Nerd Font)
-                                                Text {
-                                                    text: peer.is-connected ? "\u{F0E7}" : "\u{F108}";
-                                                    font-family: "JetBrainsMono Nerd Font";
-                                                    font-size: Math.max(14px, root.status-font-size * 1.3);
-                                                    color: peer.is-connected
-                                                        ? (dark-mode ? #40c040 : #208020)
-                                                        : (dark-mode ? #606070 : #908880);
-                                                    vertical-alignment: center;
-                                                    width: 24px;
-                                                }
-
-                                                // Name and address
-                                                VerticalLayout {
-                                                    horizontal-stretch: 1;
-                                                    spacing: 2px;
-                                                    alignment: center;
-                                                    Text {
-                                                        text: peer.name;
-                                                        font-size: root.status-font-size;
-                                                        font-weight: 600;
-                                                        color: dark-mode ? #d0d0d0 : #2a2a2a;
-                                                        overflow: elide;
-                                                    }
-                                                    Text {
-                                                        text: peer.address;
-                                                        font-size: Math.max(8px, root.status-font-size * 0.8);
-                                                        color: dark-mode ? #707080 : #807870;
-                                                        overflow: elide;
-                                                    }
-                                                }
-
-                                                // Latency indicator (shown when connected)
-                                                if peer.is-connected && peer.latency-ms >= 0: Text {
-                                                    text: peer.latency-ms < 100 ? "快" : peer.latency-ms < 300 ? "中" : "慢";
-                                                    font-size: Math.max(8px, root.status-font-size * 0.8);
-                                                    color: peer.latency-ms < 100 ? #40c040 : peer.latency-ms < 300 ? #ffa500 : #ff4040;
-                                                    vertical-alignment: center;
-                                                }
-
-                                                // Connect / Disconnect button
-                                                Rectangle {
-                                                    width: 56px;
-                                                    height: 28px;
-                                                    border-radius: Math.min(self.width, self.height) * 0.3;
-                                                    border-width: 1px;
-                                                    background: peer.is-connected
-                                                        ? (peer-btn-ta.pressed
-                                                            ? #3a1818
-                                                            : peer-btn-ta.has-hover
-                                                                ? #5a2828
-                                                                : #4a2020)
-                                                        : (peer-btn-ta.pressed
-                                                            ? #1a3a68
-                                                            : peer-btn-ta.has-hover
-                                                                ? #2a5a98
-                                                                : #3a70b8);
-                                                    border-color: peer.is-connected
-                                                        ? (dark-mode ? #804040 : #a06060)
-                                                        : (dark-mode ? #5080b0 : #2868a8);
-
-                                                    peer-btn-ta := TouchArea {
-                                                        clicked => {
-                                                            if (peer.is-connected) {
-                                                                root.disconnect-peer(peer.index);
-                                                            } else {
-                                                                root.connect-to-peer(peer.index);
-                                                            }
-                                                        }
-                                                    }
-
-                                                    Text {
-                                                        text: peer.is-connected ? "断开" : "连接";
-                                                        font-size: Math.max(9px, root.status-font-size * 0.85);
-                                                        font-weight: 600;
-                                                        color: peer.is-connected ? #ffaaaa : #ffffff;
-                                                        horizontal-alignment: center;
-                                                        vertical-alignment: center;
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                dark-mode: root.dark-mode;
+                body-fill: root.body-fill;
+                body-edge: root.body-edge;
+                body-inner: root.body-inner;
+                status-fg: root.status-fg;
+                status-hover: root.status-hover;
+                network-status: root.network-status;
+                remote-controlled: root.remote-controlled;
+                executing-remotely: root.executing-remotely;
+                connection-info: root.connection-info;
+                peers: root.peers;
+                scanning: root.scanning;
+                allow-remote-control: root.allow-remote-control;
+                matrix-size: root.matrix-size;
+                peer-names: root.peer-names;
+                my-index: root.my-index;
+                matrix-cells: root.matrix-cells;
+                audio-muted: root.audio-muted;
+                layout-padding: root.layout-padding;
+                layout-spacing: root.layout-spacing;
+                status-h: root.status-h;
+                status-icon-sz: root.status-icon-sz;
+                status-font-size: root.status-font-size;
+                close-network-settings => { root.close-network-settings(); }
+                connect-to-peer(nid) => { root.connect-to-peer(nid); }
+                disconnect-peer(nid) => { root.disconnect-peer(nid); }
+                scan-peers => { root.scan-peers(); }
+                toggle-remote-control => { root.toggle-remote-control(); }
+                route-toggled(r, c, v) => { root.route-toggled(r, c, v); }
+                toggle-mute => { root.toggle-mute(); }
             }
+
+            // =============================================================
+            // Settings Overlay
+            // =============================================================
+            if root.settings-panel-visible: SettingsPanel {
+                x: 0; y: 0;
+                width: parent.width;
+                height: parent.height;
+                dark-mode: root.dark-mode;
+                body-fill: root.body-fill;
+                body-edge: root.body-edge;
+                body-inner: root.body-inner;
+                status-fg: root.status-fg;
+                status-hover: root.status-hover;
+                btn-func: root.btn-func;
+                btn-func-fg: root.btn-func-fg;
+                btn-op: root.btn-op;
+                btn-op-fg: root.btn-op-fg;
+                layout-padding: root.layout-padding;
+                layout-spacing: root.layout-spacing;
+                status-h: root.status-h;
+                status-icon-sz: root.status-icon-sz;
+                status-font-size: root.status-font-size;
+                display-name: root.settings-display-name;
+                save-status: root.settings-save-status;
+                close-settings => { root.close-settings(); }
+                save-display-name(name) => { root.save-display-name(name); }
+            }
+
+            // =============================================================
+            // About Dialog (conditionally shown)
+            // =============================================================
+            if root.about-visible: AboutDialog {
+                app-version: root.app-version;
+                close-about => { root.close-about(); }
+            }
+        }
+    }
+
+    // ---- Keyboard input handler ----
+    // FocusScope receives keyboard focus via forward-focus above.
+    // Modifier-held and NetworkPanel-visible checks gate all input.
+    // Key-to-action mapping: each branch maps a key (or key group)
+    // to the corresponding action string consumed by keyboard-action.
+    kbd-focus := FocusScope {
+        property <bool> last-key-accepted: false;
+
+        key-pressed(event) => {
+            if event.modifiers.control || event.modifiers.alt || event.modifiers.meta {
+                last-key-accepted = false; reject
+            } else if root.network-panel-visible {
+                last-key-accepted = false; reject
+            } else if root.settings-panel-visible {
+                last-key-accepted = false; reject
+            } else if root.about-visible {
+                if event.text == "\u{001b}" {
+                    root.close-about(); last-key-accepted = true; accept
+                } else {
+                    last-key-accepted = false; reject
+                }
+            } else if event.text == "0" {
+                root.last-keyboard-action = "digit:0"; root.keyboard-pressed = true; root.keyboard-action("digit:0"); last-key-accepted = true; accept
+            } else if event.text == "1" {
+                root.last-keyboard-action = "digit:1"; root.keyboard-pressed = true; root.keyboard-action("digit:1"); last-key-accepted = true; accept
+            } else if event.text == "2" {
+                root.last-keyboard-action = "digit:2"; root.keyboard-pressed = true; root.keyboard-action("digit:2"); last-key-accepted = true; accept
+            } else if event.text == "3" {
+                root.last-keyboard-action = "digit:3"; root.keyboard-pressed = true; root.keyboard-action("digit:3"); last-key-accepted = true; accept
+            } else if event.text == "4" {
+                root.last-keyboard-action = "digit:4"; root.keyboard-pressed = true; root.keyboard-action("digit:4"); last-key-accepted = true; accept
+            } else if event.text == "5" {
+                root.last-keyboard-action = "digit:5"; root.keyboard-pressed = true; root.keyboard-action("digit:5"); last-key-accepted = true; accept
+            } else if event.text == "6" {
+                root.last-keyboard-action = "digit:6"; root.keyboard-pressed = true; root.keyboard-action("digit:6"); last-key-accepted = true; accept
+            } else if event.text == "7" {
+                root.last-keyboard-action = "digit:7"; root.keyboard-pressed = true; root.keyboard-action("digit:7"); last-key-accepted = true; accept
+            } else if event.text == "8" {
+                root.last-keyboard-action = "digit:8"; root.keyboard-pressed = true; root.keyboard-action("digit:8"); last-key-accepted = true; accept
+            } else if event.text == "9" {
+                root.last-keyboard-action = "digit:9"; root.keyboard-pressed = true; root.keyboard-action("digit:9"); last-key-accepted = true; accept
+            } else if event.text == "+" {
+                root.last-keyboard-action = "add"; root.keyboard-pressed = true; root.keyboard-action("add"); last-key-accepted = true; accept
+            } else if event.text == "-" {
+                root.last-keyboard-action = "subtract"; root.keyboard-pressed = true; root.keyboard-action("subtract"); last-key-accepted = true; accept
+            } else if event.text == "*" {
+                root.last-keyboard-action = "multiply"; root.keyboard-pressed = true; root.keyboard-action("multiply"); last-key-accepted = true; accept
+            } else if event.text == "/" {
+                root.last-keyboard-action = "divide"; root.keyboard-pressed = true; root.keyboard-action("divide"); last-key-accepted = true; accept
+            } else if event.text == "\u{000d}" || event.text == "\u{000a}" {
+                root.last-keyboard-action = "equals"; root.keyboard-pressed = true; root.keyboard-action("equals"); last-key-accepted = true; accept
+            } else if event.text == "." {
+                root.last-keyboard-action = "decimal-point"; root.keyboard-pressed = true; root.keyboard-action("decimal-point"); last-key-accepted = true; accept
+            } else if event.text == "\u{0008}" {
+                root.last-keyboard-action = "backspace"; root.keyboard-pressed = true; root.keyboard-action("backspace"); last-key-accepted = true; accept
+            } else if event.text == "\u{001b}" {
+                root.last-keyboard-action = "all-clear"; root.keyboard-pressed = true; root.keyboard-action("all-clear"); last-key-accepted = true; accept
+            } else if event.text == "\u{007f}" {
+                root.last-keyboard-action = "clear"; root.keyboard-pressed = true; root.keyboard-action("clear"); last-key-accepted = true; accept
+            } else if event.text == "%" {
+                root.last-keyboard-action = "percent"; root.keyboard-pressed = true; root.keyboard-action("percent"); last-key-accepted = true; accept
+            } else if event.text == "s" || event.text == "S" {
+                root.last-keyboard-action = "sqrt"; root.keyboard-pressed = true; root.keyboard-action("sqrt"); last-key-accepted = true; accept
+            } else if event.text == "m" || event.text == "M" {
+                root.last-keyboard-action = "memory-recall"; root.keyboard-pressed = true; root.keyboard-action("memory-recall"); last-key-accepted = true; accept
+            } else if event.text == "c" || event.text == "C" {
+                root.last-keyboard-action = "memory-clear"; root.keyboard-pressed = true; root.keyboard-action("memory-clear"); last-key-accepted = true; accept
+            } else if event.text == "u" || event.text == "U" {
+                root.last-keyboard-action = "mu"; root.keyboard-pressed = true; root.keyboard-action("mu"); last-key-accepted = true; accept
+            } else if event.text == "b" || event.text == "B" {
+                root.last-keyboard-action = "memory-subtract"; root.keyboard-pressed = true; root.keyboard-action("memory-subtract"); last-key-accepted = true; accept
+            } else if event.text == "n" || event.text == "N" {
+                root.last-keyboard-action = "plus-minus"; root.keyboard-pressed = true; root.keyboard-action("plus-minus"); last-key-accepted = true; accept
+            } else {
+                last-key-accepted = false; reject
+            }
+        }
+
+        key-released(event) => {
+            if (last-key-accepted) { root.keyboard-pressed = false; accept; }
+            else { reject; }
         }
     }
 }

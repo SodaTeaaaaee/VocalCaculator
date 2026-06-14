@@ -70,6 +70,50 @@ impl Calculator {
         *self = Self::default();
     }
 
+    /// Reset internal state to match an incoming [`StateSnapshot`].
+    ///
+    /// Called when an authoritative `StateUpdate` arrives from a remote
+    /// executor after speculative local execution.  Without this, the
+    /// calculator's internal fields (`acc`, `pending`, `input`, `state`,
+    /// …) remain in the speculative state and drift from the remote.
+    ///
+    /// The snapshot carries `display`, `history`, `memory_indicator`, and
+    /// `is_error`.  From these we reconstruct the best approximation:
+    ///
+    /// - `acc` is parsed from the display string (falls back to 0).
+    /// - `state` is set to `Error` when `is_error`, or `Evaluated` otherwise
+    ///   (the most common post-result state).
+    /// - `input`, `pending`, `last_operand`, `last_op`, and `mu` are cleared
+    ///   because the snapshot does not carry them.
+    /// - `memory` is left unchanged when the indicator is `"M"` (we cannot
+    ///   recover the exact value), and zeroed when the indicator is empty.
+    pub fn reset_from_snapshot(
+        &mut self,
+        display: &str,
+        history: &str,
+        memory_indicator: &str,
+        is_error: bool,
+    ) {
+        if is_error {
+            self.state = State::Error;
+            self.acc = Decimal::ZERO;
+        } else {
+            self.state = State::Evaluated;
+            self.acc = Decimal::from_str(display).unwrap_or(Decimal::ZERO);
+        }
+        self.input = String::new();
+        self.pending = None;
+        self.last_operand = Decimal::ZERO;
+        self.last_op = None;
+        self.mu = MuCtx::None;
+        self.history = history.to_string();
+        if memory_indicator.is_empty() {
+            self.memory = Decimal::ZERO;
+        }
+        // When indicator is "M" we keep the existing `memory` value because
+        // the snapshot does not carry the exact amount.
+    }
+
     fn display_value(&self) -> Decimal {
         if self.input.is_empty() {
             self.acc
@@ -682,5 +726,463 @@ mod tests {
         for action in actions {
             c.dispatch(action);
         }
+    }
+
+    // ------ Edge-case tests ------
+
+    #[test]
+    fn error_state_digit_returns_empty_events() {
+        let mut c = Calculator::new();
+        // Trigger divide-by-zero error.
+        display(&mut c, &["5", "/", "0", "="]);
+        let r = c.digit(3);
+        assert!(r.is_error, "should remain in error state");
+        assert!(r.events.is_empty(), "digit in error state should produce no events");
+        assert_eq!(r.display, "错误");
+    }
+
+    #[test]
+    fn error_state_operator_returns_empty_events() {
+        let mut c = Calculator::new();
+        display(&mut c, &["5", "/", "0", "="]);
+        let r = c.operator(BinaryOp::Add);
+        assert!(r.is_error);
+        assert!(r.events.is_empty());
+    }
+
+    #[test]
+    fn error_state_equals_returns_empty_events() {
+        let mut c = Calculator::new();
+        display(&mut c, &["5", "/", "0", "="]);
+        let r = c.equals();
+        assert!(r.is_error);
+        assert!(r.events.is_empty());
+    }
+
+    #[test]
+    fn error_state_clear_returns_empty_events() {
+        let mut c = Calculator::new();
+        display(&mut c, &["5", "/", "0", "="]);
+        // clear itself returns Clear event (it does NOT early-return in Error)
+        // Wait -- it DOES early-return. Let's check.
+        let r = c.clear();
+        assert!(r.is_error, "clear in error state should remain error");
+        assert!(r.events.is_empty());
+    }
+
+    #[test]
+    fn error_state_all_clear_recovers() {
+        let mut c = Calculator::new();
+        display(&mut c, &["5", "/", "0", "="]);
+        let r = c.all_clear();
+        assert!(!r.is_error, "all_clear should exit error state");
+        assert_eq!(r.display, "0");
+        assert_eq!(r.events, vec![VocalEvent::AllClear]);
+    }
+
+    #[test]
+    fn error_state_memory_recall_returns_empty_events() {
+        let mut c = Calculator::new();
+        display(&mut c, &["5", "/", "0", "="]);
+        let r = c.memory_recall();
+        assert!(r.is_error);
+        assert!(r.events.is_empty());
+    }
+
+    #[test]
+    fn error_state_memory_add_returns_empty_events() {
+        let mut c = Calculator::new();
+        display(&mut c, &["5", "/", "0", "="]);
+        let r = c.memory_add();
+        assert!(r.is_error);
+        assert!(r.events.is_empty());
+    }
+
+    #[test]
+    fn error_state_memory_subtract_returns_empty_events() {
+        let mut c = Calculator::new();
+        display(&mut c, &["5", "/", "0", "="]);
+        let r = c.memory_subtract();
+        assert!(r.is_error);
+        assert!(r.events.is_empty());
+    }
+
+    #[test]
+    fn error_state_memory_clear_returns_empty_events() {
+        let mut c = Calculator::new();
+        display(&mut c, &["5", "/", "0", "="]);
+        let r = c.memory_clear();
+        assert!(r.is_error);
+        assert!(r.events.is_empty());
+    }
+
+    #[test]
+    fn error_state_backspace_returns_empty_events() {
+        let mut c = Calculator::new();
+        display(&mut c, &["5", "/", "0", "="]);
+        let r = c.backspace();
+        assert!(r.is_error);
+        assert!(r.events.is_empty());
+    }
+
+    #[test]
+    fn error_state_decimal_point_returns_empty_events() {
+        let mut c = Calculator::new();
+        display(&mut c, &["5", "/", "0", "="]);
+        let r = c.decimal_point();
+        assert!(r.is_error);
+        assert!(r.events.is_empty());
+    }
+
+    #[test]
+    fn error_state_percent_returns_empty_events() {
+        let mut c = Calculator::new();
+        display(&mut c, &["5", "/", "0", "="]);
+        let r = c.percent();
+        assert!(r.is_error);
+        assert!(r.events.is_empty());
+    }
+
+    #[test]
+    fn error_state_square_root_returns_empty_events() {
+        let mut c = Calculator::new();
+        display(&mut c, &["5", "/", "0", "="]);
+        let r = c.square_root();
+        assert!(r.is_error);
+        assert!(r.events.is_empty());
+    }
+
+    #[test]
+    fn error_state_mu_returns_empty_events() {
+        let mut c = Calculator::new();
+        display(&mut c, &["5", "/", "0", "="]);
+        let r = c.mu();
+        assert!(r.is_error);
+        assert!(r.events.is_empty());
+    }
+
+    #[test]
+    fn error_state_plus_minus_returns_empty_events() {
+        let mut c = Calculator::new();
+        display(&mut c, &["5", "/", "0", "="]);
+        let r = c.plus_minus();
+        assert!(r.is_error);
+        assert!(r.events.is_empty());
+    }
+
+    #[test]
+    fn double_decimal_point_is_noop() {
+        let mut c = Calculator::new();
+        // Enter "3." then press "." again.
+        display(&mut c, &["3", "."]);
+        let r = c.decimal_point();
+        assert_eq!(r.display, "3.", "second decimal point should not change display");
+        // The event is still emitted (design choice), but the input must not have two dots.
+        assert_eq!(r.events, vec![VocalEvent::DecimalPoint]);
+    }
+
+    #[test]
+    fn double_decimal_point_from_idle() {
+        let mut c = Calculator::new();
+        // Starting from idle: first "." gives "0.", second "." is no-op on input.
+        let r1 = c.decimal_point();
+        assert_eq!(r1.display, "0.");
+        let r2 = c.decimal_point();
+        assert_eq!(r2.display, "0.");
+    }
+
+    #[test]
+    fn operator_with_empty_input_uses_acc_as_implicit_operand() {
+        let mut c = Calculator::new();
+        // Enter 10, press + (acc=10, pending=Add, state=OpPending).
+        display(&mut c, &["1", "0", "+"]);
+        // Press + again without entering a digit -- this changes operator but
+        // the implicit operand is still acc (10).
+        // Then enter 3 and evaluate.
+        assert_eq!(display(&mut c, &["3", "="]), "13");
+    }
+
+    #[test]
+    fn operator_chaining_in_op_pending_replaces_operator() {
+        let mut c = Calculator::new();
+        // 5 + (OpPending) then change to * before entering rhs.
+        display(&mut c, &["5", "+"]);
+        // Change operator to multiply.
+        let r = c.operator(BinaryOp::Multiply);
+        assert_eq!(r.display, "5", "display should remain acc during operator change");
+        // Now enter 4 and evaluate: 5 * 4 = 20.
+        assert_eq!(display(&mut c, &["4", "="]), "20");
+    }
+
+    #[test]
+    fn operator_from_idle_uses_zero_acc() {
+        let mut c = Calculator::new();
+        // Press "+" from idle with no prior input. acc=0, pending=Add.
+        display(&mut c, &["+"]);
+        // Enter 7 and press =: 0 + 7 = 7.
+        assert_eq!(display(&mut c, &["7", "="]), "7");
+    }
+
+    #[test]
+    fn equals_with_no_pending_operation_is_noop() {
+        let mut c = Calculator::new();
+        // From idle, just press "=". No pending op, no last_op.
+        let r = c.equals();
+        assert_eq!(r.display, "0");
+        assert_eq!(r.events, vec![VocalEvent::Equals]);
+        assert!(!r.is_error);
+    }
+
+    #[test]
+    fn equals_after_evaluated_with_no_last_op_is_noop() {
+        let mut c = Calculator::new();
+        // Enter a number and press equals without any operator.
+        display(&mut c, &["4", "2", "="]);
+        // Now in Evaluated state, last_op is None. Press "=" again.
+        let r = c.equals();
+        assert_eq!(r.display, "42");
+        assert_eq!(r.events, vec![VocalEvent::Equals]);
+    }
+
+    #[test]
+    fn memory_add_in_op_pending_state() {
+        let mut c = Calculator::new();
+        // 5 + (OpPending), then M+. display_value is acc (5) since input is empty.
+        display(&mut c, &["5", "+"]);
+        let r = c.memory_add();
+        assert_eq!(r.memory_indicator, "M");
+        assert_eq!(c.memory.to_string(), "5");
+    }
+
+    #[test]
+    fn memory_subtract_when_memory_is_zero() {
+        let mut c = Calculator::new();
+        display(&mut c, &["3"]);
+        let r = c.memory_subtract();
+        // memory is now -3, nonzero, so indicator is "M".
+        assert_eq!(r.memory_indicator, "M");
+        assert_eq!(c.memory.to_string(), "-3");
+    }
+
+    #[test]
+    fn memory_recall_sets_acc_to_memory() {
+        let mut c = Calculator::new();
+        display(&mut c, &["1", "0", "0", "m+"]);
+        // Clear state and recall.
+        display(&mut c, &["c"]);
+        let r = c.memory_recall();
+        assert_eq!(r.display, "100");
+        assert_eq!(
+            r.events,
+            vec![VocalEvent::MemoryRecall, VocalEvent::Result(dec!(100))]
+        );
+    }
+
+    #[test]
+    fn memory_recall_in_error_state() {
+        let mut c = Calculator::new();
+        display(&mut c, &["5", "m+"]);
+        display(&mut c, &["5", "/", "0", "="]);
+        let r = c.memory_recall();
+        assert!(r.is_error);
+        assert!(r.events.is_empty());
+    }
+
+    #[test]
+    fn memory_clear_resets_indicator() {
+        let mut c = Calculator::new();
+        display(&mut c, &["5", "m+"]);
+        assert_eq!(c.memory.to_string(), "5");
+        let r = c.memory_clear();
+        assert_eq!(r.memory_indicator, "");
+        assert_eq!(c.memory.to_string(), "0");
+    }
+
+    #[test]
+    fn backspace_single_digit_goes_idle() {
+        let mut c = Calculator::new();
+        display(&mut c, &["5"]);
+        let r = c.backspace();
+        assert_eq!(r.display, "0", "backspace on single digit should return to idle showing 0");
+        // After backspace, state is Idle: next digit starts fresh input.
+        assert_eq!(display(&mut c, &["3"]), "3");
+    }
+
+    #[test]
+    fn backspace_leaves_negative_sign_goes_idle() {
+        let mut c = Calculator::new();
+        display(&mut c, &["5", "+-"]);
+        // input is "-5"
+        let r = c.backspace();
+        // After popping last char, input is "-", which matches the "-" check -> clear, go idle.
+        assert_eq!(r.display, "0");
+    }
+
+    #[test]
+    fn backspace_leaves_negative_zero_goes_idle() {
+        let mut c = Calculator::new();
+        display(&mut c, &["5", "+-"]);
+        // input is "-5", pop -> "-", not "-0" so idle. Let's test the "-0" path:
+        // We need "-0" in input. Press "+-", input is "-5" not "-0".
+        // To get "-0", we need: 0 +- => "-0" -- nope, plus_minus on "0" makes it "-0"?
+        // Actually: digit(0) -> input="0", plus_minus -> input="-0".
+        display(&mut c, &["c"]);
+        display(&mut c, &["0", "+-"]);
+        // input should be "-0"
+        let r = c.backspace();
+        assert_eq!(r.display, "0", "backspace on '-0' should return to idle");
+    }
+
+    #[test]
+    fn backspace_after_operator_is_noop() {
+        let mut c = Calculator::new();
+        display(&mut c, &["5", "+"]);
+        // State is OpPending, not Input. Backspace should not change anything.
+        let r = c.backspace();
+        assert_eq!(r.display, "5", "backspace after operator should be no-op on display");
+        assert_eq!(r.events, vec![VocalEvent::Backspace]);
+    }
+
+    #[test]
+    fn backspace_after_evaluated_is_noop() {
+        let mut c = Calculator::new();
+        display(&mut c, &["5", "+", "3", "="]);
+        // State is Evaluated. Backspace should not change anything.
+        let r = c.backspace();
+        assert_eq!(r.display, "8", "backspace after equals should be no-op on display");
+    }
+
+    #[test]
+    fn backspace_in_idle_is_noop() {
+        let mut c = Calculator::new();
+        let r = c.backspace();
+        assert_eq!(r.display, "0", "backspace in idle state should be no-op");
+    }
+
+    #[test]
+    fn clear_after_divide_by_zero_stays_error() {
+        let mut c = Calculator::new();
+        display(&mut c, &["5", "/", "0", "="]);
+        let r = c.clear();
+        assert!(r.is_error, "clear in error state should keep error flag");
+        assert!(r.events.is_empty());
+        assert_eq!(r.display, "错误");
+    }
+
+    #[test]
+    fn negative_sqrt_error_state_empty_events() {
+        let mut c = Calculator::new();
+        display(&mut c, &["9", "+-"]);
+        let r = c.square_root();
+        assert!(r.is_error);
+        // enter_error wraps the error in a single Error event.
+        assert_eq!(r.events, vec![VocalEvent::Error(CalcError::NegativeSquareRoot)]);
+        // Subsequent actions in error state return empty.
+        let r2 = c.digit(1);
+        assert!(r2.is_error);
+        assert!(r2.events.is_empty());
+    }
+
+    // ------ reset_from_snapshot tests ------
+
+    #[test]
+    fn reset_from_snapshot_sets_acc_from_display() {
+        let mut c = Calculator::new();
+        // Build up some state: 9 + 3 = → acc=12
+        let r = display(&mut c, &["9", "+", "3", "="]);
+        assert_eq!(r, "12");
+
+        // Reset from a snapshot with display "99".
+        c.reset_from_snapshot("99", "90 + 9 = ", "", false);
+
+        // After reset, dispatching "+ 1 =" should give 100, not 13.
+        let r = c.operator(BinaryOp::Add);
+        assert_eq!(r.display, "99", "acc should be 99 after reset");
+        let _r = c.digit(1);
+        let r = c.equals();
+        assert_eq!(r.display, "100");
+    }
+
+    #[test]
+    fn reset_from_snapshot_clears_pending_and_input() {
+        let mut c = Calculator::new();
+        // Leave in OpPending state: 5 +
+        display(&mut c, &["5", "+"]);
+
+        c.reset_from_snapshot("42", "40 + 2 = ", "", false);
+
+        // Pending should be cleared -- pressing "=" should be a no-op (no pending op).
+        let r = c.equals();
+        assert_eq!(r.display, "42", "no pending op after reset, equals should keep display");
+    }
+
+    #[test]
+    fn reset_from_snapshot_sets_error_state() {
+        let mut c = Calculator::new();
+        display(&mut c, &["1", "+", "2", "="]);
+
+        c.reset_from_snapshot("错误", "不能除以零", "", true);
+
+        assert!(c.result(vec![]).is_error, "should be in error state after reset");
+        // Actions in error state should return empty events.
+        let r = c.digit(5);
+        assert!(r.is_error);
+        assert!(r.events.is_empty());
+    }
+
+    #[test]
+    fn reset_from_snapshot_clears_error_state() {
+        let mut c = Calculator::new();
+        display(&mut c, &["5", "/", "0", "="]);
+        assert!(c.result(vec![]).is_error);
+
+        c.reset_from_snapshot("0", "", "", false);
+
+        let r = c.digit(1);
+        assert!(!r.is_error, "error should be cleared after reset");
+        assert_eq!(r.display, "1");
+    }
+
+    #[test]
+    fn reset_from_snapshot_zeroes_memory_when_indicator_empty() {
+        let mut c = Calculator::new();
+        display(&mut c, &["5", "m+"]);
+        assert_ne!(c.memory, Decimal::ZERO);
+
+        c.reset_from_snapshot("0", "", "", false);
+
+        assert_eq!(c.memory, Decimal::ZERO, "memory should be zeroed when indicator is empty");
+    }
+
+    #[test]
+    fn reset_from_snapshot_keeps_memory_when_indicator_m() {
+        let mut c = Calculator::new();
+        display(&mut c, &["5", "m+"]);
+        let saved_memory = c.memory;
+
+        c.reset_from_snapshot("0", "", "M", false);
+
+        assert_eq!(c.memory, saved_memory, "memory should be preserved when indicator is 'M'");
+    }
+
+    #[test]
+    fn reset_from_snapshot_sets_history() {
+        let mut c = Calculator::new();
+
+        c.reset_from_snapshot("42", "40 + 2 = ", "", false);
+
+        let r = c.result(vec![]);
+        assert_eq!(r.history, "40 + 2 = ");
+    }
+
+    #[test]
+    fn reset_from_snapshot_handles_zero_display() {
+        let mut c = Calculator::new();
+        display(&mut c, &["9", "+", "3", "="]);
+
+        c.reset_from_snapshot("0", "", "", false);
+
+        let r = c.equals();
+        assert_eq!(r.display, "0", "display should be 0 after reset to zero");
     }
 }

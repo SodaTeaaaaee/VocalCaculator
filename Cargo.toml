@@ -28,6 +28,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 socket2 = "0.6"
 hmac = "0.12"
 sha2 = "0.10"
+hostname = "0.4"
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21"
@@ -37,8 +38,6 @@ ndk-context = "0.1"
 slint-build = "1.16.1"
 
 [dev-dependencies]
-proptest = "1.11.0"
-rstest = "0.26.1"
 
 [package.metadata.android]
 package = "com.starberry.vocalcalculator"

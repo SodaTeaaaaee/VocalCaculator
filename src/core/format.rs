@@ -1,4 +1,5 @@
 use rust_decimal::Decimal;
+#[cfg(test)]
 use std::str::FromStr;
 
 /// Normalize a Decimal string: strip trailing zeros after decimal point.
@@ -53,6 +54,7 @@ fn format_scientific(value: &Decimal) -> String {
 }
 
 /// Parse a display string into a Decimal.
+#[cfg(test)]
 pub fn parse_display(s: &str) -> Option<Decimal> {
     Decimal::from_str(s).ok()
 }
@@ -101,5 +103,49 @@ mod tests {
         let s = format_for_speech(&d);
         assert!(!s.contains('e'), "speech format should not use scientific notation: {}", s);
         assert_eq!(s, "123456789012345");
+    }
+
+    // --- parse_display tests ---
+
+    #[test]
+    fn parse_display_valid_integer() {
+        let result = parse_display("42");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), Decimal::from(42));
+    }
+
+    #[test]
+    fn parse_display_valid_decimal() {
+        let result = parse_display("3.14");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), Decimal::from_str("3.14").unwrap());
+    }
+
+    #[test]
+    fn parse_display_negative() {
+        let result = parse_display("-7");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), Decimal::from(-7));
+    }
+
+    #[test]
+    fn parse_display_invalid() {
+        assert!(parse_display("abc").is_none());
+        assert!(parse_display("").is_none());
+        assert!(parse_display("12.34.56").is_none());
+    }
+
+    // --- format_for_speech additional tests ---
+
+    #[test]
+    fn format_for_speech_negative() {
+        let d = Decimal::from(-123);
+        assert_eq!(format_for_speech(&d), "-123");
+    }
+
+    #[test]
+    fn format_for_speech_decimal() {
+        let d = Decimal::from_str("2.50").unwrap();
+        assert_eq!(format_for_speech(&d), "2.5");
     }
 }

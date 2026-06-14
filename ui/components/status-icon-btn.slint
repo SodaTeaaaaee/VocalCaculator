@@ -1,0 +1,25 @@
+// ---- Reusable status bar icon button (Nerd Font glyph) ----
+export component StatusIconButton inherits Rectangle {
+    in property <string> icon;
+    in property <brush> icon-color: #706860;
+    in property <length> font-size: 10px;
+    in property <length> icon-size: 18px;
+    in property <brush> hover-color: transparent;
+    in property <float> opacity-val: 1.0;
+    callback clicked;
+
+    width: root.icon-size;
+    height: root.icon-size;
+    opacity: root.opacity-val;
+    border-radius: Math.min(self.width, self.height) * 0.2;
+    background: ta.has-hover ? root.hover-color : transparent;
+    ta := TouchArea { clicked => { root.clicked(); } }
+    Text {
+        text: root.icon;
+        font-family: "JetBrainsMono Nerd Font";
+        font-size: root.font-size;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        color: root.icon-color;
+    }
+}

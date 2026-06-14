@@ -1,0 +1,18 @@
+import { VerticalBox, Slider } from "std-widgets.slint";
+import "../resource/fonts/NotoSansSC-Regular.otf";
+import "../resource/fonts/JetBrainsMonoNerdFont-Regular.ttf";
+
+// =====================================================================
+// Shared types and constants for the VocalCalculator UI
+// =====================================================================
+
+// ---- Peer info for network overlay ----
+export struct PeerInfoSlint {
+    name: string,
+    address: string,
+    is-connected: bool,
+    latency-ms: int,
+    index: int,
+    node-id-string: string,
+}
+

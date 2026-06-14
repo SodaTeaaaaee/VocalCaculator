@@ -72,3 +72,150 @@ pub fn events_to_wav_indices(events: &[VocalEvent], rng_state: &mut u64) -> Vec<
 
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::token::{BinaryOp, VocalEvent};
+
+    /// Helper: run events_to_wav_indices with a fresh seed.
+    fn run(events: &[VocalEvent], seed: u64) -> Vec<u16> {
+        let mut state = seed;
+        events_to_wav_indices(events, &mut state)
+    }
+
+    #[test]
+    fn deterministic_seed_produces_specific_corruption_pattern() {
+        // Seed 1 gives a known, reproducible PRNG sequence.
+        // Feed Digit(2) -> normal index 2, which has broken variants [38, 44, 52, 53].
+        let events = vec![VocalEvent::Digit(2)];
+        let result = run(&events, 1);
+
+        // The result must be exactly 1 element.
+        assert_eq!(result.len(), 1);
+
+        // With seed=1 the first xorshift64 roll is 0 (< MAX_CORRUPTION_PROB),
+        // so corruption triggers. pick_idx = 0 % 4 = 0 -> pool[0] = 38.
+        assert_eq!(result[0], 38);
+    }
+
+    #[test]
+    fn deterministic_seed_longer_sequence() {
+        // Feed several Digit(2) events to consume multiple PRNG rolls.
+        let events = vec![
+            VocalEvent::Digit(2),
+            VocalEvent::Digit(2),
+            VocalEvent::Digit(2),
+            VocalEvent::Digit(2),
+        ];
+        let result = run(&events, 1);
+
+        // All 4 should produce indices in the valid broken range for digit 2
+        // (either the broken pool [38,44,52,53] or the normal index 2).
+        assert_eq!(result.len(), 4);
+        for &idx in &result {
+            assert!(
+                idx == 2 || BROKEN_DIGIT_TWO.contains(&idx),
+                "unexpected index {idx} for Digit(2) corruption"
+            );
+        }
+
+        // Snapshot: this is the exact output with seed=1 and 4x Digit(2).
+        // If the PRNG or corruption logic changes, this will flag it.
+        assert_eq!(result, vec![38, 52, 2, 2]);
+    }
+
+    #[test]
+    fn different_seeds_produce_different_corruption_patterns() {
+        let events = vec![
+            VocalEvent::Digit(2),
+            VocalEvent::Digit(2),
+            VocalEvent::Digit(2),
+            VocalEvent::Digit(2),
+            VocalEvent::Digit(2),
+            VocalEvent::Digit(2),
+            VocalEvent::Digit(2),
+            VocalEvent::Digit(2),
+        ];
+
+        let result_a = run(&events, 1);
+        let result_b = run(&events, 0xDEADBEEF);
+
+        // The two seeds must produce different corruption sequences.
+        assert_ne!(result_a, result_b, "different seeds should yield different patterns");
+    }
+
+    #[test]
+    fn different_seeds_for_digit_with_no_broken_variants() {
+        // Digit(9) -> normal index 9, no broken variant.
+        // When corrupted, it falls through to the noise pool (indices 36-68).
+        let events = vec![VocalEvent::Digit(9); 8];
+
+        let result_a = run(&events, 1);
+        let result_b = run(&events, 0xCAFE_BABE);
+
+        // Both results must be valid indices.
+        for &idx in result_a.iter().chain(result_b.iter()) {
+            assert!(idx < 69, "index {idx} out of valid range 0-68");
+        }
+
+        // With enough samples the two seeds should diverge.
+        assert_ne!(result_a, result_b);
+    }
+
+    #[test]
+    fn non_corrupted_events_return_valid_indices() {
+        // Use a seed that produces only high rolls (> MAX_CORRUPTION_PROB),
+        // meaning no corruption. Seed 0 is replaced internally to a non-zero
+        // value; we need a seed whose first roll exceeds u32::MAX / 2.
+        //
+        // Rather than hunting for such a seed, verify the invariant:
+        // every returned index must be in 0..68.
+        let events = vec![
+            VocalEvent::Digit(0),
+            VocalEvent::Digit(1),
+            VocalEvent::Digit(2),
+            VocalEvent::Digit(3),
+            VocalEvent::Digit(4),
+            VocalEvent::Digit(5),
+            VocalEvent::Digit(6),
+            VocalEvent::Digit(7),
+            VocalEvent::Digit(8),
+            VocalEvent::Digit(9),
+            VocalEvent::DecimalPoint,
+            VocalEvent::Operator(BinaryOp::Add),
+            VocalEvent::Operator(BinaryOp::Subtract),
+            VocalEvent::Operator(BinaryOp::Multiply),
+            VocalEvent::Operator(BinaryOp::Divide),
+            VocalEvent::Equals,
+            VocalEvent::Percent,
+            VocalEvent::SquareRoot,
+        ];
+
+        // Test across many seeds to ensure validity.
+        for seed in [1u64, 42, 100, 999, 0xDEAD, 0xCAFE_BABE] {
+            let result = run(&events, seed);
+            assert_eq!(result.len(), events.len());
+            for &idx in &result {
+                assert!(idx < 69, "index {idx} out of valid range 0..69 (seed={seed})");
+            }
+        }
+    }
+
+    #[test]
+    fn broken_variants_mapping_covers_expected_digits() {
+        // Verify the mapping returns Some for the expected normal indices.
+        assert!(broken_variants_for_normal(2).is_some());
+        assert!(broken_variants_for_normal(3).is_some());
+        assert!(broken_variants_for_normal(4).is_some());
+        assert!(broken_variants_for_normal(5).is_some());
+        assert!(broken_variants_for_normal(15).is_some());
+        assert!(broken_variants_for_normal(31).is_some());
+
+        // And None for indices with no broken variants.
+        assert!(broken_variants_for_normal(0).is_none());
+        assert!(broken_variants_for_normal(1).is_none());
+        assert!(broken_variants_for_normal(6).is_none());
+        assert!(broken_variants_for_normal(34).is_none());
+    }
+}

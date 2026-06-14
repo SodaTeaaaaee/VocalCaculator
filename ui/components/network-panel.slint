@@ -1,0 +1,423 @@
+import { SkeuBtn } from "button.slint";
+import { PeerInfoSlint } from "../theme.slint";
+
+// ---- Network Settings Overlay ----
+export component NetworkPanel inherits Rectangle {
+    // Theme
+    in property <bool> dark-mode;
+    in property <brush> body-fill: #c0bab4;
+    in property <brush> body-edge: #a8a29c;
+    in property <brush> body-inner: #d4cec8;
+    in property <brush> status-fg: #706860;
+    in property <brush> status-hover: #c0bab4;
+
+    // Network state
+    in property <string> network-status: "";
+    in property <bool> remote-controlled: false;
+    in property <bool> executing-remotely: false;
+    in property <string> connection-info: "";
+    in property <[PeerInfoSlint]> peers;
+    in property <bool> scanning: false;
+    in-out property <bool> allow-remote-control: true;
+
+    // Routing matrix
+    in property <int> matrix-size: 0;
+    in property <[string]> peer-names: [];
+    in property <int> my-index: -1;
+    in property <[bool]> matrix-cells: [];
+    in property <bool> audio-muted: false;
+
+    // Layout dimensions
+    in property <length> layout-padding: 4px;
+    in property <length> layout-spacing: 2px;
+    in property <length> status-h: 24px;
+    in property <length> status-icon-sz: 18px;
+    in property <length> status-font-size: 10px;
+    in property <length> name-col-width: 100px;
+    in property <length> cell-width: 64px;
+
+    // Responsive cell width: stretches to fill available space when few
+    // columns, clamps to cell-width (enabling horizontal scroll) when many.
+    property <length> computed-cell-w: root.matrix-size > 0
+        ? Math.max(48px, Math.min(root.cell-width,
+            (root.width - root.name-col-width - root.layout-padding * 8) / root.matrix-size))
+        : root.cell-width;
+    // Total content width for the Flickable viewport.
+    property <length> total-matrix-w: root.layout-padding * 2
+        + root.name-col-width + root.computed-cell-w * root.matrix-size
+        + 2px * Math.max(0, root.matrix-size - 1);
+
+    // Callbacks
+    callback close-network-settings();
+    callback connect-to-peer(string);
+    callback disconnect-peer(string);
+    callback scan-peers();
+    callback toggle-remote-control();
+    callback route-toggled(int, int, bool);
+    callback toggle-mute();
+
+    // Semi-transparent backdrop touch catcher
+    backdrop := TouchArea { clicked => { root.close-network-settings(); } }
+
+    // Card
+    Rectangle {
+        x: root.layout-padding * 2;
+        y: root.layout-padding * 2;
+        width: parent.width - root.layout-padding * 4;
+        height: parent.height - root.layout-padding * 4;
+        property <length> card-r: Math.min(self.width, self.height) * 0.04;
+        border-radius: self.card-r;
+        background: root.body-fill;
+        border-width: 1px;
+        border-color: root.body-edge;
+
+        // Swallow clicks on the card so they don't reach the backdrop
+        TouchArea {}
+
+        // Inner bevel for card
+        Rectangle {
+            x: 2px; y: 2px;
+            width: parent.width - 4px;
+            height: parent.height - 4px;
+            border-radius: Math.max(0px, parent.card-r - 2px);
+            background: root.body-inner;
+            border-width: 1px;
+            border-color: root.dark-mode ? #1a1a20 : #b8b2ac;
+
+            VerticalLayout {
+                padding: root.layout-padding;
+                spacing: root.layout-spacing;
+
+                // Title bar with close button
+                HorizontalLayout {
+                    height: root.status-h;
+                    spacing: root.layout-spacing;
+                    Text {
+                        text: "\u{F0AC} 网络设置";
+                        font-family: "JetBrainsMono Nerd Font";
+                        font-size: Math.max(12px, root.status-font-size * 1.3);
+                        font-weight: 700;
+                        color: root.dark-mode ? #d0d0d0 : #2a2a2a;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                    // Close button
+                    Rectangle {
+                        width: root.status-icon-sz;
+                        height: root.status-icon-sz;
+                        border-radius: Math.min(self.width, self.height) * 0.2;
+                        background: close-ta.has-hover ? root.status-hover : transparent;
+                        close-ta := TouchArea { clicked => { root.close-network-settings(); } }
+                        Text {
+                            text: "\u{F00D}";
+                            font-family: "JetBrainsMono Nerd Font";
+                            font-size: root.status-font-size;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            color: root.status-fg;
+                        }
+                    }
+                }
+
+                // Connection status
+                Rectangle {
+                    height: root.status-h;
+                    border-radius: Math.min(self.width, self.height) * 0.15;
+                    background: root.dark-mode ? #222228 : #d4cec8;
+                    border-width: 1px;
+                    border-color: root.dark-mode ? #3a3a42 : #b8b2ac;
+                    HorizontalLayout {
+                        padding: root.layout-padding;
+                        Text {
+                            text: root.network-status != "" ? root.network-status : "未连接";
+                            font-size: root.status-font-size;
+                            color: root.network-status != "" ? (root.executing-remotely ? #40c040 : root.remote-controlled ? #4080ff : root.status-fg) : (root.dark-mode ? #808090 : #706860);
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                    }
+                }
+
+                // Connection info (if any)
+                if root.connection-info != "": Rectangle {
+                    height: root.status-h;
+                    border-radius: Math.min(self.width, self.height) * 0.15;
+                    background: root.dark-mode ? #222228 : #d4cec8;
+                    border-width: 1px;
+                    border-color: root.dark-mode ? #3a3a42 : #b8b2ac;
+                    HorizontalLayout {
+                        padding: root.layout-padding;
+                        Text {
+                            text: root.connection-info;
+                            font-size: root.status-font-size;
+                            color: root.status-fg;
+                            vertical-alignment: center;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                // Allow remote control toggle
+                Rectangle {
+                    height: root.status-h;
+                    border-radius: Math.min(self.width, self.height) * 0.15;
+                    background: root.dark-mode ? #222228 : #d4cec8;
+                    border-width: 1px;
+                    border-color: root.dark-mode ? #3a3a42 : #b8b2ac;
+                    HorizontalLayout {
+                        padding: root.layout-padding;
+                        spacing: 8px;
+                        Text {
+                            text: "\u{F023} 允许远程控制";
+                            font-family: "JetBrainsMono Nerd Font";
+                            font-size: root.status-font-size;
+                            color: root.status-fg;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        // Toggle button
+                        Rectangle {
+                            width: 48px;
+                            height: 22px;
+                            border-radius: 11px;
+                            background: root.allow-remote-control
+                                ? (toggle-ta.has-hover ? #3a8a3a : #2a6a2a)
+                                : (toggle-ta.has-hover ? #5a3030 : #4a2020);
+                            border-width: 1px;
+                            border-color: root.allow-remote-control
+                                ? (root.dark-mode ? #40a040 : #308030)
+                                : (root.dark-mode ? #804040 : #a06060);
+
+                            toggle-ta := TouchArea {
+                                clicked => { root.toggle-remote-control(); }
+                            }
+
+                            // Toggle knob
+                            Rectangle {
+                                width: 18px;
+                                height: 18px;
+                                border-radius: 9px;
+                                x: root.allow-remote-control ? parent.width - self.width - 2px : 2px;
+                                background: root.dark-mode ? #d0d0d0 : #ffffff;
+                                border-width: 1px;
+                                border-color: root.dark-mode ? #808080 : #b0b0b0;
+                            }
+                        }
+                    }
+                }
+
+                // Mute mode toggle
+                Rectangle {
+                    height: root.status-h;
+                    border-radius: Math.min(self.width, self.height) * 0.15;
+                    background: root.dark-mode ? #222228 : #d4cec8;
+                    border-width: 1px;
+                    border-color: root.dark-mode ? #3a3a42 : #b8b2ac;
+                    HorizontalLayout {
+                        padding: root.layout-padding;
+                        spacing: 8px;
+                        Text {
+                            text: "\u{F026} 静音模式";
+                            font-family: "JetBrainsMono Nerd Font";
+                            font-size: root.status-font-size;
+                            color: root.status-fg;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        Rectangle {
+                            width: 48px;
+                            height: 22px;
+                            border-radius: 11px;
+                            background: root.audio-muted
+                                ? (mute-ta.has-hover ? #8a6a2a : #6a5a2a)
+                                : (mute-ta.has-hover ? #5a3030 : #4a2020);
+                            border-width: 1px;
+                            border-color: root.audio-muted
+                                ? (root.dark-mode ? #c0a040 : #a08030)
+                                : (root.dark-mode ? #804040 : #a06060);
+                            mute-ta := TouchArea {
+                                clicked => { root.toggle-mute(); }
+                            }
+                            Rectangle {
+                                width: 18px;
+                                height: 18px;
+                                border-radius: 9px;
+                                x: root.audio-muted ? parent.width - self.width - 2px : 2px;
+                                background: root.dark-mode ? #d0d0d0 : #ffffff;
+                                border-width: 1px;
+                                border-color: root.dark-mode ? #808080 : #b0b0b0;
+                            }
+                        }
+                    }
+                }
+
+                // Routing matrix header
+                Rectangle {
+                    height: root.status-h;
+                    HorizontalLayout {
+                        padding: 2px;
+                        spacing: 4px;
+                        Text {
+                            text: "路由矩阵";
+                            font-size: root.status-font-size;
+                            font-weight: 600;
+                            color: root.dark-mode ? #a0a0a0 : #4a4a4a;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        SkeuBtn {
+                            label: root.scanning ? "扫描中..." : "扫描";
+                            base: root.dark-mode ? #3a4a3a : #c8d8c8;
+                            fg: root.dark-mode ? #a0c0a0 : #2a4a2a;
+                            font-size: Math.max(9px, root.status-font-size * 0.9);
+                            width: 56px;
+                            clicked => { root.scan-peers(); }
+                        }
+                    }
+                }
+
+                // Routing matrix grid
+                Rectangle {
+                    vertical-stretch: 1;
+                    border-radius: Math.min(self.width, self.height) * 0.02;
+                    background: root.dark-mode ? #1a1a20 : #e0dcd8;
+                    border-width: 1px;
+                    border-color: root.dark-mode ? #3a3a42 : #b8b2ac;
+                    clip: true;
+
+                    // Empty state
+                    if root.matrix-size == 0: VerticalLayout {
+                        padding: root.layout-padding;
+                        Text {
+                            text: "暂无节点连接";
+                            font-size: root.status-font-size;
+                            color: root.dark-mode ? #606070 : #908880;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    // Matrix grid: single Flickable with horizontal + vertical
+                    // scrolling.  Column headers live inside the Flickable so
+                    // they stay aligned with their data columns during
+                    // horizontal scroll.
+                    if root.matrix-size > 0: Flickable {
+                        viewport-width: Math.max(self.width, root.total-matrix-w);
+                        viewport-height: Math.max(self.height,
+                            root.layout-padding * 2
+                            + 32px * (root.matrix-size + 1)
+                            + 2px * root.matrix-size);
+
+                        VerticalLayout {
+                            padding: root.layout-padding;
+                            spacing: 2px;
+
+                            // Column headers (scroll horizontally with data)
+                            HorizontalLayout {
+                                height: 32px;
+                                spacing: 2px;
+                                // Empty corner cell
+                                Rectangle {
+                                    width: root.name-col-width;
+                                    height: 32px;
+                                }
+                                for col in root.matrix-size: Rectangle {
+                                    width: root.computed-cell-w;
+                                    height: 32px;
+                                    border-radius: 4px;
+                                    background: root.dark-mode ? #222228 : #d4cec8;
+                                    Text {
+                                        text: col < root.peer-names.length ? root.peer-names[col] : "";
+                                        font-size: Math.max(8px, root.status-font-size * 0.85);
+                                        font-weight: 600;
+                                        color: col == root.my-index
+                                            ? (root.dark-mode ? #60c060 : #2a8a2a)
+                                            : (root.dark-mode ? #a0a0a0 : #4a4a4a);
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                    }
+                                }
+                            }
+
+                            // Data rows
+                            for row in root.matrix-size: HorizontalLayout {
+                                spacing: 2px;
+                                // Row header
+                                Rectangle {
+                                    width: root.name-col-width;
+                                    height: 32px;
+                                    border-radius: 4px;
+                                    background: root.dark-mode ? #222228 : #d4cec8;
+                                    Text {
+                                        text: row < root.peer-names.length ? root.peer-names[row] : "";
+                                        font-size: Math.max(8px, root.status-font-size * 0.85);
+                                        font-weight: 600;
+                                        color: row == root.my-index
+                                            ? (root.dark-mode ? #60c060 : #2a8a2a)
+                                            : (root.dark-mode ? #a0a0a0 : #4a4a4a);
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                    }
+                                }
+                                // Matrix cells
+                                for col in root.matrix-size: Rectangle {
+                                    width: root.computed-cell-w;
+                                    height: 32px;
+                                    border-radius: 4px;
+                                    border-width: 1px;
+                                    background: (row == root.my-index && row != col)
+                                        ? (cell-ta.has-hover ? (root.dark-mode ? #3a4a3a : #c8d8c8) : (root.dark-mode ? #2a2a30 : #e0dcd8))
+                                        : (root.dark-mode ? #1a1a20 : #d8d4d0);
+                                    border-color: (row == root.my-index && row != col)
+                                        ? (root.dark-mode ? #4a5a4a : #a8b8a8)
+                                        : (root.dark-mode ? #2a2a30 : #c0bcb8);
+
+                                    // Checkbox indicator
+                                    Rectangle {
+                                        x: (parent.width - self.width) / 2;
+                                        y: (parent.height - self.height) / 2;
+                                        width: 14px;
+                                        height: 14px;
+                                        border-radius: 3px;
+                                        background: (row == col)
+                                            ? (root.dark-mode ? #606070 : #908880)
+                                            : (root.matrix-cells[row * root.matrix-size + col]
+                                                ? ((row == root.my-index) ? (root.dark-mode ? #40a040 : #2a8a2a) : (root.dark-mode ? #505060 : #807870))
+                                                : (root.dark-mode ? #2a2a30 : #c8c4c0));
+                                        border-width: 1px;
+                                        border-color: (row == col)
+                                            ? transparent
+                                            : (root.matrix-cells[row * root.matrix-size + col]
+                                                ? transparent
+                                                : (root.dark-mode ? #404050 : #a09890));
+                                        // Checkmark glyph for checked cells
+                                        if row != col && root.matrix-cells[row * root.matrix-size + col]: Text {
+                                            text: "\u{2713}";
+                                            font-size: 10px;
+                                            color: root.dark-mode ? #d0d0d0 : #ffffff;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+
+                                    // Cursor hint: only show pointer on
+                                    // editable cells (user's own row, not diagonal).
+                                    cell-ta := TouchArea {
+                                        mouse-cursor: (row == root.my-index && row != col) ? pointer : default;
+                                        clicked => {
+                                            if row == root.my-index && row != col {
+                                                root.route-toggled(row, col, !root.matrix-cells[row * root.matrix-size + col]);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

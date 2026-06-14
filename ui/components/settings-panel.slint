@@ -1,0 +1,180 @@
+import { LineEdit } from "std-widgets.slint";
+import { SkeuBtn } from "button.slint";
+
+// ---- Settings Overlay ----
+export component SettingsPanel inherits Rectangle {
+    // Theme
+    in property <bool> dark-mode;
+    in property <brush> body-fill: #c0bab4;
+    in property <brush> body-edge: #a8a29c;
+    in property <brush> body-inner: #d4cec8;
+    in property <brush> status-fg: #706860;
+    in property <brush> status-hover: #c0bab4;
+    in property <brush> btn-func: #b0aca8;
+    in property <brush> btn-func-fg: #4a4a4a;
+    in property <brush> btn-op: #e8a848;
+    in property <brush> btn-op-fg: #3a2a10;
+
+    // Layout dimensions
+    in property <length> layout-padding: 4px;
+    in property <length> layout-spacing: 2px;
+    in property <length> status-h: 24px;
+    in property <length> status-icon-sz: 18px;
+    in property <length> status-font-size: 10px;
+
+    // Settings data
+    in-out property <string> display-name: "";
+    in property <string> original-display-name: "";
+    in property <string> save-status: "";
+
+    // Callbacks
+    callback close-settings();
+    callback save-display-name(string);
+
+    // Semi-transparent backdrop
+    backdrop := TouchArea { clicked => { root.close-settings(); } }
+
+    // Card
+    Rectangle {
+        x: root.layout-padding * 2;
+        y: root.layout-padding * 2;
+        width: parent.width - root.layout-padding * 4;
+        height: parent.height - root.layout-padding * 4;
+        property <length> card-r: Math.min(self.width, self.height) * 0.04;
+        border-radius: self.card-r;
+        background: root.body-fill;
+        border-width: 1px;
+        border-color: root.body-edge;
+
+        // Swallow clicks on the card so they don't reach the backdrop
+        TouchArea {}
+
+        // Inner bevel
+        Rectangle {
+            x: 2px; y: 2px;
+            width: parent.width - 4px;
+            height: parent.height - 4px;
+            border-radius: Math.max(0px, parent.card-r - 2px);
+            background: root.body-inner;
+            border-width: 1px;
+            border-color: root.dark-mode ? #1a1a20 : #b8b2ac;
+
+            VerticalLayout {
+                padding: root.layout-padding;
+                spacing: root.layout-spacing;
+
+                // Title bar with close button
+                HorizontalLayout {
+                    height: root.status-h;
+                    spacing: root.layout-spacing;
+                    Text {
+                        text: "\u{F013} 设置";
+                        font-family: "JetBrainsMono Nerd Font";
+                        font-size: Math.max(12px, root.status-font-size * 1.3);
+                        font-weight: 700;
+                        color: root.dark-mode ? #d0d0d0 : #2a2a2a;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                    // Close button
+                    Rectangle {
+                        width: root.status-icon-sz;
+                        height: root.status-icon-sz;
+                        border-radius: Math.min(self.width, self.height) * 0.2;
+                        background: close-ta.has-hover ? root.status-hover : transparent;
+                        close-ta := TouchArea { clicked => { root.close-settings(); } }
+                        Text {
+                            text: "\u{F00D}";
+                            font-family: "JetBrainsMono Nerd Font";
+                            font-size: root.status-font-size;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            color: root.status-fg;
+                        }
+                    }
+                }
+
+                // Section: Network
+                Rectangle {
+                    height: root.status-h;
+                    HorizontalLayout {
+                        padding: 2px;
+                        Text {
+                            text: "网络";
+                            font-size: root.status-font-size;
+                            font-weight: 600;
+                            color: root.dark-mode ? #a0a0a0 : #4a4a4a;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                // Display name field
+                Rectangle {
+                    height: root.status-h + 8px;
+                    border-radius: Math.min(self.width, self.height) * 0.15;
+                    background: root.dark-mode ? #222228 : #d4cec8;
+                    border-width: 1px;
+                    border-color: root.dark-mode ? #3a3a42 : #b8b2ac;
+                    HorizontalLayout {
+                        padding: root.layout-padding;
+                        spacing: 8px;
+                        Text {
+                            text: "\u{F007} 设备名称";
+                            font-family: "JetBrainsMono Nerd Font";
+                            font-size: root.status-font-size;
+                            color: root.status-fg;
+                            vertical-alignment: center;
+                        }
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            vertical-stretch: 1;
+                            LineEdit {
+                                x: 0; y: 0;
+                                width: parent.width;
+                                height: parent.height;
+                                text: root.display-name;
+                                placeholder-text: "输入设备名称...";
+                                font-size: root.status-font-size;
+                                edited(t) => { root.display-name = t; }
+                            }
+                        }
+                    }
+                }
+
+                // Save status text
+                if root.save-status != "": Rectangle {
+                    height: root.status-h;
+                    HorizontalLayout {
+                        padding: 2px;
+                        Text {
+                            text: root.save-status;
+                            font-size: Math.max(9px, root.status-font-size * 0.9);
+                            color: root.save-status == "已保存" ? #2a8a2a : root.status-fg;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                // Spacer
+                Rectangle { vertical-stretch: 1; }
+
+                // Save button
+                HorizontalLayout {
+                    height: root.status-h;
+                    spacing: root.layout-spacing;
+                    Rectangle { horizontal-stretch: 1; }
+                    SkeuBtn {
+                        label: "保存";
+                        base: root.btn-op;
+                        fg: root.btn-op-fg;
+                        font-size: root.status-font-size;
+                        width: 80px;
+                        clicked => { root.save-display-name(root.display-name); }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+            }
+        }
+    }
+}

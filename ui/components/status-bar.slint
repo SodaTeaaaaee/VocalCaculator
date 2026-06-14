@@ -1,0 +1,79 @@
+import { StatusIconButton } from "status-icon-btn.slint";
+
+// ---- Status bar with memory indicator, audio/mode info, and icon buttons ----
+export component StatusBar inherits HorizontalLayout {
+    in property <string> memory-indicator;
+    in property <string> audio-status;
+    in property <string> mode-indicator;
+    in property <string> network-status;
+    in property <bool> dark-mode;
+    in property <bool> remote-controlled;
+    in property <bool> executing-remotely;
+    in property <length> status-font-size: 10px;
+    in property <length> status-icon-sz: 18px;
+    in property <length> layout-spacing: 2px;
+    in property <brush> status-fg: #706860;
+    in property <brush> status-hover: #c0bab4;
+    in property <brush> btn-memory: #c04040;
+
+    callback toggle-theme();
+    callback switch-audio-mode();
+    callback show-about();
+    callback show-network-settings();
+    callback show-settings();
+
+    spacing: root.layout-spacing;
+    padding: 4px;
+    Text { text: root.memory-indicator; font-size: root.status-font-size; color: root.btn-memory; font-weight: 700; vertical-alignment: center; }
+    Rectangle { horizontal-stretch: 1; }
+    Text { text: root.audio-status; font-size: root.status-font-size; color: root.status-fg; vertical-alignment: center; }
+    Text { text: " "; font-size: Math.max(6px, root.status-font-size * 0.5); vertical-alignment: center; }
+    Text { text: root.mode-indicator; font-size: root.status-font-size; color: root.status-fg; vertical-alignment: center; }
+
+    // Theme toggle
+    StatusIconButton {
+        icon: root.dark-mode ? "\u{F185}" : "\u{F186}";
+        icon-color: root.status-fg;
+        font-size: root.status-font-size;
+        icon-size: root.status-icon-sz;
+        hover-color: root.status-hover;
+        clicked => { root.toggle-theme(); }
+    }
+    // Audio mode
+    StatusIconButton {
+        icon: "\u{F001}";
+        icon-color: root.status-fg;
+        font-size: root.status-font-size;
+        icon-size: root.status-icon-sz;
+        hover-color: root.status-hover;
+        clicked => { root.switch-audio-mode(); }
+    }
+    // About
+    StatusIconButton {
+        icon: "\u{F05A}";
+        icon-color: root.status-fg;
+        font-size: root.status-font-size;
+        icon-size: root.status-icon-sz;
+        hover-color: root.status-hover;
+        clicked => { root.show-about(); }
+    }
+    // Settings
+    StatusIconButton {
+        icon: "\u{F013}";
+        icon-color: root.status-fg;
+        font-size: root.status-font-size;
+        icon-size: root.status-icon-sz;
+        hover-color: root.status-hover;
+        clicked => { root.show-settings(); }
+    }
+    // Network status indicator (clickable -> opens settings)
+    StatusIconButton {
+        icon: root.executing-remotely ? "\u{F0E7}" : root.remote-controlled ? "\u{F0AC}" : "\u{F0C2}";
+        icon-color: root.executing-remotely ? #ffa500 : root.remote-controlled ? #40c040 : root.status-fg;
+        font-size: root.status-font-size;
+        icon-size: root.status-icon-sz;
+        hover-color: root.status-hover;
+        opacity-val: root.network-status != "" ? 1.0 : 0.3;
+        clicked => { root.show-network-settings(); }
+    }
+}

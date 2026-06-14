@@ -1,4 +1,5 @@
 pub mod broken;
+pub mod convert;
 pub mod music;
 pub mod normal;
 pub mod registry;
@@ -11,6 +12,7 @@ use kira::{AudioManager, AudioManagerSettings, DefaultBackend, Decibels, Easing,
 use music::MusicTones;
 
 use crate::core::token::VocalEvent;
+use crate::traits::AudioPlayer;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioMode {
@@ -230,12 +232,11 @@ impl VocalAudio {
                 }
             }
             None => {
-                if let Some(&idx) = tone_indices.first() {
-                    if let Some(data) = self.music_tones.get_sound(idx) {
-                        if let Ok(handle) = self.main_track.play(data.clone()) {
-                            self.current_handle = Some(handle);
-                        }
-                    }
+                if let Some(&idx) = tone_indices.first()
+                    && let Some(data) = self.music_tones.get_sound(idx)
+                    && let Ok(handle) = self.main_track.play(data.clone())
+                {
+                    self.current_handle = Some(handle);
                 }
             }
         }
@@ -257,4 +258,21 @@ impl VocalAudio {
     }
 }
 
-pub mod convert;
+impl AudioPlayer for VocalAudio {
+    fn play_events(&mut self, events: &[VocalEvent]) {
+        self.play_events(events);
+    }
+
+    fn set_mode(&mut self, mode: AudioMode) {
+        self.set_mode(mode);
+    }
+
+    fn set_volume(&mut self, slider: f64) {
+        self.set_volume(slider);
+    }
+
+    fn mode(&self) -> AudioMode {
+        self.mode()
+    }
+}
+
