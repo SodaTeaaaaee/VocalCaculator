@@ -91,6 +91,7 @@
   --brand-h: clamp(26px, 4.8cqh, 38px);
   --status-h: clamp(30px, 5.8cqh, 44px);
   --volume-h: clamp(30px, 5.4cqh, 42px);
+  --mobile-actions-h: 0px;
   --history-h: clamp(16px, 2.8cqh, 22px);
   --lcd-h: clamp(58px, 11cqh, 92px);
   --layout-gap: clamp(4px, 0.75cqh, 7px);
@@ -336,7 +337,7 @@ button {
 .lcd-display__inner,
 .skeu-btn,
 .status-bar,
-.status-icon-btn,
+.icon-button,
 .volume-row__mute-btn,
 .overlay-card,
 .overlay-card__inner,

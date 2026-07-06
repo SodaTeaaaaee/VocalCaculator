@@ -1,7 +1,7 @@
 //! CalculatorUI -- root Dioxus component for the skeuomorphic calculator.
 //!
 //! Owns the 7-row button layout table and renders the full calculator
-//! body including all sub-components: BrandLabel, StatusBar, VolumeRow,
+//! body including all sub-components: BrandLabel, StatusBar,
 //! HistoryText, LcdDisplay, ButtonGrid.
 
 use dioxus::prelude::*;
@@ -15,8 +15,7 @@ use super::icon::{Icon, IconName};
 use super::keyboard::KeyboardHandler;
 use super::network_panel::{NetworkPanel, NetworkPanelContent, PeerDisplayInfo};
 use super::settings_panel::{SettingsContent, SettingsPanel};
-use super::status_bar::StatusBar;
-use super::volume_row::VolumeRow;
+use super::status_bar::{MobileQuickActions, StatusBar};
 
 // ---------------------------------------------------------------------------
 // ButtonDef -- static descriptor for a single calculator button
@@ -236,6 +235,7 @@ pub struct CalculatorUIProps {
 pub fn CalculatorUI(props: CalculatorUIProps) -> Element {
     let mut split_left_px = use_signal(|| None::<i32>);
     let mut split_dragging = use_signal(|| false);
+    let mut workbench_tab = use_signal(|| WorkbenchTab::Overview);
     let split_style = split_left_px()
         .map(|value| format!("--split-left: {value}px;"))
         .unwrap_or_else(|| "--split-left: 40vw;".to_string());
@@ -283,8 +283,15 @@ pub fn CalculatorUI(props: CalculatorUIProps) -> Element {
                             audio_status: props.audio_status.clone(),
                             mode_indicator: props.mode_indicator.clone(),
                             network_status: props.network_status.clone(),
-                            dark_mode: props.dark_mode,
                             error_state: props.error_state,
+                            remote_controlled: props.remote_controlled,
+                            executing_remotely: props.executing_remotely,
+                        }
+
+                        // [2] Mobile-only quick actions
+                        MobileQuickActions {
+                            dark_mode: props.dark_mode,
+                            network_status: props.network_status.clone(),
                             remote_controlled: props.remote_controlled,
                             executing_remotely: props.executing_remotely,
                             on_toggle_theme: props.on_toggle_theme,
@@ -292,15 +299,6 @@ pub fn CalculatorUI(props: CalculatorUIProps) -> Element {
                             on_show_about: props.on_show_about,
                             on_show_network_settings: props.on_show_network_settings,
                             on_show_settings: props.on_show_settings,
-                        }
-
-                        // [2] Volume slider row
-                        VolumeRow {
-                            audio_muted: props.audio_muted,
-                            volume: props.audio_volume,
-                            dark_mode: props.dark_mode,
-                            on_toggle_mute: props.on_toggle_mute,
-                            on_volume_changed: props.on_volume_changed,
                         }
 
                         // [3] History text
@@ -369,10 +367,12 @@ pub fn CalculatorUI(props: CalculatorUIProps) -> Element {
             }
 
             Workbench {
+                active_tab: workbench_tab(),
                 audio_status: props.audio_status.clone(),
                 audio_muted: props.audio_muted,
                 audio_volume: props.audio_volume,
                 mode_indicator: props.mode_indicator.clone(),
+                dark_mode: props.dark_mode,
                 network_status: props.network_status.clone(),
                 remote_controlled: props.remote_controlled,
                 executing_remotely: props.executing_remotely,
@@ -380,15 +380,19 @@ pub fn CalculatorUI(props: CalculatorUIProps) -> Element {
                 allow_remote_control: props.allow_remote_control,
                 settings_display_name: props.settings_display_name.clone(),
                 settings_save_status: props.settings_save_status.clone(),
+                app_version: props.app_version.clone(),
                 peers: props.peers.clone(),
                 connected_peer_index: props.connected_peer_index,
                 matrix_size: props.matrix_size,
                 peer_names: props.peer_names.clone(),
                 my_index: props.my_index,
                 matrix_cells: props.matrix_cells.clone(),
+                on_tab_change: move |tab| workbench_tab.set(tab),
                 on_switch_audio_mode: props.on_switch_audio_mode,
                 on_toggle_mute: props.on_toggle_mute,
                 on_volume_changed: props.on_volume_changed,
+                on_toggle_theme: props.on_toggle_theme,
+                on_show_about: props.on_show_about,
                 on_save_display_name: props.on_save_display_name,
                 on_connect_to_peer: props.on_connect_to_peer,
                 on_disconnect_peer: props.on_disconnect_peer,
@@ -426,8 +430,19 @@ pub fn CalculatorUI(props: CalculatorUIProps) -> Element {
                 SettingsPanel {
                     display_name: props.settings_display_name.clone(),
                     save_status: props.settings_save_status.clone(),
+                    audio_status: props.audio_status.clone(),
+                    audio_muted: props.audio_muted,
+                    audio_volume: props.audio_volume,
+                    mode_indicator: props.mode_indicator.clone(),
+                    dark_mode: props.dark_mode,
+                    app_version: props.app_version.clone(),
                     onclose: move |_| props.on_close_settings.call(()),
                     on_save_name: move |name| props.on_save_display_name.call(name),
+                    on_switch_audio_mode: props.on_switch_audio_mode,
+                    on_toggle_mute: props.on_toggle_mute,
+                    on_volume_changed: props.on_volume_changed,
+                    on_toggle_theme: props.on_toggle_theme,
+                    on_show_about: props.on_show_about,
                 }
             }
 
@@ -495,10 +510,12 @@ enum WorkbenchTab {
 
 #[derive(Props, Clone, PartialEq)]
 struct WorkbenchProps {
+    active_tab: WorkbenchTab,
     audio_status: String,
     audio_muted: bool,
     audio_volume: f64,
     mode_indicator: String,
+    dark_mode: bool,
     network_status: String,
     remote_controlled: bool,
     executing_remotely: bool,
@@ -506,15 +523,19 @@ struct WorkbenchProps {
     allow_remote_control: bool,
     settings_display_name: String,
     settings_save_status: String,
+    app_version: String,
     peers: Vec<PeerDisplayInfo>,
     connected_peer_index: i32,
     matrix_size: i32,
     peer_names: Vec<String>,
     my_index: i32,
     matrix_cells: Vec<bool>,
+    on_tab_change: EventHandler<WorkbenchTab>,
     on_switch_audio_mode: EventHandler<()>,
     on_toggle_mute: EventHandler<()>,
     on_volume_changed: EventHandler<f64>,
+    on_toggle_theme: EventHandler<()>,
+    on_show_about: EventHandler<()>,
     on_save_display_name: EventHandler<String>,
     on_connect_to_peer: EventHandler<String>,
     on_disconnect_peer: EventHandler<String>,
@@ -525,8 +546,7 @@ struct WorkbenchProps {
 
 #[component]
 fn Workbench(props: WorkbenchProps) -> Element {
-    let mut active_tab = use_signal(|| WorkbenchTab::Overview);
-    let current_tab = active_tab();
+    let current_tab = props.active_tab;
 
     let overview_tab_class = if current_tab == WorkbenchTab::Overview {
         "workbench-tab is-active"
@@ -586,21 +606,21 @@ fn Workbench(props: WorkbenchProps) -> Element {
                     class: overview_tab_class,
                     role: "tab",
                     aria_selected: if current_tab == WorkbenchTab::Overview { "true" } else { "false" },
-                    onclick: move |_| active_tab.set(WorkbenchTab::Overview),
+                    onclick: move |_| props.on_tab_change.call(WorkbenchTab::Overview),
                     "概览"
                 }
                 button {
                     class: settings_tab_class,
                     role: "tab",
                     aria_selected: if current_tab == WorkbenchTab::Settings { "true" } else { "false" },
-                    onclick: move |_| active_tab.set(WorkbenchTab::Settings),
+                    onclick: move |_| props.on_tab_change.call(WorkbenchTab::Settings),
                     "设置"
                 }
                 button {
                     class: network_tab_class,
                     role: "tab",
                     aria_selected: if current_tab == WorkbenchTab::Network { "true" } else { "false" },
-                    onclick: move |_| active_tab.set(WorkbenchTab::Network),
+                    onclick: move |_| props.on_tab_change.call(WorkbenchTab::Network),
                     "网络"
                 }
             }
@@ -649,7 +669,7 @@ fn Workbench(props: WorkbenchProps) -> Element {
                                         button {
                                             class: "panel-action panel-action--secondary",
                                             onclick: move |_| {
-                                                active_tab.set(WorkbenchTab::Network);
+                                                props.on_tab_change.call(WorkbenchTab::Network);
                                                 props.on_scan_peers.call(());
                                             },
                                             if props.scanning { "扫描中..." } else { "扫描网络" }
@@ -676,44 +696,18 @@ fn Workbench(props: WorkbenchProps) -> Element {
                                 SettingsContent {
                                     display_name: props.settings_display_name.clone(),
                                     save_status: props.settings_save_status.clone(),
+                                    audio_status: props.audio_status.clone(),
+                                    audio_muted: props.audio_muted,
+                                    audio_volume: props.audio_volume,
+                                    mode_indicator: props.mode_indicator.clone(),
+                                    dark_mode: props.dark_mode,
+                                    app_version: props.app_version.clone(),
                                     on_save_name: props.on_save_display_name,
-                                }
-
-                                section { class: "workbench-section workbench-section--dense",
-                                    div { class: "workbench-section__title", "音频控制" }
-                                    div { class: "workbench-row",
-                                        span { class: "workbench-row__label", "模式" }
-                                        span { class: "workbench-row__value", "{props.mode_indicator}" }
-                                    }
-                                    div { class: "workbench-audio-control",
-                                        button {
-                                            class: "panel-action",
-                                            onclick: move |_| props.on_switch_audio_mode.call(()),
-                                            "切换模式"
-                                        }
-                                        button {
-                                            class: "panel-action panel-action--secondary",
-                                            onclick: move |_| props.on_toggle_mute.call(()),
-                                            "{mute_text}"
-                                        }
-                                    }
-                                    div { class: "workbench-volume-row",
-                                        span { class: "workbench-row__label", "音量" }
-                                        input {
-                                            class: "workbench-volume",
-                                            r#type: "range",
-                                            min: "0",
-                                            max: "1",
-                                            step: "0.01",
-                                            value: "{props.audio_volume}",
-                                            oninput: move |evt| {
-                                                if let Ok(value) = evt.value().parse::<f64>() {
-                                                    props.on_volume_changed.call(value.clamp(0.0, 1.0));
-                                                }
-                                            },
-                                        }
-                                        span { class: "workbench-row__value workbench-row__value--short", "{volume_percent}%" }
-                                    }
+                                    on_switch_audio_mode: props.on_switch_audio_mode,
+                                    on_toggle_mute: props.on_toggle_mute,
+                                    on_volume_changed: props.on_volume_changed,
+                                    on_toggle_theme: props.on_toggle_theme,
+                                    on_show_about: props.on_show_about,
                                 }
                             }
                         },

@@ -62,6 +62,13 @@ call .local\activate.cmd
 pwsh .agents\verify_vocal_calculator.ps1
 ```
 
+桌面 release 构建：
+
+```powershell
+cargo build --release
+.\target\release\vocal-calculator-app.exe
+```
+
 本地环境状态：
 
 ```powershell

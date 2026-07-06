@@ -1,13 +1,24 @@
 use dioxus::prelude::*;
 
+use super::icon::{Icon, IconName};
+
 // ---------------------------------------------------------------------------
 // Overlay — reusable backdrop + card wrapper shared by Network, Settings, About
 // ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OverlayVariant {
+    Compact,
+    Large,
+}
 
 #[derive(Props, Clone, PartialEq)]
 pub struct OverlayProps {
     pub visible: bool,
     pub title: String,
+    #[props(default)]
+    pub icon: Option<IconName>,
+    pub variant: OverlayVariant,
     pub onclose: EventHandler<MouseEvent>,
     pub children: Element,
 }
@@ -19,6 +30,10 @@ pub fn Overlay(props: OverlayProps) -> Element {
     } else {
         "overlay-backdrop"
     };
+    let card_class = match props.variant {
+        OverlayVariant::Compact => "overlay-card overlay-card--compact",
+        OverlayVariant::Large => "overlay-card overlay-card--large",
+    };
 
     rsx! {
         if props.visible {
@@ -27,7 +42,7 @@ pub fn Overlay(props: OverlayProps) -> Element {
                 onclick: move |evt| props.onclose.call(evt),
 
                 div {
-                    class: "overlay-card",
+                    class: card_class,
                     onclick: move |evt| evt.stop_propagation(),
 
                     div {
@@ -36,6 +51,10 @@ pub fn Overlay(props: OverlayProps) -> Element {
                         div {
                             class: "overlay-title",
 
+                            if let Some(icon) = props.icon {
+                                Icon { name: icon, class: Some("overlay-title__icon".to_string()) }
+                            }
+
                             span {
                                 class: "overlay-title__text",
                                 "{props.title}"
@@ -43,8 +62,11 @@ pub fn Overlay(props: OverlayProps) -> Element {
 
                             button {
                                 class: "overlay-title__close",
+                                r#type: "button",
+                                title: "关闭",
+                                aria_label: "关闭",
                                 onclick: move |evt| props.onclose.call(evt),
-                                "\u{00D7}"
+                                Icon { name: IconName::X }
                             }
                         }
 
@@ -64,6 +86,8 @@ pub fn Overlay(props: OverlayProps) -> Element {
 pub struct ToggleSwitchProps {
     pub on: bool,
     pub label: String,
+    #[props(default)]
+    pub icon: Option<IconName>,
     pub on_toggle: EventHandler<MouseEvent>,
 }
 
@@ -81,11 +105,18 @@ pub fn ToggleSwitch(props: ToggleSwitchProps) -> Element {
 
             span {
                 class: "toggle-row__label",
+                if let Some(icon) = props.icon {
+                    Icon { name: icon, class: Some("toggle-row__icon".to_string()) }
+                }
                 "{props.label}"
             }
 
-            div {
+            button {
                 class: switch_class,
+                r#type: "button",
+                role: "switch",
+                aria_checked: if props.on { "true" } else { "false" },
+                aria_label: "{props.label}",
                 onclick: move |evt| props.on_toggle.call(evt),
 
                 div {

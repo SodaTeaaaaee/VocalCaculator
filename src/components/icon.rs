@@ -5,11 +5,15 @@ pub enum IconName {
     Bolt,
     Check,
     Info,
+    Lock,
     Moon,
     Music,
     Network,
+    Search,
     Settings,
     Sun,
+    User,
+    Users,
     VolumeLow,
     VolumeHigh,
     VolumeMuted,
@@ -49,6 +53,12 @@ pub fn Icon(props: IconProps) -> Element {
                 path { d: "M12 8h.01" }
             }
         },
+        IconName::Lock => rsx! {
+            svg { class, view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                rect { x: "4", y: "11", width: "16", height: "9", rx: "2" }
+                path { d: "M8 11V7a4 4 0 0 1 8 0v4" }
+            }
+        },
         IconName::Moon => rsx! {
             svg { class, view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
                 path { d: "M12 3a6 6 0 0 0 9 7 9 9 0 1 1-9-7Z" }
@@ -70,6 +80,12 @@ pub fn Icon(props: IconProps) -> Element {
                 path { d: "M12 8v8" }
             }
         },
+        IconName::Search => rsx! {
+            svg { class, view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                circle { cx: "11", cy: "11", r: "7" }
+                path { d: "m21 21-4.3-4.3" }
+            }
+        },
         IconName::Settings => rsx! {
             svg { class, view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
                 path { d: "M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z" }
@@ -87,6 +103,20 @@ pub fn Icon(props: IconProps) -> Element {
                 path { d: "M20 12h2" }
                 path { d: "m6.34 17.66-1.41 1.41" }
                 path { d: "m19.07 4.93-1.41 1.41" }
+            }
+        },
+        IconName::User => rsx! {
+            svg { class, view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                circle { cx: "12", cy: "8", r: "4" }
+                path { d: "M4 21a8 8 0 0 1 16 0" }
+            }
+        },
+        IconName::Users => rsx! {
+            svg { class, view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                path { d: "M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" }
+                circle { cx: "9", cy: "7", r: "4" }
+                path { d: "M22 21v-2a4 4 0 0 0-3-3.87" }
+                path { d: "M16 3.13a4 4 0 0 1 0 7.75" }
             }
         },
         IconName::VolumeLow => rsx! {

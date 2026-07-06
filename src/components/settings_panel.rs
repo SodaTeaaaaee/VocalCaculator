@@ -1,6 +1,8 @@
 use dioxus::prelude::*;
 
-use super::overlay::Overlay;
+use super::icon::{Icon, IconName};
+use super::overlay::{Overlay, OverlayVariant};
+use super::panel_controls::{AudioControlGroup, ControlRow, PanelSection};
 
 // ---------------------------------------------------------------------------
 // SettingsPanel — device name configuration overlay
@@ -12,10 +14,21 @@ pub struct SettingsPanelProps {
     pub display_name: String,
     /// Status message shown after a save attempt (empty when idle).
     pub save_status: String,
+    pub audio_status: String,
+    pub audio_muted: bool,
+    pub audio_volume: f64,
+    pub mode_indicator: String,
+    pub dark_mode: bool,
+    pub app_version: String,
     /// Fires when the user clicks the backdrop or close button.
     pub onclose: EventHandler<MouseEvent>,
     /// Fires when the user clicks "Save"; carries the current input value.
     pub on_save_name: EventHandler<String>,
+    pub on_switch_audio_mode: EventHandler<()>,
+    pub on_toggle_mute: EventHandler<()>,
+    pub on_volume_changed: EventHandler<f64>,
+    pub on_toggle_theme: EventHandler<()>,
+    pub on_show_about: EventHandler<()>,
 }
 
 #[component]
@@ -23,13 +36,26 @@ pub fn SettingsPanel(props: SettingsPanelProps) -> Element {
     rsx! {
         Overlay {
             visible: true,
-            title: "\u{F013} 设置",
+            title: "设置".to_string(),
+            icon: Some(IconName::Settings),
+            variant: OverlayVariant::Compact,
             onclose: move |evt| props.onclose.call(evt),
 
             SettingsContent {
                 display_name: props.display_name.clone(),
                 save_status: props.save_status.clone(),
+                audio_status: props.audio_status.clone(),
+                audio_muted: props.audio_muted,
+                audio_volume: props.audio_volume,
+                mode_indicator: props.mode_indicator.clone(),
+                dark_mode: props.dark_mode,
+                app_version: props.app_version.clone(),
                 on_save_name: props.on_save_name,
+                on_switch_audio_mode: props.on_switch_audio_mode,
+                on_toggle_mute: props.on_toggle_mute,
+                on_volume_changed: props.on_volume_changed,
+                on_toggle_theme: props.on_toggle_theme,
+                on_show_about: props.on_show_about,
             }
         }
     }
@@ -41,8 +67,19 @@ pub struct SettingsContentProps {
     pub display_name: String,
     /// Status message shown after a save attempt (empty when idle).
     pub save_status: String,
+    pub audio_status: String,
+    pub audio_muted: bool,
+    pub audio_volume: f64,
+    pub mode_indicator: String,
+    pub dark_mode: bool,
+    pub app_version: String,
     /// Fires when the user clicks "Save"; carries the current input value.
     pub on_save_name: EventHandler<String>,
+    pub on_switch_audio_mode: EventHandler<()>,
+    pub on_toggle_mute: EventHandler<()>,
+    pub on_volume_changed: EventHandler<f64>,
+    pub on_toggle_theme: EventHandler<()>,
+    pub on_show_about: EventHandler<()>,
 }
 
 #[component]
@@ -60,51 +97,100 @@ pub fn SettingsContent(props: SettingsContentProps) -> Element {
     } else {
         "settings-save-status"
     };
+    let theme_icon = if props.dark_mode {
+        IconName::Sun
+    } else {
+        IconName::Moon
+    };
+    let theme_text = if props.dark_mode {
+        "浅色主题"
+    } else {
+        "深色主题"
+    };
+    let theme_state = if props.dark_mode { "深色" } else { "浅色" };
 
     rsx! {
         div { class: "settings-content",
-            div {
-                class: "settings-section-header",
-                span {
-                    class: "settings-section-header__text",
-                    "设备"
-                }
-            }
+            PanelSection {
+                title: "设备".to_string(),
+                icon: Some(IconName::User),
 
-            // Device name input row
-            div {
-                class: "settings-input-row",
-                span {
-                    class: "settings-input-row__label",
-                    "\u{F007} 设备名称"
+                ControlRow {
+                    label: "设备名称".to_string(),
+                    icon: Some(IconName::User),
+                    input {
+                        class: "settings-input",
+                        r#type: "text",
+                        placeholder: "输入设备名称...",
+                        value: "{input_value}",
+                        oninput: move |evt| input_value.set(evt.value()),
+                    }
                 }
-                input {
-                    class: "settings-input",
-                    r#type: "text",
-                    placeholder: "输入设备名称...",
-                    value: "{input_value}",
-                    oninput: move |evt| input_value.set(evt.value()),
-                }
-            }
 
-            // Save status (conditionally rendered)
-            if !props.save_status.is_empty() {
+                if !props.save_status.is_empty() {
+                    div {
+                        class: "{status_class}",
+                        span { "{props.save_status}" }
+                    }
+                }
+
                 div {
-                    class: "{status_class}",
-                    span { "{props.save_status}" }
+                    class: "settings-save-row",
+                    button {
+                        class: "panel-action panel-action--with-icon",
+                        r#type: "button",
+                        onclick: move |_| props.on_save_name.call(input_value()),
+                        Icon { name: IconName::Check, class: Some("panel-action__icon".to_string()) }
+                        span { "保存" }
+                    }
                 }
             }
 
-            // Save button row
-            div {
-                class: "settings-save-row",
-                div { class: "settings-save-row__spacer" }
-                button {
-                    class: "skeu-btn skeu-btn--eq",
-                    onclick: move |_| props.on_save_name.call(input_value()),
-                    span { class: "skeu-btn__label", "保存" }
+            AudioControlGroup {
+                audio_status: props.audio_status.clone(),
+                audio_muted: props.audio_muted,
+                audio_volume: props.audio_volume,
+                mode_indicator: props.mode_indicator.clone(),
+                on_switch_audio_mode: props.on_switch_audio_mode,
+                on_toggle_mute: props.on_toggle_mute,
+                on_volume_changed: props.on_volume_changed,
+            }
+
+            PanelSection {
+                title: "外观".to_string(),
+                icon: Some(theme_icon),
+
+                ControlRow {
+                    label: "主题".to_string(),
+                    icon: Some(theme_icon),
+                    value: Some(theme_state.to_string()),
+                    button {
+                        class: "panel-action panel-action--secondary panel-action--with-icon",
+                        r#type: "button",
+                        onclick: move |_| props.on_toggle_theme.call(()),
+                        Icon { name: theme_icon, class: Some("panel-action__icon".to_string()) }
+                        span { "切换{theme_text}" }
+                    }
                 }
-                div { class: "settings-save-row__spacer" }
+            }
+
+            PanelSection {
+                title: "关于".to_string(),
+                icon: Some(IconName::Info),
+                class: Some("panel-section--last".to_string()),
+
+                ControlRow {
+                    label: "版本".to_string(),
+                    icon: Some(IconName::Info),
+                    value: Some(props.app_version.clone()),
+                    button {
+                        class: "panel-action panel-action--secondary panel-action--with-icon",
+                        r#type: "button",
+                        onclick: move |_| props.on_show_about.call(()),
+                        Icon { name: IconName::Info, class: Some("panel-action__icon".to_string()) }
+                        span { "详情" }
+                    }
+                }
             }
         }
     }

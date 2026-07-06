@@ -9,6 +9,7 @@ pub mod icon;
 pub mod keyboard;
 pub mod network_panel;
 pub mod overlay;
+pub mod panel_controls;
 pub mod settings_panel;
 pub mod status_bar;
 pub mod volume_row;

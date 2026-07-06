@@ -164,7 +164,7 @@
   grid-template-rows:
     var(--brand-h)
     var(--status-h)
-    var(--volume-h)
+    var(--mobile-actions-h)
     var(--history-h)
     var(--lcd-h)
     minmax(0, 1fr);
@@ -409,6 +409,11 @@
   overflow: hidden;
 }
 
+.workbench-panel--settings {
+  overflow: auto;
+  padding-right: 2px;
+}
+
 .workbench-panel--network .network-panel-content {
   flex: 1;
   min-height: 0;
@@ -631,6 +636,10 @@
 }
 
 @media (max-width: 760px), (max-aspect-ratio: 4 / 5) {
+  :root {
+    --mobile-actions-h: clamp(30px, 5.8cqh, 38px);
+  }
+
   .calculator-window {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
@@ -663,7 +672,6 @@
   :root {
     --brand-h: 24px;
     --status-h: 30px;
-    --volume-h: 28px;
     --history-h: 14px;
     --lcd-h: clamp(42px, 12cqh, 62px);
     --layout-gap: 3px;
@@ -671,8 +679,7 @@
   }
 
   .brand-label__mode,
-  .status-bar__info--audio,
-  .volume-row__icon {
+  .status-bar__info--audio {
     display: none;
   }
 }
@@ -686,6 +693,14 @@
   .calculator-stage {
     grid-column: 1;
     grid-row: 2;
+    justify-self: center;
+    width: min(500px, 100vw);
+    max-width: 500px;
+    padding:
+      max(0px, env(safe-area-inset-top))
+      0
+      max(0px, env(safe-area-inset-bottom))
+      0;
   }
 
   .workbench {

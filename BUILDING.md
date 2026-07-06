@@ -17,7 +17,7 @@
 cargo build --release
 
 # Run
-.\target\release\vocal_calculator.exe
+.\target\release\vocal-calculator-app.exe
 
 # Run tests
 cargo test

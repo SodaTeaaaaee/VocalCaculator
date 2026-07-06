@@ -1,6 +1,8 @@
 use dioxus::prelude::*;
 
-use crate::components::overlay::{Overlay, ToggleSwitch};
+use crate::components::icon::{Icon, IconName};
+use crate::components::overlay::{Overlay, OverlayVariant, ToggleSwitch};
+use crate::components::panel_controls::PanelSection;
 
 // ---------------------------------------------------------------------------
 // PeerDisplayInfo — per-peer row data for the peer list / routing matrix
@@ -89,7 +91,9 @@ pub fn NetworkPanel(props: NetworkPanelProps) -> Element {
     rsx! {
         Overlay {
             visible: props.visible,
-            title: "\u{F0AC} \u{7F51}\u{7EDC}\u{8BBE}\u{7F6E}", // globe + "网络设置"
+            title: "网络设置".to_string(),
+            icon: Some(IconName::Network),
+            variant: OverlayVariant::Large,
             onclose: move |evt| props.onclose.call(evt),
 
             NetworkPanelContent {
@@ -167,11 +171,9 @@ pub struct NetworkPanelContentProps {
 
 #[component]
 pub fn NetworkPanelContent(props: NetworkPanelContentProps) -> Element {
-    let mut scan_hover = use_signal(|| false);
-
     // -- status text & colour --
     let status_text = if props.network_status.is_empty() {
-        "\u{672A}\u{8FDE}\u{63A5}".to_string() // "未连接"
+        "未连接".to_string()
     } else {
         props.network_status.clone()
     };
@@ -204,7 +206,7 @@ pub fn NetworkPanelContent(props: NetworkPanelContentProps) -> Element {
                 class: "network-info-row",
                 span {
                     class: "network-info-row__icon",
-                    "\u{F0AC}"
+                    Icon { name: IconName::Network }
                 }
                 span {
                     class: status_class,
@@ -215,101 +217,97 @@ pub fn NetworkPanelContent(props: NetworkPanelContentProps) -> Element {
             // ---- Allow remote control toggle ----
             ToggleSwitch {
                 on: props.allow_remote_control,
-                label: "\u{F023} \u{5141}\u{8BB8}\u{8FDC}\u{7A0B}\u{63A7}\u{5236}", // lock + "允许远程控制"
+                label: "允许远程控制".to_string(),
+                icon: Some(IconName::Lock),
                 on_toggle: move |evt| props.ontoggle_remote_control.call(evt),
             }
 
             // ---- Mute mode toggle ----
             ToggleSwitch {
                 on: props.audio_muted,
-                label: "\u{F026} \u{9759}\u{97F3}\u{6A21}\u{5F0F}", // volume-off + "静音模式"
+                label: "静音模式".to_string(),
+                icon: Some(IconName::VolumeMuted),
                 on_toggle: move |evt| props.ontoggle_mute.call(evt),
             }
 
             // ---- Peer list ----
-            div {
-                class: "settings-section-header",
+            PanelSection {
+                title: "已发现的节点".to_string(),
+                icon: Some(IconName::Users),
+                class: Some("network-section network-section--peers".to_string()),
 
-                span {
-                    class: "settings-section-header__text",
-                    "\u{F0C0} \u{5DF2}\u{53D1}\u{73B0}\u{7684}\u{8282}\u{70B9}" // "已发现的节点"
-                }
-            }
+                div {
+                    class: "peer-list",
 
-            div {
-                class: "peer-list",
+                    if props.peers.is_empty() {
+                        div {
+                            class: "peer-list__empty",
+                            "暂无发现的节点"
+                        }
+                    } else {
+                        for peer in props.peers.iter() {
+                            {
+                                let is_connected = peer.is_connected;
+                                let row_class = if is_connected {
+                                    "peer-row peer-row--connected"
+                                } else {
+                                    "peer-row"
+                                };
+                                let latency_display = if peer.latency_ms < 0 {
+                                    "-".to_string()
+                                } else {
+                                    format!("{}ms", peer.latency_ms)
+                                };
+                                let node_id = peer.node_id_string.clone();
+                                let node_id_for_disconnect = node_id.clone();
 
-                if props.peers.is_empty() {
-                    div {
-                        class: "peer-list__empty",
-                        "\u{6682}\u{65E0}\u{53D1}\u{73B0}\u{7684}\u{8282}\u{70B9}" // "暂无发现的节点"
-                    }
-                } else {
-                    for peer in props.peers.iter() {
-                        {
-                            let is_connected = peer.is_connected;
-                            let row_class = if is_connected {
-                                "peer-row peer-row--connected"
-                            } else {
-                                "peer-row"
-                            };
-                            let latency_display = if peer.latency_ms < 0 {
-                                "\u{2014}".to_string() // em-dash for unknown
-                            } else {
-                                format!("{}ms", peer.latency_ms)
-                            };
-                            let status_icon = if is_connected {
-                                "\u{F00C}" // check-circle
-                            } else {
-                                "\u{F111}" // circle (disconnected)
-                            };
-                            let node_id = peer.node_id_string.clone();
-                            let node_id_for_disconnect = node_id.clone();
-
-                            rsx! {
-                                div {
-                                    class: "{row_class}",
-
+                                rsx! {
                                     div {
-                                        class: "peer-row__info",
+                                        class: "{row_class}",
 
-                                        span {
-                                            class: "peer-row__status-icon",
-                                            "{status_icon}"
-                                        }
+                                        div {
+                                            class: "peer-row__info",
 
-                                        span {
-                                            class: "peer-row__name",
-                                            "{peer.name}"
-                                        }
-
-                                        span {
-                                            class: "peer-row__address",
-                                            "{peer.address}"
-                                        }
-
-                                        span {
-                                            class: "peer-row__latency",
-                                            "{latency_display}"
-                                        }
-                                    }
-
-                                    div {
-                                        class: "peer-row__actions",
-
-                                        if is_connected {
-                                            button {
-                                                class: "skeu-btn skeu-btn--func",
-                                                style: "width: 64px; font-size: max(9px, 2.2vh);",
-                                                onclick: move |_| props.ondisconnect.call(node_id_for_disconnect.clone()),
-                                                "\u{65AD}\u{5F00}" // "断开"
+                                            span {
+                                                class: if is_connected { "peer-row__status-icon peer-row__status-icon--connected" } else { "peer-row__status-icon" },
+                                                if is_connected {
+                                                    Icon { name: IconName::Check }
+                                                }
                                             }
-                                        } else {
-                                            button {
-                                                class: "skeu-btn skeu-btn--func",
-                                                style: "width: 64px; font-size: max(9px, 2.2vh);",
-                                                onclick: move |_| props.onconnect.call(node_id.clone()),
-                                                "\u{8FDE}\u{63A5}" // "连接"
+
+                                            span {
+                                                class: "peer-row__name",
+                                                "{peer.name}"
+                                            }
+
+                                            span {
+                                                class: "peer-row__address",
+                                                "{peer.address}"
+                                            }
+
+                                            span {
+                                                class: "peer-row__latency",
+                                                "{latency_display}"
+                                            }
+                                        }
+
+                                        div {
+                                            class: "peer-row__actions",
+
+                                            if is_connected {
+                                                button {
+                                                    class: "network-action-btn",
+                                                    r#type: "button",
+                                                    onclick: move |_| props.ondisconnect.call(node_id_for_disconnect.clone()),
+                                                    "断开"
+                                                }
+                                            } else {
+                                                button {
+                                                    class: "network-action-btn",
+                                                    r#type: "button",
+                                                    onclick: move |_| props.onconnect.call(node_id.clone()),
+                                                    "连接"
+                                                }
                                             }
                                         }
                                     }
@@ -321,46 +319,41 @@ pub fn NetworkPanelContent(props: NetworkPanelContentProps) -> Element {
             }
 
             // ---- Routing matrix header with scan button ----
-            div {
-                class: "settings-section-header",
+            PanelSection {
+                title: "路由矩阵".to_string(),
+                icon: Some(IconName::Network),
+                class: Some("network-section network-section--matrix".to_string()),
 
-                span {
-                    class: "settings-section-header__text",
-                    "\u{8DEF}\u{7531}\u{77E9}\u{9635}" // "路由矩阵"
+                div { class: "network-toolbar",
+                    button {
+                        class: if props.scanning { "network-action-btn network-action-btn--scan is-active" } else { "network-action-btn network-action-btn--scan" },
+                        r#type: "button",
+                        title: "扫描网络 (F5)",
+                        onclick: move |evt| props.onscan.call(evt),
+                        Icon { name: IconName::Search, class: Some("network-action-btn__icon".to_string()) }
+                        if props.scanning {
+                            span { "扫描中..." }
+                        } else {
+                            span { "扫描" }
+                        }
+                    }
                 }
 
-                div { class: "settings-save-row__spacer" }
+                // ---- Routing matrix grid ----
+                div {
+                    class: "routing-matrix",
 
-                button {
-                    class: if *scan_hover.read() { "skeu-btn skeu-btn--func skeu-btn--keyboard-active" } else { "skeu-btn skeu-btn--func" },
-                    style: "width: 56px; font-size: max(9px, 2.2vh);",
-                    title: "扫描网络 (F5)",
-                    onmouseenter: move |_| scan_hover.set(true),
-                    onmouseleave: move |_| scan_hover.set(false),
-                    onclick: move |evt| props.onscan.call(evt),
-                    if props.scanning {
-                        "\u{626B}\u{63CF}\u{4E2D}..." // "扫描中..."
+                    if props.matrix_size == 0 {
+                        // Empty state
+                        div {
+                            class: "routing-matrix__empty",
+                            "暂无节点连接"
+                        }
                     } else {
-                        "\u{626B}\u{63CF}" // "扫描"
-                    }
-                }
-            }
-
-            // ---- Routing matrix grid ----
-            div {
-                class: "routing-matrix",
-
-                if props.matrix_size == 0 {
-                    // Empty state
-                    div {
-                        class: "routing-matrix__empty",
-                        "\u{6682}\u{65E0}\u{8282}\u{70B9}\u{8FDE}\u{63A5}" // "暂无节点连接"
-                    }
-                } else {
-                    // Matrix grid
-                    div {
-                        class: "routing-matrix__grid",
-                        style: "grid-template-columns: var(--name-col-w) repeat({props.matrix_size}, var(--cell-w));",
+                        // Matrix grid
+                        div {
+                            class: "routing-matrix__grid",
+                            style: "grid-template-columns: var(--name-col-w) repeat({props.matrix_size}, var(--cell-w));",
 
                         // Corner cell (empty top-left)
                         div { class: "matrix-corner" }
@@ -433,8 +426,11 @@ pub fn NetworkPanelContent(props: NetworkPanelContentProps) -> Element {
                                             let col_i32 = col as i32;
 
                                             rsx! {
-                                                div {
+                                                button {
                                                     class: "{cell_class}",
+                                                    r#type: "button",
+                                                    disabled: !is_editable,
+                                                    aria_checked: if checked { "true" } else { "false" },
                                                     onclick: move |_evt: MouseEvent| {
                                                         if is_editable {
                                                             props.onroute_toggled.call((row_i32, col_i32, !checked));
@@ -444,10 +440,7 @@ pub fn NetworkPanelContent(props: NetworkPanelContentProps) -> Element {
                                                     div {
                                                         class: "{checkbox_class}",
                                                         if checked && !is_diagonal {
-                                                            span {
-                                                                class: "matrix-checkbox__mark",
-                                                                "\u{2713}" // checkmark
-                                                            }
+                                                            Icon { name: IconName::Check, class: Some("matrix-checkbox__mark".to_string()) }
                                                         }
                                                     }
                                                 }
@@ -456,6 +449,7 @@ pub fn NetworkPanelContent(props: NetworkPanelContentProps) -> Element {
                                     }
                                 }
                             }
+                        }
                         }
                     }
                 }

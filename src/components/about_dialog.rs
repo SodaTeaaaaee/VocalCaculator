@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 
-use super::overlay::Overlay;
+use super::icon::IconName;
+use super::overlay::{Overlay, OverlayVariant};
 
 /// About dialog component.
 ///
@@ -17,7 +18,9 @@ pub fn AboutDialog(
     rsx! {
         Overlay {
             visible: true,
-            title: "语音计算器",
+            title: "语音计算器".to_string(),
+            icon: Some(IconName::Info),
+            variant: OverlayVariant::Compact,
             onclose: move |evt| onclose.call(evt),
 
             div { class: "about-content",

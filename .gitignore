@@ -1,14 +1,23 @@
 # Rust build outputs
 /target/
+/dist/
+/.dioxus/
 
 # Rust tool leftovers
 **/*.rs.bk
 *.pdb
 **/mutants.out*/
+*.profraw
+*.profdata
+/coverage/
+/tarpaulin-report.html
+/lcov.info
 
 # Editor / OS cruft
 .idea/
 .vscode/
+.fleet/
+.zed/
 *.iml
 .DS_Store
 Thumbs.db
@@ -19,11 +28,19 @@ Thumbs.db
 *.temp
 *.bak
 *.orig
+.env
+.env.*
+!.env.example
 
 # Android / release artifacts
 *.apk
 *.aab
 *.apks
+*.msix
+*.msi
+*.dmg
+*.deb
+*.rpm
 *.jks
 *.keystore
 .gradle/
