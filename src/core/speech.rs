@@ -334,7 +334,9 @@ mod tests {
     #[test]
     fn event_operator_subtract() {
         assert_eq!(
-            event_to_wav_indices(&VocalEvent::Operator(super::super::token::BinaryOp::Subtract)),
+            event_to_wav_indices(&VocalEvent::Operator(
+                super::super::token::BinaryOp::Subtract
+            )),
             vec![WAV_SUBTRACT]
         );
     }
@@ -342,7 +344,9 @@ mod tests {
     #[test]
     fn event_operator_multiply() {
         assert_eq!(
-            event_to_wav_indices(&VocalEvent::Operator(super::super::token::BinaryOp::Multiply)),
+            event_to_wav_indices(&VocalEvent::Operator(
+                super::super::token::BinaryOp::Multiply
+            )),
             vec![WAV_MULTIPLY]
         );
     }
@@ -357,10 +361,7 @@ mod tests {
 
     #[test]
     fn event_equals() {
-        assert_eq!(
-            event_to_wav_indices(&VocalEvent::Equals),
-            vec![WAV_EQUAL]
-        );
+        assert_eq!(event_to_wav_indices(&VocalEvent::Equals), vec![WAV_EQUAL]);
     }
 
     #[test]
@@ -373,10 +374,7 @@ mod tests {
 
     #[test]
     fn event_mu() {
-        assert_eq!(
-            event_to_wav_indices(&VocalEvent::MU),
-            vec![WAV_MU]
-        );
+        assert_eq!(event_to_wav_indices(&VocalEvent::MU), vec![WAV_MU]);
     }
 
     #[test]
@@ -397,18 +395,12 @@ mod tests {
 
     #[test]
     fn event_clear() {
-        assert_eq!(
-            event_to_wav_indices(&VocalEvent::Clear),
-            vec![WAV_CLEAR]
-        );
+        assert_eq!(event_to_wav_indices(&VocalEvent::Clear), vec![WAV_CLEAR]);
     }
 
     #[test]
     fn event_all_clear() {
-        assert_eq!(
-            event_to_wav_indices(&VocalEvent::AllClear),
-            vec![WAV_ZERO]
-        );
+        assert_eq!(event_to_wav_indices(&VocalEvent::AllClear), vec![WAV_ZERO]);
     }
 
     #[test]
@@ -462,7 +454,9 @@ mod tests {
     #[test]
     fn event_error() {
         assert_eq!(
-            event_to_wav_indices(&VocalEvent::Error(super::super::token::CalcError::DivideByZero)),
+            event_to_wav_indices(&VocalEvent::Error(
+                super::super::token::CalcError::DivideByZero
+            )),
             vec![WAV_ERROR]
         );
     }
@@ -470,9 +464,6 @@ mod tests {
     #[test]
     fn event_result() {
         let d = Decimal::from_str("5").unwrap();
-        assert_eq!(
-            event_to_wav_indices(&VocalEvent::Result(d)),
-            vec![5]
-        );
+        assert_eq!(event_to_wav_indices(&VocalEvent::Result(d)), vec![5]);
     }
 }

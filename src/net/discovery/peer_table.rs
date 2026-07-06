@@ -130,6 +130,7 @@ mod tests {
             address: SocketAddr::new("192.168.1.1".parse().unwrap(), port),
             tcp_port: port,
             last_seen: Instant::now(),
+            public_key: [0u8; 32],
         }
     }
 

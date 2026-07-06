@@ -50,22 +50,12 @@ pub enum AppError {
     /// Generic I/O error (file system, system calls).
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
-
-    /// Slint UI platform error.
-    #[error("platform error: {0}")]
-    Platform(String),
 }
 
 // ---------------------------------------------------------------------------
 // From conversions (manual — these convert via .to_string() so thiserror
 // #[from] cannot auto-derive them)
 // ---------------------------------------------------------------------------
-
-impl From<slint::PlatformError> for AppError {
-    fn from(e: slint::PlatformError) -> Self {
-        Self::Platform(e.to_string())
-    }
-}
 
 impl From<bincode::error::EncodeError> for AppError {
     fn from(e: bincode::error::EncodeError) -> Self {
@@ -109,11 +99,6 @@ impl AppError {
     /// Create a config error from a message string.
     pub fn config(msg: impl Into<String>) -> Self {
         Self::Config(msg.into())
-    }
-
-    /// Create a platform error from a message string.
-    pub fn platform(msg: impl Into<String>) -> Self {
-        Self::Platform(msg.into())
     }
 }
 
@@ -160,8 +145,8 @@ mod tests {
 
     #[test]
     fn from_toml_de_error() {
-        let src: toml::de::Error = toml::from_str::<crate::app::config::AppConfig>("not [[[ valid")
-            .unwrap_err();
+        let src: toml::de::Error =
+            toml::from_str::<crate::app::config::AppConfig>("not [[[ valid").unwrap_err();
         let err: AppError = src.into();
         assert!(
             err.to_string().contains("config error"),
@@ -193,7 +178,7 @@ mod tests {
         // For EncodeError, we rely on the fact the From impl exists (compile-
         // time guarantee) and test the Display format indirectly.
         let encode_err = bincode::encode_to_vec(
-            &f32::NAN, // NaN serialisation may fail depending on config
+            f32::NAN, // NaN serialisation may fail depending on config
             bincode::config::standard(),
         );
         if let Err(e) = encode_err {
@@ -209,20 +194,13 @@ mod tests {
     fn from_bincode_decode_error() {
         // Decode invalid bytes to trigger a DecodeError.
         let garbage: &[u8] = &[0xFF, 0xFF, 0xFF, 0xFF];
-        let result =
-            bincode::decode_from_slice::<String, _>(garbage, bincode::config::standard());
+        let result = bincode::decode_from_slice::<String, _>(garbage, bincode::config::standard());
         let src = result.unwrap_err();
         let err: AppError = src.into();
         assert!(
             err.to_string().contains("serialization error"),
             "expected Serialization variant, got: {err}"
         );
-    }
-
-    #[test]
-    fn from_platform_error() {
-        let err = AppError::platform("no display");
-        assert_eq!(err.to_string(), "platform error: no display");
     }
 
     // -----------------------------------------------------------------------
@@ -232,10 +210,7 @@ mod tests {
     #[test]
     fn source_returns_some_for_calc_variant() {
         let err: AppError = CalcError::DivideByZero.into();
-        assert!(
-            err.source().is_some(),
-            "Calc variant should have a source"
-        );
+        assert!(err.source().is_some(), "Calc variant should have a source");
     }
 
     #[test]
@@ -250,12 +225,9 @@ mod tests {
 
     #[test]
     fn source_returns_some_for_io_variant() {
-        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "boom");
+        let io_err = std::io::Error::other("boom");
         let err: AppError = io_err.into();
-        assert!(
-            err.source().is_some(),
-            "Io variant should have a source"
-        );
+        assert!(err.source().is_some(), "Io variant should have a source");
     }
 
     // -----------------------------------------------------------------------
@@ -286,15 +258,6 @@ mod tests {
         assert!(
             err.source().is_none(),
             "Serialization variant should have no source"
-        );
-    }
-
-    #[test]
-    fn source_returns_none_for_platform_variant() {
-        let err = AppError::platform("no display");
-        assert!(
-            err.source().is_none(),
-            "Platform variant should have no source"
         );
     }
 

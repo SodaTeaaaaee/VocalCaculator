@@ -56,12 +56,16 @@ pub enum NetworkMessage {
         display_name: String,
         protocol_version: u16,
         app_id: String,
+        /// Ed25519 public key (32 bytes). Present when protocol_version >= 3.
+        public_key: [u8; 32],
     },
     HelloAck {
         node_id: NodeId,
         display_name: String,
         protocol_version: u16,
         app_id: String,
+        /// Ed25519 public key (32 bytes). Present when protocol_version >= 3.
+        public_key: [u8; 32],
     },
     // Subscription
     Subscribe,
@@ -81,13 +85,33 @@ pub enum NetworkMessage {
         entries: Vec<(NodeId, NodeId, bool, u64)>,
     },
     /// Revoke a specific route.
-    RouteRevoke { from: NodeId, to: NodeId, version: u64 },
+    RouteRevoke {
+        from: NodeId,
+        to: NodeId,
+        version: u64,
+    },
     // Keepalive
     Ping,
     Pong,
     // Name update
     /// A node has updated its display name.
-    PeerNameUpdate { display_name: String },
+    PeerNameUpdate {
+        display_name: String,
+    },
+    // Pairing (ed25519)
+    /// Request to pair with a remote node, carrying sender's public key and a
+    /// SHA-256 hash of the pairing code for out-of-band verification.
+    PairingRequest {
+        public_key: [u8; 32],
+        pairing_code_hash: [u8; 32],
+    },
+    /// Confirmation that the remote node accepted the pairing, signed with the
+    /// sender's Ed25519 private key over the concatenation of both public keys.
+    PairingConfirm {
+        signature: Vec<u8>,
+    },
+    /// The remote node rejected the pairing request.
+    PairingReject,
     // Connection failure notification (local-only, not sent over the wire).
     /// A TCP connection attempt failed. Used to propagate errors from the
     /// connect task back to the main thread for UI feedback.
@@ -134,14 +158,14 @@ pub enum DiscoveryMessage {
     },
 }
 
-/// Current protocol version for handshake negotiation.
-pub const PROTOCOL_VERSION: u16 = 2;
+/// Current protocol version for handshake negotiation (v3 = ed25519 key exchange).
+pub const PROTOCOL_VERSION: u16 = 3;
+/// Minimum Hello protocol version that carries Ed25519 public keys.
+pub const HELLO_VERSION_WITH_KEYS: u16 = 3;
 /// IPv4 multicast address used for LAN peer discovery.
 pub const DISCOVERY_MULTICAST_ADDR: &str = "224.0.0.167";
 /// UDP port for multicast discovery messages.
-pub const DISCOVERY_PORT: u16 = 4242;
-/// UDP port for broadcast discovery messages.
-pub const DISCOVERY_BROADCAST_PORT: u16 = 4243;
+pub const DISCOVERY_PORT: u16 = 42420;
 /// Fixed TCP port for discovery handshake (TCP-based discovery, Localsend pattern).
 pub const DISCOVERY_TCP_PORT: u16 = 42000;
 /// mDNS service type for LAN discovery.
@@ -157,14 +181,15 @@ pub const PROTOCOL_MAGIC: [u8; 8] = *b"VOCALC\x01\x00";
 /// Application identifier sent in handshake messages.
 pub const APP_ID: &str = "vocal_calculator";
 /// Shared HMAC key for handshake authentication (HMAC-SHA256).
+/// Retained as a fallback for protocol version 2 compatibility.
 pub const APP_KEY: &[u8] = b"vocal_calculator_hmac_key_v1";
 
 // ---------------------------------------------------------------------------
 // Commands from session tasks -> command processor
 // ---------------------------------------------------------------------------
 
-use super::state::PeerInfo;
 use super::session::SessionSender;
+use super::state::PeerInfo;
 
 /// Direction of a TCP connection (for dedup tie-breaking).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

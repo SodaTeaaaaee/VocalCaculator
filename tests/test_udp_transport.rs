@@ -77,10 +77,7 @@ fn make_broadcast_socket(port: u16) -> Result<UdpSocket, Box<dyn std::error::Err
 
 /// Try to receive a single datagram within `timeout`.
 /// Returns `Some((bytes, sender_addr))` or `None` on timeout / error.
-async fn try_recv(
-    sock: &UdpSocket,
-    timeout: Duration,
-) -> Option<(Vec<u8>, SocketAddr)> {
+async fn try_recv(sock: &UdpSocket, timeout: Duration) -> Option<(Vec<u8>, SocketAddr)> {
     let mut buf = vec![0u8; 2048];
     match tokio::time::timeout(timeout, sock.recv_from(&mut buf)).await {
         Ok(Ok((len, addr))) => {
@@ -97,18 +94,10 @@ async fn try_recv(
 
 /// Drain ALL pending packets on `sock` within `timeout` (per-packet).
 /// Returns the collected packets. Stops when a recv times out.
-async fn drain_all(
-    sock: &UdpSocket,
-    per_packet_timeout: Duration,
-) -> Vec<(Vec<u8>, SocketAddr)> {
+async fn drain_all(sock: &UdpSocket, per_packet_timeout: Duration) -> Vec<(Vec<u8>, SocketAddr)> {
     let mut packets = Vec::new();
-    loop {
-        match try_recv(sock, per_packet_timeout).await {
-            Some(pkt) => {
-                packets.push(pkt);
-            }
-            None => break,
-        }
+    while let Some(pkt) = try_recv(sock, per_packet_timeout).await {
+        packets.push(pkt);
     }
     packets
 }
@@ -180,8 +169,12 @@ async fn multicast_send_recv() {
 
     // Enable loopback so we can test same-host delivery.
     println!("[4] Enabling multicast loopback on both sockets ...");
-    sock_a.set_multicast_loop_v4(true).expect("set_multicast_loop_v4 on A");
-    sock_b.set_multicast_loop_v4(true).expect("set_multicast_loop_v4 on B");
+    sock_a
+        .set_multicast_loop_v4(true)
+        .expect("set_multicast_loop_v4 on A");
+    sock_b
+        .set_multicast_loop_v4(true)
+        .expect("set_multicast_loop_v4 on B");
     println!("    loopback enabled on both");
 
     // Set TTL (best-effort, may fail on some Windows configs).
@@ -193,10 +186,15 @@ async fn multicast_send_recv() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // --- Direction A -> B -------------------------------------------------------
-    let multicast_dest: SocketAddr = format!("{MULTICAST_GROUP}:{MULTICAST_PORT}").parse().unwrap();
+    let multicast_dest: SocketAddr = format!("{MULTICAST_GROUP}:{MULTICAST_PORT}")
+        .parse()
+        .unwrap();
 
     println!("\n--- Direction: A -> B ---");
-    println!("[5] Socket A sending {:?} -> {multicast_dest} ...", String::from_utf8_lossy(MSG_A_TO_B));
+    println!(
+        "[5] Socket A sending {:?} -> {multicast_dest} ...",
+        String::from_utf8_lossy(MSG_A_TO_B)
+    );
     match sock_a.send_to(MSG_A_TO_B, multicast_dest).await {
         Ok(n) => println!("    sent {n} bytes"),
         Err(e) => {
@@ -210,7 +208,9 @@ async fn multicast_send_recv() {
     if found_b {
         println!("    [OK] Socket B received A's multicast packet");
     } else {
-        println!("    [FAIL] Socket B did not receive A's multicast packet within {RECV_TIMEOUT:?}");
+        println!(
+            "    [FAIL] Socket B did not receive A's multicast packet within {RECV_TIMEOUT:?}"
+        );
         println!("    Packets seen by B: {seen_b:?}");
         panic!("Multicast A->B failed: no packet delivered to socket B");
     }
@@ -218,15 +218,24 @@ async fn multicast_send_recv() {
     // Drain socket A's self-loopback from A's send.
     println!("[7] Draining socket A's self-loopback echoes ...");
     let echoes_a = drain_all(&sock_a, DRAIN_TIMEOUT).await;
-    println!("    drained {} stale packet(s) from socket A", echoes_a.len());
+    println!(
+        "    drained {} stale packet(s) from socket A",
+        echoes_a.len()
+    );
     for (i, (data, addr)) in echoes_a.iter().enumerate() {
-        println!("      echo[{i}]: {} bytes from {addr}: {:?}",
-            data.len(), String::from_utf8_lossy(data));
+        println!(
+            "      echo[{i}]: {} bytes from {addr}: {:?}",
+            data.len(),
+            String::from_utf8_lossy(data)
+        );
     }
 
     // --- Direction B -> A -------------------------------------------------------
     println!("\n--- Direction: B -> A ---");
-    println!("[8] Socket B sending {:?} -> {multicast_dest} ...", String::from_utf8_lossy(MSG_B_TO_A));
+    println!(
+        "[8] Socket B sending {:?} -> {multicast_dest} ...",
+        String::from_utf8_lossy(MSG_B_TO_A)
+    );
     match sock_b.send_to(MSG_B_TO_A, multicast_dest).await {
         Ok(n) => println!("    sent {n} bytes"),
         Err(e) => {
@@ -240,7 +249,9 @@ async fn multicast_send_recv() {
     if found_a {
         println!("    [OK] Socket A received B's multicast packet");
     } else {
-        println!("    [FAIL] Socket A did not receive B's multicast packet within {RECV_TIMEOUT:?}");
+        println!(
+            "    [FAIL] Socket A did not receive B's multicast packet within {RECV_TIMEOUT:?}"
+        );
         println!("    Packets seen by A: {seen_a:?}");
         panic!("Multicast B->A failed: no packet delivered to socket A");
     }
@@ -248,7 +259,10 @@ async fn multicast_send_recv() {
     // Drain B's self-loopback.
     println!("[10] Draining socket B's self-loopback echoes ...");
     let echoes_b = drain_all(&sock_b, DRAIN_TIMEOUT).await;
-    println!("     drained {} stale packet(s) from socket B", echoes_b.len());
+    println!(
+        "     drained {} stale packet(s) from socket B",
+        echoes_b.len()
+    );
 
     println!("\n=== MULTICAST TEST PASSED ===");
     println!("    Multicast send/recv works in both directions on this machine.");
@@ -267,21 +281,28 @@ async fn broadcast_send_recv() {
     println!("================================================================");
 
     // --- Create two sockets with SO_REUSEADDR + SO_BROADCAST -------------------
-    println!("\n[1] Creating socket A bound to 0.0.0.0:{BROADCAST_PORT} (SO_REUSEADDR + SO_BROADCAST) ...");
-    let sock_a = make_broadcast_socket(BROADCAST_PORT)
-        .expect("Failed to create broadcast socket A");
+    println!(
+        "\n[1] Creating socket A bound to 0.0.0.0:{BROADCAST_PORT} (SO_REUSEADDR + SO_BROADCAST) ..."
+    );
+    let sock_a =
+        make_broadcast_socket(BROADCAST_PORT).expect("Failed to create broadcast socket A");
     println!("    socket A: local_addr={:?}", sock_a.local_addr());
 
-    println!("[2] Creating socket B bound to 0.0.0.0:{BROADCAST_PORT} (SO_REUSEADDR + SO_BROADCAST) ...");
-    let sock_b = make_broadcast_socket(BROADCAST_PORT)
-        .expect("Failed to create broadcast socket B");
+    println!(
+        "[2] Creating socket B bound to 0.0.0.0:{BROADCAST_PORT} (SO_REUSEADDR + SO_BROADCAST) ..."
+    );
+    let sock_b =
+        make_broadcast_socket(BROADCAST_PORT).expect("Failed to create broadcast socket B");
     println!("    socket B: local_addr={:?}", sock_b.local_addr());
 
     let broadcast_dest: SocketAddr = format!("255.255.255.255:{BROADCAST_PORT}").parse().unwrap();
 
     // --- Direction A -> B -------------------------------------------------------
     println!("\n--- Direction: A -> B ---");
-    println!("[3] Socket A sending {:?} -> {broadcast_dest} ...", String::from_utf8_lossy(MSG_A_TO_B));
+    println!(
+        "[3] Socket A sending {:?} -> {broadcast_dest} ...",
+        String::from_utf8_lossy(MSG_A_TO_B)
+    );
     match sock_a.send_to(MSG_A_TO_B, broadcast_dest).await {
         Ok(n) => println!("    sent {n} bytes"),
         Err(e) => {
@@ -295,7 +316,9 @@ async fn broadcast_send_recv() {
     if found_b {
         println!("    [OK] Socket B received A's broadcast packet");
     } else {
-        println!("    [FAIL] Socket B did not receive A's broadcast packet within {RECV_TIMEOUT:?}");
+        println!(
+            "    [FAIL] Socket B did not receive A's broadcast packet within {RECV_TIMEOUT:?}"
+        );
         println!("    Packets seen by B: {seen_b:?}");
         panic!("Broadcast A->B failed: no packet delivered to socket B");
     }
@@ -303,15 +326,24 @@ async fn broadcast_send_recv() {
     // Drain socket A's self-loopback from A's send.
     println!("[5] Draining socket A's self-loopback echoes ...");
     let echoes_a = drain_all(&sock_a, DRAIN_TIMEOUT).await;
-    println!("    drained {} stale packet(s) from socket A", echoes_a.len());
+    println!(
+        "    drained {} stale packet(s) from socket A",
+        echoes_a.len()
+    );
     for (i, (data, addr)) in echoes_a.iter().enumerate() {
-        println!("      echo[{i}]: {} bytes from {addr}: {:?}",
-            data.len(), String::from_utf8_lossy(data));
+        println!(
+            "      echo[{i}]: {} bytes from {addr}: {:?}",
+            data.len(),
+            String::from_utf8_lossy(data)
+        );
     }
 
     // --- Direction B -> A -------------------------------------------------------
     println!("\n--- Direction: B -> A ---");
-    println!("[6] Socket B sending {:?} -> {broadcast_dest} ...", String::from_utf8_lossy(MSG_B_TO_A));
+    println!(
+        "[6] Socket B sending {:?} -> {broadcast_dest} ...",
+        String::from_utf8_lossy(MSG_B_TO_A)
+    );
     match sock_b.send_to(MSG_B_TO_A, broadcast_dest).await {
         Ok(n) => println!("    sent {n} bytes"),
         Err(e) => {
@@ -325,7 +357,9 @@ async fn broadcast_send_recv() {
     if found_a {
         println!("    [OK] Socket A received B's broadcast packet");
     } else {
-        println!("    [FAIL] Socket A did not receive B's broadcast packet within {RECV_TIMEOUT:?}");
+        println!(
+            "    [FAIL] Socket A did not receive B's broadcast packet within {RECV_TIMEOUT:?}"
+        );
         println!("    Packets seen by A: {seen_a:?}");
         panic!("Broadcast B->A failed: no packet delivered to socket A");
     }
@@ -333,7 +367,10 @@ async fn broadcast_send_recv() {
     // Drain B's self-loopback.
     println!("[8] Draining socket B's self-loopback echoes ...");
     let echoes_b = drain_all(&sock_b, DRAIN_TIMEOUT).await;
-    println!("    drained {} stale packet(s) from socket B", echoes_b.len());
+    println!(
+        "    drained {} stale packet(s) from socket B",
+        echoes_b.len()
+    );
 
     println!("\n=== BROADCAST TEST PASSED ===");
     println!("    Broadcast send/recv works in both directions on this machine.");
@@ -362,7 +399,8 @@ async fn multicast_self_loopback() {
         .expect("join_multicast_v4 failed");
     println!("    joined OK");
 
-    sock.set_multicast_loop_v4(true).expect("set_multicast_loop_v4");
+    sock.set_multicast_loop_v4(true)
+        .expect("set_multicast_loop_v4");
     println!("    loopback enabled");
 
     tokio::time::sleep(Duration::from_millis(50)).await;

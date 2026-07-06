@@ -8,7 +8,9 @@ use std::time::Duration;
 
 use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle};
 use kira::track::{TrackBuilder, TrackHandle};
-use kira::{AudioManager, AudioManagerSettings, DefaultBackend, Decibels, Easing, StartTime, Tween};
+use kira::{
+    AudioManager, AudioManagerSettings, Decibels, DefaultBackend, Easing, StartTime, Tween,
+};
 use music::MusicTones;
 
 use crate::core::token::VocalEvent;
@@ -75,7 +77,8 @@ pub struct VocalAudio {
 
 impl VocalAudio {
     pub fn new() -> Option<Self> {
-        let mut manager = match AudioManager::<DefaultBackend>::new(AudioManagerSettings::default()) {
+        let mut manager = match AudioManager::<DefaultBackend>::new(AudioManagerSettings::default())
+        {
             Ok(m) => m,
             Err(e) => {
                 log::warn!("AudioManager init failed: {e}");
@@ -181,17 +184,15 @@ impl VocalAudio {
             .filter_map(|&idx| self.wav_bytes.get(idx as usize).map(|v| v.as_slice()))
             .collect();
         match convert::concat_wav_buffers(&buffers) {
-            Some(combined) => {
-                match StaticSoundData::from_cursor(std::io::Cursor::new(combined)) {
-                    Ok(data) => match self.main_track.play(data) {
-                        Ok(handle) => {
-                            self.current_handle = Some(handle);
-                        }
-                        Err(e) => log::warn!("Audio concat play error: {e}"),
-                    },
-                    Err(e) => log::warn!("Concat sound data error: {e}"),
-                }
-            }
+            Some(combined) => match StaticSoundData::from_cursor(std::io::Cursor::new(combined)) {
+                Ok(data) => match self.main_track.play(data) {
+                    Ok(handle) => {
+                        self.current_handle = Some(handle);
+                    }
+                    Err(e) => log::warn!("Audio concat play error: {e}"),
+                },
+                Err(e) => log::warn!("Concat sound data error: {e}"),
+            },
             None => {
                 if let Some(&idx) = wav_indices.first() {
                     self.play_sound(idx);
@@ -220,17 +221,15 @@ impl VocalAudio {
             .filter_map(|&idx| self.music_tones.get_wav_bytes(idx))
             .collect();
         match convert::concat_wav_buffers(&buffers) {
-            Some(combined) => {
-                match StaticSoundData::from_cursor(std::io::Cursor::new(combined)) {
-                    Ok(data) => match self.main_track.play(data) {
-                        Ok(handle) => {
-                            self.current_handle = Some(handle);
-                        }
-                        Err(e) => log::warn!("Music concat play error: {e}"),
-                    },
-                    Err(e) => log::warn!("Music concat data error: {e}"),
-                }
-            }
+            Some(combined) => match StaticSoundData::from_cursor(std::io::Cursor::new(combined)) {
+                Ok(data) => match self.main_track.play(data) {
+                    Ok(handle) => {
+                        self.current_handle = Some(handle);
+                    }
+                    Err(e) => log::warn!("Music concat play error: {e}"),
+                },
+                Err(e) => log::warn!("Music concat data error: {e}"),
+            },
             None => {
                 if let Some(&idx) = tone_indices.first()
                     && let Some(data) = self.music_tones.get_sound(idx)
@@ -275,4 +274,3 @@ impl AudioPlayer for VocalAudio {
         self.mode()
     }
 }
-

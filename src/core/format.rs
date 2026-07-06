@@ -101,7 +101,11 @@ mod tests {
     fn format_for_speech_no_scientific() {
         let d = Decimal::from(123456789012345_i64);
         let s = format_for_speech(&d);
-        assert!(!s.contains('e'), "speech format should not use scientific notation: {}", s);
+        assert!(
+            !s.contains('e'),
+            "speech format should not use scientific notation: {}",
+            s
+        );
         assert_eq!(s, "123456789012345");
     }
 

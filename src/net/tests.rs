@@ -13,6 +13,7 @@ fn roundtrip_hello() {
         display_name: "TestNode".into(),
         protocol_version: PROTOCOL_VERSION,
         app_id: APP_ID.to_string(),
+        public_key: [0u8; 32],
     };
     let bytes = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
     let (decoded, _) =
@@ -25,10 +26,13 @@ fn roundtrip_hello() {
             protocol_version,
             ..
         } => {
-            assert_eq!(node_id, match &msg {
-                NetworkMessage::Hello { node_id, .. } => *node_id,
-                _ => unreachable!(),
-            });
+            assert_eq!(
+                node_id,
+                match &msg {
+                    NetworkMessage::Hello { node_id, .. } => *node_id,
+                    _ => unreachable!(),
+                }
+            );
             assert_eq!(display_name, "TestNode");
             assert_eq!(protocol_version, PROTOCOL_VERSION);
         }
@@ -93,9 +97,11 @@ fn roundtrip_discovery_announce() {
         },
     };
     let bytes = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
-    let (decoded, _) =
-        bincode::serde::decode_from_slice::<DiscoveryMessage, _>(&bytes, bincode::config::standard())
-            .unwrap();
+    let (decoded, _) = bincode::serde::decode_from_slice::<DiscoveryMessage, _>(
+        &bytes,
+        bincode::config::standard(),
+    )
+    .unwrap();
     match decoded {
         DiscoveryMessage::Announce {
             display_name,
@@ -128,9 +134,11 @@ fn roundtrip_announce_v2() {
         session_port: 54321,
     };
     let bytes = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
-    let (decoded, _) =
-        bincode::serde::decode_from_slice::<DiscoveryMessage, _>(&bytes, bincode::config::standard())
-            .unwrap();
+    let (decoded, _) = bincode::serde::decode_from_slice::<DiscoveryMessage, _>(
+        &bytes,
+        bincode::config::standard(),
+    )
+    .unwrap();
     match decoded {
         DiscoveryMessage::AnnounceV2 {
             display_name,
@@ -163,9 +171,11 @@ fn roundtrip_transport_hint() {
     ];
     for hint in &hints {
         let bytes = bincode::serde::encode_to_vec(hint, bincode::config::standard()).unwrap();
-        let (decoded, _) =
-            bincode::serde::decode_from_slice::<TransportHint, _>(&bytes, bincode::config::standard())
-                .unwrap();
+        let (decoded, _) = bincode::serde::decode_from_slice::<TransportHint, _>(
+            &bytes,
+            bincode::config::standard(),
+        )
+        .unwrap();
         assert_eq!(*hint, decoded);
     }
 }
@@ -204,12 +214,14 @@ fn roundtrip_all_message_variants() {
             display_name: "A".into(),
             protocol_version: 1,
             app_id: APP_ID.to_string(),
+            public_key: [0u8; 32],
         },
         NetworkMessage::HelloAck {
             node_id: NodeId::new_v4(),
             display_name: "B".into(),
             protocol_version: 1,
             app_id: APP_ID.to_string(),
+            public_key: [0u8; 32],
         },
         NetworkMessage::Subscribe,
         NetworkMessage::Unsubscribe,
@@ -248,12 +260,11 @@ fn roundtrip_all_message_variants() {
 
     for msg in &messages {
         let bytes = bincode::serde::encode_to_vec(msg, bincode::config::standard()).unwrap();
-        let (decoded, _) =
-            bincode::serde::decode_from_slice::<NetworkMessage, _>(
-                &bytes,
-                bincode::config::standard(),
-            )
-            .unwrap();
+        let (decoded, _) = bincode::serde::decode_from_slice::<NetworkMessage, _>(
+            &bytes,
+            bincode::config::standard(),
+        )
+        .unwrap();
         // At minimum, the discriminant should match.
         assert_eq!(
             std::mem::discriminant(msg),
@@ -282,11 +293,12 @@ async fn tcp_session_handshake_and_message_passing() {
     // Server task: accept one connection and run the session.
     let server_handle = tokio::spawn(async move {
         let (stream, peer_addr) = listener.accept().await.unwrap();
-        session::run_accepted_session(
+        let _ = session::run_accepted_session(
             stream,
             peer_addr,
             server_id,
             "Server".into(),
+            [0u8; 32],
             server_cmd_tx.clone(),
         )
         .await;
@@ -296,11 +308,12 @@ async fn tcp_session_handshake_and_message_passing() {
     let (client_cmd_tx, mut client_cmd_rx) = mpsc::unbounded_channel::<NetworkCommand>();
     let client_handle = tokio::spawn(async move {
         let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
-        session::run_connecting_session(
+        let _ = session::run_connecting_session(
             stream,
             addr,
             client_id,
             "Client".into(),
+            [0u8; 32],
             client_cmd_tx,
         )
         .await;
@@ -310,26 +323,20 @@ async fn tcp_session_handshake_and_message_passing() {
     // The server session task sends RegisterSession through server_cmd_tx.
     // But wait -- the server session's command_tx is server_cmd_tx, which
     // we own the rx for. Let's poll it.
-    let register_timeout = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        async {
-            loop {
-                match server_cmd_rx.recv().await {
-                    Some(NetworkCommand::RegisterSession(reg)) => {
-                        return reg;
-                    }
-                    Some(_) => continue,
-                    None => panic!("Command channel closed"),
+    let register_timeout = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match server_cmd_rx.recv().await {
+                Some(NetworkCommand::RegisterSession(reg)) => {
+                    return reg;
                 }
+                Some(_) => continue,
+                None => panic!("Command channel closed"),
             }
-        },
-    )
+        }
+    })
     .await;
 
-    assert!(
-        register_timeout.is_ok(),
-        "Session registration timed out"
-    );
+    assert!(register_timeout.is_ok(), "Session registration timed out");
     let reg = register_timeout.unwrap();
     assert_eq!(reg.info.display_name, "Client");
 
@@ -347,18 +354,15 @@ async fn tcp_session_handshake_and_message_passing() {
 
     // Wait for the client to receive the StateUpdate via its command channel.
     // The client session forwards incoming wire messages as IncomingMessage.
-    let receive_result = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        async {
-            loop {
-                match client_cmd_rx.recv().await {
-                    Some(NetworkCommand::IncomingMessage(_sender_id, msg)) => return msg,
-                    Some(_) => continue,
-                    None => panic!("Client command channel closed before receiving StateUpdate"),
-                }
+    let receive_result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match client_cmd_rx.recv().await {
+                Some(NetworkCommand::IncomingMessage(_sender_id, msg)) => return msg,
+                Some(_) => continue,
+                None => panic!("Client command channel closed before receiving StateUpdate"),
             }
-        },
-    )
+        }
+    })
     .await;
 
     assert!(
@@ -378,18 +382,18 @@ async fn tcp_session_handshake_and_message_passing() {
     drop(reg.sender);
 
     // Wait for both tasks to complete (with timeout).
-    let _ = tokio::time::timeout(
-        std::time::Duration::from_secs(3),
-        async {
-            let _ = tokio::join!(server_handle, client_handle);
-        },
-    )
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        let _ = tokio::join!(server_handle, client_handle);
+    })
     .await;
 }
 
 #[test]
 fn network_manager_new_has_default_state() {
-    let nm = NetworkManager::new("Test".into());
+    let dir = tempfile::tempdir().unwrap();
+    let storage = std::sync::Arc::new(crate::app::storage::Storage::open(dir.path()).unwrap());
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let nm = NetworkManager::new(storage, tx);
     let state = nm.state();
     let state = state.lock().unwrap();
     assert!(state.peers.is_empty());
@@ -398,10 +402,13 @@ fn network_manager_new_has_default_state() {
 }
 
 #[test]
-fn network_manager_local_node_id_is_unique() {
-    let nm1 = NetworkManager::new("A".into());
-    let nm2 = NetworkManager::new("B".into());
-    assert_ne!(nm1.local_node_id(), nm2.local_node_id());
+fn network_manager_uses_provided_node_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = std::sync::Arc::new(crate::app::storage::Storage::open(dir.path()).unwrap());
+    let expected_id = storage.identity().node_id();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let nm = NetworkManager::new(storage, tx);
+    assert_eq!(nm.local_node_id(), expected_id);
 }
 
 // ---- Handshake failure-path tests ------------------------------------
@@ -463,6 +470,7 @@ mod handshake_failure_tests {
             display_name: name.to_string(),
             protocol_version: version,
             app_id: app_id.to_string(),
+            public_key: [0u8; 32],
         };
         let raw = serialize_hello(&hello);
         let tag = compute_hmac(&raw);
@@ -474,10 +482,10 @@ mod handshake_failure_tests {
     async fn accept_and_handshake(
         listener: TcpListener,
         server_id: Uuid,
-    ) -> Result<(Uuid, String, FramedStream), String> {
+    ) -> Result<(Uuid, String, [u8; 32], FramedStream), String> {
         let (stream, _peer) = listener.accept().await.unwrap();
         let framed = Framed::new(stream, LengthDelimitedCodec::new());
-        server_handshake(framed, server_id, "Server")
+        server_handshake(framed, server_id, "Server", [0u8; 32])
             .await
             .map_err(|e| e.to_string())
     }
@@ -543,11 +551,7 @@ mod handshake_failure_tests {
             // version mismatch -- drain that frame so the server write doesn't
             // block.
             use futures::StreamExt;
-            let _ = tokio::time::timeout(
-                std::time::Duration::from_secs(2),
-                framed.next(),
-            )
-            .await;
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), framed.next()).await;
 
             let _ = tokio::time::timeout(
                 std::time::Duration::from_secs(2),
@@ -557,7 +561,10 @@ mod handshake_failure_tests {
         });
 
         let result = server.await.unwrap();
-        assert!(result.is_err(), "server should reject wrong protocol version");
+        assert!(
+            result.is_err(),
+            "server should reject wrong protocol version"
+        );
         let err = result.unwrap_err();
         assert!(
             err.contains("Protocol version mismatch"),
@@ -587,6 +594,7 @@ mod handshake_failure_tests {
                 display_name: "BadClient".to_string(),
                 protocol_version: PROTOCOL_VERSION,
                 app_id: APP_ID.to_string(),
+                public_key: [0u8; 32],
             };
             send_magic_msg(&mut framed, &hello).await;
 
@@ -664,6 +672,7 @@ mod handshake_failure_tests {
                 display_name: "BadClient".to_string(),
                 protocol_version: PROTOCOL_VERSION,
                 app_id: APP_ID.to_string(),
+                public_key: [0u8; 32],
             };
             send_magic_msg(&mut framed, &hello).await;
 

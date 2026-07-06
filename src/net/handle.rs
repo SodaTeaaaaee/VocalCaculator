@@ -6,13 +6,13 @@ use crate::net::protocol::{NetworkMessage, NodeId};
 // NetworkHandle — passed to the Router for sending messages
 // ---------------------------------------------------------------------------
 
-/// Thread-safe handle that the Router (running on the Slint main thread)
+/// Thread-safe handle that the Router (running on the UI thread)
 /// uses to send messages into the networking runtime.
 #[derive(Clone)]
 pub struct NetworkHandle {
     /// Send a message to a specific peer (routed to the correct session).
     outgoing_tx: mpsc::UnboundedSender<(NodeId, NetworkMessage)>,
-    /// Tokio runtime handle for `block_on` from the sync Slint thread.
+    /// Tokio runtime handle for `block_on` from the sync UI thread.
     runtime_handle: tokio::runtime::Handle,
 }
 

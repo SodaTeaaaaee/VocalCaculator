@@ -1,0 +1,779 @@
+/* =====================================================================
+ * Overlay Panels — Network, Settings, About, Routing Matrix
+ *
+ * This file contains all overlay-related styles:
+ *   1. Overlay backdrop & panel base
+ *   2. Overlay title bar
+ *   3. Network panel (status rows, toggle rows, toggle switch)
+ *   4. Routing matrix (grid, headers, cells, checkboxes)
+ *   5. Settings panel (input rows, save status)
+ *   6. Section headers
+ *   7. About dialog
+ * ===================================================================== */
+
+
+/* =====================================================================
+ * 1. OVERLAY BACKDROP & PANEL BASE
+ * ===================================================================== */
+
+.overlay-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 100;
+  background: var(--vc-overlay-backdrop);
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease;
+}
+
+.overlay-backdrop.visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.overlay-card {
+  position: absolute;
+  inset: clamp(14px, 3vw, 30px);
+  max-width: 760px;
+  max-height: min(720px, calc(100% - clamp(28px, 6vw, 60px)));
+  margin: auto;
+  z-index: 101;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  display: flex;
+  flex-direction: column;
+  cursor: default;
+}
+
+.overlay-card__inner {
+  position: relative;
+  min-height: 0;
+  height: 100%;
+  border-radius: 18px;
+  border: 1px solid var(--vc-panel-border);
+  background: var(--vc-panel-bg);
+  padding: clamp(14px, 2.2vw, 22px);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+  box-shadow: var(--shadow-panel);
+}
+
+.network-panel-content,
+.settings-content {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+
+/* =====================================================================
+ * 2. OVERLAY TITLE BAR
+ * ===================================================================== */
+
+.overlay-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 36px;
+  flex-shrink: 0;
+}
+
+.overlay-title__text {
+  flex: 1;
+  font-family: "Noto Sans SC", "Segoe UI", system-ui, sans-serif;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--title-fg);
+}
+
+.overlay-title__close {
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  color: var(--status-fg);
+  transition: background var(--transition-fast);
+}
+
+.overlay-title__close:hover {
+  background: var(--status-hover);
+}
+
+@media (max-width: 760px), (max-aspect-ratio: 4 / 5) {
+  .overlay-card {
+    inset: auto 0 0 0;
+    max-width: none;
+    height: min(86dvh, 640px);
+    max-height: calc(100dvh - env(safe-area-inset-top) - 12px);
+    margin: 0;
+  }
+
+  .overlay-card__inner {
+    border-inline: 0;
+    border-bottom: 0;
+    border-radius: 18px 18px 0 0;
+    padding-bottom: max(16px, env(safe-area-inset-bottom));
+  }
+}
+
+
+/* =====================================================================
+ * 3. NETWORK PANEL — Status rows, Toggle rows, Toggle switch
+ *    layout.css section 14 + skeuomorphic.css sections 15, 17
+ * ===================================================================== */
+
+/* Connection status / info rows */
+.network-info-row {
+  min-height: 24px;
+  border-radius: 4px;
+  background: var(--card-inset-bg);
+  border: 1px solid var(--card-inset-edge);
+  display: flex;
+  align-items: center;
+  padding: 4px 8px;
+  flex-shrink: 0;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+.workbench .network-panel-content {
+  gap: 8px;
+  overflow: hidden;
+}
+
+.workbench .network-info-row,
+.workbench .toggle-row {
+  min-height: 30px;
+  border-radius: 8px;
+  padding: 5px 8px;
+}
+
+.network-info-row__icon {
+  width: 18px;
+  flex-shrink: 0;
+  font-family: "JetBrainsMono Nerd Font", "JetBrains Mono", "Noto Sans SC", sans-serif;
+  font-size: max(10px, 2.2vh);
+  color: var(--status-fg);
+  text-align: center;
+}
+
+.network-info-row__text {
+  flex: 1;
+  font-family: "JetBrainsMono Nerd Font", "JetBrains Mono", "Noto Sans SC", sans-serif;
+  font-size: max(10px, 2.2vh);
+  color: var(--status-fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workbench .network-info-row__icon,
+.workbench .network-info-row__text,
+.workbench .toggle-row__label {
+  font-size: 12px;
+}
+
+.network-info-row__text.connected {
+  color: var(--status-fg);
+}
+
+.network-info-row__text.remote-controlled {
+  color: #4080ff;
+}
+
+.network-info-row__text.executing-remotely {
+  color: #40c040;
+}
+
+/* Toggle rows (remote-control, mute) */
+.toggle-row {
+  min-height: 24px;
+  border-radius: 4px;
+  background: var(--card-inset-bg);
+  border: 1px solid var(--card-inset-edge);
+  display: flex;
+  align-items: center;
+  padding: 4px 8px;
+  gap: 8px;
+  flex-shrink: 0;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+.toggle-row__label {
+  flex: 1;
+  font-family: "JetBrainsMono Nerd Font", "JetBrains Mono", "Noto Sans SC", sans-serif;
+  font-size: max(10px, 2.2vh);
+  color: var(--status-fg);
+}
+
+/* Toggle switch (pill shape) */
+.toggle-switch {
+  position: relative;
+  width: 48px;
+  height: 22px;
+  border-radius: 11px;
+  border: 1px solid;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition:
+    background var(--transition-normal),
+    border-color var(--transition-normal);
+
+  /* Default: off state */
+  background: var(--toggle-off);
+  border-color: color-mix(in srgb, var(--toggle-off), white 20%);
+}
+
+.toggle-switch:hover {
+  background: var(--toggle-off-hover);
+}
+
+/* On state */
+.toggle-switch--on {
+  background: var(--toggle-on);
+  border-color: color-mix(in srgb, var(--toggle-on), white 15%);
+}
+
+.toggle-switch--on:hover {
+  background: var(--toggle-on-hover);
+}
+
+/* The sliding knob */
+.toggle-switch__knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--toggle-knob);
+  border: 1px solid var(--toggle-knob-border);
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.2),
+    inset 0 1px 0 rgba(255, 255, 255, 0.4);
+  transition: transform var(--transition-normal);
+}
+
+/* Slide knob to the right when on */
+.toggle-switch--on .toggle-switch__knob {
+  transform: translateX(26px);
+}
+
+.peer-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.workbench .peer-list {
+  max-height: 168px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.peer-list__empty {
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  padding: 4px 2px;
+  font-size: max(10px, 2.2vh);
+  font-weight: 600;
+  color: var(--title-fg);
+}
+
+.peer-row {
+  min-height: 36px;
+  border-radius: 4px;
+  background: var(--card-inset-bg);
+  border: 1px solid var(--card-inset-edge);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+.workbench .peer-row {
+  min-height: 34px;
+  border-radius: 8px;
+  padding: 5px 8px;
+}
+
+.peer-row--connected {
+  border-color: color-mix(in srgb, var(--matrix-checked), var(--card-inset-edge) 40%);
+}
+
+.peer-row__info {
+  min-width: 0;
+  flex: 1;
+  display: grid;
+  grid-template-columns: 18px minmax(72px, 1fr) minmax(80px, 1.2fr) auto;
+  align-items: center;
+  gap: 6px;
+}
+
+@media (max-width: 520px) {
+  .peer-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .peer-row__info {
+    grid-template-columns: 18px minmax(0, 1fr) auto;
+  }
+
+  .peer-row__address {
+    grid-column: 2 / 4;
+  }
+
+  .peer-row__actions {
+    justify-content: flex-end;
+  }
+}
+
+.peer-row__status-icon {
+  font-family: "JetBrainsMono Nerd Font", "JetBrains Mono", "Noto Sans SC", sans-serif;
+  font-size: max(10px, 2vh);
+  color: var(--matrix-checked);
+  text-align: center;
+}
+
+.peer-row__name,
+.peer-row__address,
+.peer-row__latency {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: max(9px, 2vh);
+  color: var(--status-fg);
+}
+
+.peer-row__name {
+  font-weight: 600;
+  color: var(--title-fg);
+}
+
+.peer-row__latency {
+  text-align: right;
+  color: var(--matrix-empty-fg);
+}
+
+.peer-row__actions {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+}
+
+
+/* =====================================================================
+ * 4. ROUTING MATRIX — Grid, Headers, Cells, Checkboxes
+ *    layout.css section 15 + skeuomorphic.css section 16
+ * ===================================================================== */
+
+/* Matrix container */
+.routing-matrix {
+  flex: 1;
+  min-height: 0;
+  border-radius: 4px;
+  background: var(--matrix-bg);
+  border: 1px solid var(--card-inset-edge);
+  overflow: auto;
+}
+
+.workbench .routing-matrix {
+  min-height: 180px;
+}
+
+.routing-matrix__empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  font-size: max(10px, 2.2vh);
+  color: var(--matrix-empty-fg);
+}
+
+/* Matrix grid (dynamic columns/rows set by JS) */
+.routing-matrix__grid {
+  display: grid;
+  gap: 2px;
+  padding: 4px;
+  min-width: max-content;
+  min-height: max-content;
+}
+
+/* Sizing variables (overridden by JS) */
+.routing-matrix__grid {
+  --name-col-w: 100px;
+  --cell-w: 64px;
+  --header-row-h: 32px;
+  --cell-h: 32px;
+}
+
+.workbench .routing-matrix__grid {
+  --name-col-w: 88px;
+  --cell-w: 48px;
+  --header-row-h: 28px;
+  --cell-h: 28px;
+}
+
+/* Corner cell (empty top-left) */
+.matrix-corner {
+  /* Intentionally empty */
+}
+
+/* Column headers */
+.matrix-col-header {
+  height: var(--header-row-h);
+  border-radius: 4px;
+  background: var(--matrix-header-bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: max(8px, 1.8vh);
+  font-weight: 600;
+  color: var(--status-fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.matrix-col-header.is-self {
+  color: var(--matrix-self-label);
+}
+
+/* Row headers */
+.matrix-row-header {
+  height: var(--cell-h);
+  border-radius: 4px;
+  background: var(--matrix-header-bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: max(8px, 1.8vh);
+  font-weight: 600;
+  color: var(--status-fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.matrix-row-header.is-self {
+  color: var(--matrix-self-label);
+}
+
+/* Matrix data cells */
+.matrix-cell {
+  height: var(--cell-h);
+  border-radius: 4px;
+  border: 1px solid;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: default;
+  position: relative;
+  transition: background var(--transition-fast), border-color var(--transition-fast);
+}
+
+/* Diagonal (self-to-self) -- non-interactive, dimmed */
+.matrix-cell.is-diagonal {
+  background: color-mix(in srgb, var(--matrix-empty-fg), transparent 40%);
+  border-color: transparent;
+}
+
+/* Editable cells: user's own row, non-diagonal */
+.matrix-cell.is-editable {
+  cursor: pointer;
+  background: var(--matrix-bg);
+  border-color: color-mix(in srgb, var(--card-inset-edge), transparent 20%);
+}
+
+.matrix-cell.is-editable:hover {
+  background: color-mix(in srgb, var(--matrix-checked), var(--matrix-bg) 80%);
+}
+
+/* Non-editable, non-diagonal (other peers' rows) */
+.matrix-cell.is-readonly {
+  background: var(--matrix-cell-bg);
+  border-color: color-mix(in srgb, var(--card-inset-edge), transparent 20%);
+}
+
+/* Checkbox indicator inside each cell */
+.matrix-checkbox {
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  border: 1px solid var(--matrix-unchecked-edge);
+  background: var(--matrix-unchecked-bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--transition-fast), border-color var(--transition-fast);
+}
+
+.matrix-checkbox--checked {
+  background: var(--matrix-checked);
+  border-color: transparent;
+}
+
+.matrix-checkbox--checked-self {
+  background: var(--matrix-checked);
+  border-color: transparent;
+}
+
+.matrix-checkbox__mark {
+  font-size: 10px;
+  color: #ffffff;
+  line-height: 1;
+}
+
+
+/* =====================================================================
+ * 5. SETTINGS PANEL — Input rows, Save status
+ *    layout.css section 16 + skeuomorphic.css section 17
+ * ===================================================================== */
+
+/* Section header */
+.settings-section-header {
+  min-height: 24px;
+  display: flex;
+  align-items: center;
+  padding: 2px;
+  flex-shrink: 0;
+}
+
+.workbench .settings-section-header {
+  min-height: 20px;
+  padding: 0;
+}
+
+.settings-section-header__text {
+  font-family: "JetBrainsMono Nerd Font", "JetBrains Mono", "Noto Sans SC", sans-serif;
+  font-size: max(10px, 2.2vh);
+  font-weight: 600;
+  color: color-mix(in srgb, var(--status-fg), var(--title-fg) 50%);
+}
+
+.workbench .settings-section-header__text {
+  font-size: 12px;
+}
+
+/* Input row */
+.settings-input-row {
+  display: flex;
+  align-items: center;
+  min-height: 32px;
+  gap: 8px;
+  border-radius: 4px;
+  background: var(--card-inset-bg);
+  border: 1px solid var(--card-inset-edge);
+  padding: 4px 8px;
+  flex-shrink: 0;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+.workbench .settings-input-row {
+  min-height: 34px;
+  border-radius: 8px;
+  padding: 5px 8px;
+}
+
+.settings-input-row__label {
+  font-family: "JetBrainsMono Nerd Font", "JetBrains Mono", monospace;
+  font-size: max(10px, 2.2vh);
+  color: var(--status-fg);
+  white-space: nowrap;
+}
+
+.workbench .settings-input-row__label,
+.workbench .settings-input {
+  font-size: 12px;
+}
+
+.settings-input {
+  flex: 1;
+  font-family: "Noto Sans SC", "Segoe UI", sans-serif;
+  font-size: max(10px, 2.2vh);
+  color: var(--title-fg);
+  background: transparent;
+  border: none;
+  outline: none;
+  padding: 2px 4px;
+}
+
+.settings-input::placeholder {
+  color: var(--matrix-empty-fg);
+}
+
+/* Save status text */
+.settings-save-status {
+  min-height: 24px;
+  display: flex;
+  align-items: center;
+  padding: 2px;
+  font-size: max(9px, 2vh);
+  color: var(--status-fg);
+  flex-shrink: 0;
+}
+
+.workbench .settings-save-status {
+  min-height: 20px;
+  font-size: 12px;
+}
+
+.settings-save-status--success {
+  color: var(--matrix-checked);
+}
+
+/* Save button row */
+.settings-save-row {
+  min-height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--layout-spacing);
+  flex-shrink: 0;
+}
+
+.workbench .settings-save-row .skeu-btn {
+  min-height: 32px;
+  width: 88px;
+  font-size: 12px;
+}
+
+.settings-save-row__spacer {
+  flex: 1;
+}
+
+
+/* =====================================================================
+ * 6. SECTION HEADER (generic, used inside overlays)
+ *    skeuomorphic.css section 18
+ * ===================================================================== */
+
+.section-header {
+  min-height: 24px;
+  padding: 2px;
+}
+
+.section-header__text {
+  font-size: max(10px, 2.2vh);
+  font-weight: 600;
+  color: color-mix(in srgb, var(--status-fg), var(--title-fg) 50%);
+}
+
+
+/* =====================================================================
+ * 7. ABOUT DIALOG
+ *    layout.css section 17 + skeuomorphic.css section 19
+ * ===================================================================== */
+
+.about-dialog {
+  position: absolute;
+  inset: 0;
+  z-index: 100;
+  background: transparent;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.about-dialog.visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.about-dialog__card {
+  width: 320px;
+  max-width: calc(100% - calc(var(--layout-padding) * 4));
+  height: 220px;
+  max-height: calc(100% - calc(var(--layout-padding) * 4));
+
+  border-radius: clamp(6px, 4%, 14px);
+  border: 1px solid var(--body-edge);
+  background: var(--body-fill);
+
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px;
+}
+
+.about-dialog__title {
+  font-size: max(14px, 3vh);
+  font-weight: 700;
+  color: var(--title-fg);
+  text-align: center;
+}
+
+.about-dialog__version {
+  font-size: max(10px, 2.2vh);
+  color: var(--status-fg);
+  text-align: center;
+}
+
+.about-dialog__detail {
+  font-size: 11px;
+  color: var(--status-fg);
+  text-align: center;
+  word-wrap: break-word;
+}
+
+.about-dialog__license {
+  font-size: 10px;
+  color: var(--matrix-empty-fg);
+  text-align: center;
+}
+
+.about-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  text-align: center;
+}
+
+.about-content__version {
+  font-size: max(12px, 2.6vh);
+  font-weight: 700;
+  color: var(--title-fg);
+}
+
+.about-content__author {
+  font-size: max(10px, 2.2vh);
+  color: var(--status-fg);
+}
+
+
+/* =====================================================================
+ * 8. FOCUS & ACCESSIBILITY
+ *    (overlay-specific focus styles)
+ * ===================================================================== */
+
+.overlay-title__close:focus-visible,
+.toggle-switch:focus-visible,
+.matrix-cell.is-editable:focus-visible {
+  outline: 2px solid var(--btn-eq);
+  outline-offset: 2px;
+}

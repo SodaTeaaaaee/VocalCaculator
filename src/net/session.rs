@@ -1,8 +1,8 @@
 //! Per-connection session lifecycle: handshake dispatch, bidirectional
 //! message relay, heartbeat, and teardown.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
@@ -10,12 +10,15 @@ use tokio::sync::mpsc;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 use crate::net::protocol::{
-    ConnectionDirection, NetworkCommand, NetworkMessage, NodeId, SessionRegister,
-    PROTOCOL_MAGIC, HEARTBEAT_INTERVAL_SECS, HEARTBEAT_TIMEOUT_SECS,
+    ConnectionDirection, HEARTBEAT_INTERVAL_SECS, HEARTBEAT_TIMEOUT_SECS, NetworkCommand,
+    NetworkMessage, NodeId, PROTOCOL_MAGIC, SessionRegister,
 };
 use crate::net::state::PeerInfo;
 
-use super::handshake::{server_handshake, client_handshake};
+use super::handshake::{client_handshake, server_handshake};
+
+/// All-zeros sentinel: remote did not provide an Ed25519 public key.
+const NO_PUBKEY: [u8; 32] = [0u8; 32];
 
 /// Outgoing-message channel sender: the Router pushes messages here,
 /// and the session task forwards them over the TCP wire.
@@ -35,13 +38,14 @@ pub(crate) async fn run_accepted_session(
     peer_addr: std::net::SocketAddr,
     local_node_id: NodeId,
     local_display_name: String,
+    local_pubkey: [u8; 32],
     command_tx: mpsc::UnboundedSender<NetworkCommand>,
 ) {
     let framed = Framed::new(stream, LengthDelimitedCodec::new());
 
     // -- Server-side handshake ------------------------------------------
-    let (remote_node_id, remote_display_name, mut framed) =
-        match server_handshake(framed, local_node_id, &local_display_name).await {
+    let (remote_node_id, remote_display_name, remote_pubkey, mut framed) =
+        match server_handshake(framed, local_node_id, &local_display_name, local_pubkey).await {
             Ok(r) => r,
             Err(e) => {
                 log::warn!("Inbound handshake failed from {}: {}", peer_addr, e);
@@ -55,6 +59,13 @@ pub(crate) async fn run_accepted_session(
         remote_node_id,
         peer_addr,
     );
+
+    if remote_pubkey != NO_PUBKEY {
+        log::debug!(
+            "Remote {} provided ed25519 public key; pairing check deferred to caller",
+            remote_node_id,
+        );
+    }
 
     // Wait for Subscribe before entering steady-state.
     match recv_msg(&mut framed).await {
@@ -81,9 +92,17 @@ pub(crate) async fn run_accepted_session(
         address: peer_addr,
         tcp_port: peer_addr.port(),
         last_seen: std::time::Instant::now(),
+        public_key: remote_pubkey,
     };
 
-    run_session_loop(framed, remote_node_id, command_tx, info, ConnectionDirection::Inbound).await;
+    run_session_loop(
+        framed,
+        remote_node_id,
+        command_tx,
+        info,
+        ConnectionDirection::Inbound,
+    )
+    .await;
 }
 
 /// Run a session for an **outgoing** (client-initiated) TCP connection.
@@ -95,15 +114,16 @@ pub(crate) async fn run_connecting_session(
     peer_addr: std::net::SocketAddr,
     local_node_id: NodeId,
     local_display_name: String,
+    local_pubkey: [u8; 32],
     command_tx: mpsc::UnboundedSender<NetworkCommand>,
 ) -> Result<(), String> {
     let framed = Framed::new(stream, LengthDelimitedCodec::new());
 
     // -- Client-side handshake with 8-second timeout --------------------
-    let (remote_node_id, remote_display_name, mut framed) =
+    let (remote_node_id, remote_display_name, remote_pubkey, mut framed) =
         match tokio::time::timeout(
             std::time::Duration::from_secs(8),
-            client_handshake(framed, local_node_id, &local_display_name),
+            client_handshake(framed, local_node_id, &local_display_name, local_pubkey),
         )
         .await
         {
@@ -125,6 +145,13 @@ pub(crate) async fn run_connecting_session(
         peer_addr,
     );
 
+    if remote_pubkey != NO_PUBKEY {
+        log::debug!(
+            "Remote {} provided ed25519 public key; pairing check deferred to caller",
+            remote_node_id,
+        );
+    }
+
     // Send Subscribe to start receiving state updates.
     if let Err(e) = send_msg(&mut framed, &NetworkMessage::Subscribe).await {
         log::warn!("Failed sending Subscribe to {}: {}", remote_node_id, e);
@@ -137,9 +164,17 @@ pub(crate) async fn run_connecting_session(
         address: peer_addr,
         tcp_port: peer_addr.port(),
         last_seen: std::time::Instant::now(),
+        public_key: remote_pubkey,
     };
 
-    run_session_loop(framed, remote_node_id, command_tx, info, ConnectionDirection::Outbound).await;
+    run_session_loop(
+        framed,
+        remote_node_id,
+        command_tx,
+        info,
+        ConnectionDirection::Outbound,
+    )
+    .await;
     Ok(())
 }
 
@@ -175,9 +210,8 @@ async fn run_session_loop(
     let hb_last_ping = last_ping_sent.clone();
     let hb_outgoing = outgoing_tx.clone();
     let hb_handle = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(
-            HEARTBEAT_INTERVAL_SECS,
-        ));
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
@@ -371,8 +405,7 @@ pub(super) async fn recv_msg(
 ) -> Result<Option<NetworkMessage>, Box<dyn std::error::Error>> {
     match reader.next().await {
         Some(Ok(bytes)) => {
-            if bytes.len() < PROTOCOL_MAGIC.len()
-                || bytes[..PROTOCOL_MAGIC.len()] != PROTOCOL_MAGIC
+            if bytes.len() < PROTOCOL_MAGIC.len() || bytes[..PROTOCOL_MAGIC.len()] != PROTOCOL_MAGIC
             {
                 return Err("Invalid protocol magic bytes".into());
             }
@@ -386,6 +419,3 @@ pub(super) async fn recv_msg(
         None => Ok(None),
     }
 }
-
-
-

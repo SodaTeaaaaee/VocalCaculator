@@ -1,10 +1,11 @@
 # Third-Party Licenses and Attribution
 
-## Slint
+## Dioxus
 
-- **Website**: https://slint.dev
-- **License**: Slint Community License (free for desktop/mobile/web with attribution)
-- **Used for**: Retained-mode GUI framework (Windows, Android, Linux, macOS)
+- **Repository**: https://github.com/DioxusLabs/dioxus
+- **License**: MIT OR Apache-2.0
+- **Version**: 0.7
+- **Used for**: Dioxus desktop/mobile UI and WebView rendering
 
 ## kira
 

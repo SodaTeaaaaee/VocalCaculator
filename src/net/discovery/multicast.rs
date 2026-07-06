@@ -5,7 +5,7 @@ use std::time::Duration;
 use tokio::net::UdpSocket;
 
 use crate::net::protocol::{
-    DiscoveryMessage, DISCOVERY_MULTICAST_ADDR, DISCOVERY_PORT, PROTOCOL_MAGIC,
+    DISCOVERY_MULTICAST_ADDR, DISCOVERY_PORT, DiscoveryMessage, PROTOCOL_MAGIC,
 };
 
 /// UDP multicast transport for LAN peer discovery.
@@ -40,8 +40,7 @@ impl MulticastTransport {
         };
 
         let multicast_addr: Ipv4Addr = DISCOVERY_MULTICAST_ADDR.parse()?;
-        let multicast_target: SocketAddr =
-            SocketAddr::new(multicast_addr.into(), DISCOVERY_PORT);
+        let multicast_target: SocketAddr = SocketAddr::new(multicast_addr.into(), DISCOVERY_PORT);
 
         // -- Send socket (ephemeral port, no group join) --------------------
         let send_sock = socket2::Socket::new(
@@ -49,8 +48,7 @@ impl MulticastTransport {
             socket2::Type::DGRAM,
             Some(socket2::Protocol::UDP),
         )?;
-        let send_addr: socket2::SockAddr =
-            SocketAddr::new("0.0.0.0".parse()?, 0).into();
+        let send_addr: socket2::SockAddr = SocketAddr::new("0.0.0.0".parse()?, 0).into();
         send_sock.bind(&send_addr)?;
         send_sock.set_nonblocking(true)?;
         let send_socket = UdpSocket::from_std(send_sock.into())?;
@@ -80,9 +78,7 @@ impl MulticastTransport {
         recv_sock.set_nonblocking(true)?;
         let recv_socket = UdpSocket::from_std(recv_sock.into())?;
 
-        if let Err(e) =
-            recv_socket.join_multicast_v4(multicast_addr, Ipv4Addr::UNSPECIFIED)
-        {
+        if let Err(e) = recv_socket.join_multicast_v4(multicast_addr, Ipv4Addr::UNSPECIFIED) {
             log::warn!(
                 "IGMP join failed for {}: {e}. \
                  Multicast discovery will not work unless the OS \
@@ -120,7 +116,11 @@ impl MulticastTransport {
         let mut last_err: Option<anyhow::Error> = None;
         for delay_ms in [50, 150, 300] {
             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-            if let Err(e) = self.send_socket.send_to(&payload, self.multicast_target).await {
+            if let Err(e) = self
+                .send_socket
+                .send_to(&payload, self.multicast_target)
+                .await
+            {
                 log::warn!("Multicast send_to failed: {}", e);
                 last_err = Some(e.into());
             }

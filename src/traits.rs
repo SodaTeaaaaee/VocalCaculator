@@ -34,8 +34,8 @@ pub trait AudioPlayer {
 
 /// Abstraction over UI display updates.
 ///
-/// The production implementation delegates to the Slint-generated
-/// `CalculatorWindow` property setters.
+/// The production implementation delegates to the Dioxus UI state
+/// signals via [`CalcContext`](crate::ui::state::CalcContext).
 pub trait DisplayUpdater {
     /// Update the main display text.
     fn update_display(&self, text: &str);

@@ -15,6 +15,9 @@ pub struct PeerInfo {
     pub address: SocketAddr,
     pub tcp_port: u16,
     pub last_seen: std::time::Instant,
+    /// Ed25519 public key received during handshake (32 bytes).
+    /// All-zeros if the remote did not provide one (legacy peer).
+    pub public_key: [u8; 32],
 }
 
 /// Snapshot of the current network state (peers, connection status, latency).

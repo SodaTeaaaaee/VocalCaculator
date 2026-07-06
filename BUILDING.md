@@ -25,11 +25,12 @@ cargo test
 
 ## Android Build
 
-**Status**: Blocked - Slint Android backend needs `android-activity` crate integration.
+**Status**: The UI is Dioxus-based and the mobile feature is configured. Android
+builds still require the project-local Android SDK/NDK environment to be active.
 
 ```powershell
 . .\.local\activate.ps1
-cargo apk build --lib --target aarch64-linux-android
+cargo build --features mobile --target aarch64-linux-android
 ```
 
 ## Verification
@@ -43,8 +44,10 @@ pwsh .agents/verify_vocal_calculator.ps1
 ```
 src/core/       Pure calculator engine (no UI/audio dependencies)
 src/audio/      kira-based audio system (normal/broken/music modes)
-src/app/        Application orchestration (bridges calc + audio + UI)
-ui/             Slint UI definitions
+src/components/ Dioxus UI components
+src/styles/     Dioxus WebView CSS
+src\ui\         Dioxus signal state and backend bridge
+src/app/        App config, identity, platform, and storage support
 resource/       Voice WAV assets (embedded at compile time)
 .local/         Project-local toolchain (not committed)
 ```

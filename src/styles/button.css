@@ -1,0 +1,251 @@
+/* =====================================================================
+ * VocalCalculator - meaningful hardware button styles
+ *
+ * Contains:
+ *   - Button grid (CSS Grid, 4 columns)
+ *   - Skeuomorphic button base (convex gradient bevel)
+ *   - Hover / active / keyboard-active states
+ *   - All color variants: --digit, --op, --func, --clear, --ci, --bs, --eq
+ *   - Icon variant (JetBrainsMono Nerd Font)
+ *   - Span-2 variant
+ *   - Focus-visible outline
+ *   - Responsive adjustments
+ *   - Print overrides
+ *   - Button press animation
+ *
+ * Color tokens are defined in the parent theme (layout.css custom properties).
+ * ===================================================================== */
+
+
+/* ============================================================
+   1. BUTTON GRID (4 columns, CSS Grid)
+   ============================================================ */
+
+.button-grid {
+  grid-row: 6;
+
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  grid-template-rows: repeat(7, 1fr);
+  gap: var(--layout-gap, 4px);
+  flex: 1;
+  min-height: 0;
+}
+
+.button-grid .skeu-btn {
+  font-size: var(--btn-font-size, clamp(12px, 2.5vh, 22px));
+  min-height: 0;
+  aspect-ratio: auto;
+  padding: clamp(4px, 1.1cqh, 8px) 4px;
+}
+
+
+/* ============================================================
+   2. SKEUOMORPHIC BUTTON — Base (convex gradient bevel)
+   ============================================================ */
+
+.skeu-btn {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--btn-border, color-mix(in srgb, var(--btn-base, #d8d4d0) 75%, #000));
+  border-radius: clamp(7px, 18%, 13px);
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--btn-base, #d8d4d0) 82%, #fff) 0%,
+      color-mix(in srgb, var(--btn-base, #d8d4d0) 97%, #fff) 35%,
+      color-mix(in srgb, var(--btn-base, #d8d4d0) 95%, #000) 100%
+    );
+  color: var(--btn-fg, #333);
+
+  font-size: var(--btn-font-size, clamp(12px, 2.5vh, 22px));
+  font-weight: 700;
+  font-family: "Noto Sans SC", "Segoe UI", sans-serif;
+  text-align: center;
+  min-width: 0;
+  min-height: 0;
+
+  cursor: pointer;
+  user-select: none;
+  outline: none;
+  transition:
+    background 80ms ease,
+    border-color 80ms ease,
+    box-shadow 80ms ease;
+
+  /* Subtle outer shadow for physical depth */
+  box-shadow:
+    0 2px 4px rgba(0, 0, 0, 0.12),
+    0 1px 2px rgba(0, 0, 0, 0.08),
+    /* Top highlight edge */
+    inset 0 1px 0 rgba(255, 255, 255, 0.25);
+}
+
+
+/* ============================================================
+   3. HOVER STATE — Brighter gradient
+   ============================================================ */
+
+.skeu-btn:hover {
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--btn-base, #d8d4d0) 88%, #fff) 0%,
+      var(--btn-base, #d8d4d0) 40%,
+      color-mix(in srgb, var(--btn-base, #d8d4d0) 92%, #000) 100%
+    );
+}
+
+
+/* ============================================================
+   4. ACTIVE / PRESSED STATE — Flatten gradient, darken
+   ============================================================ */
+
+.skeu-btn:active,
+.skeu-btn--active {
+  background: color-mix(in srgb, var(--btn-base, #d8d4d0) 85%, #000);
+  border-color: color-mix(in srgb, var(--btn-base, #d8d4d0) 60%, #000);
+  box-shadow:
+    inset 0 2px 4px rgba(0, 0, 0, 0.2),
+    0 1px 1px rgba(0, 0, 0, 0.06);
+}
+
+
+/* ============================================================
+   5. KEYBOARD-ACTIVE STATE — Mirrors `keyboard-active` property
+   ============================================================ */
+
+.skeu-btn--keyboard-active,
+.skeu-btn.keyboard-active {
+  background: color-mix(in srgb, var(--btn-base, #d8d4d0) 85%, #000);
+  border-color: color-mix(in srgb, var(--btn-base, #d8d4d0) 60%, #000);
+  box-shadow:
+    inset 0 2px 4px rgba(0, 0, 0, 0.2),
+    0 1px 1px rgba(0, 0, 0, 0.06);
+}
+
+
+/* ============================================================
+   6. BUTTON VARIANTS — Color roles via custom properties
+   ============================================================ */
+
+/* Digit (default, light gray) */
+.skeu-btn--digit {
+  --btn-base: var(--color-btn-digit, #d8d4d0);
+  --btn-fg: var(--color-btn-digit-fg, #2a2a2a);
+}
+
+/* Operator (orange) */
+.skeu-btn--op {
+  --btn-base: var(--color-btn-op, #e8a848);
+  --btn-fg: var(--color-btn-op-fg, #3a2a10);
+}
+
+/* Function (gray) */
+.skeu-btn--func {
+  --btn-base: var(--color-btn-func, #b0aca8);
+  --btn-fg: var(--color-btn-func-fg, #4a4a4a);
+}
+
+/* Clear / AC (red) */
+.skeu-btn--clear {
+  --btn-base: var(--color-btn-clear, #d06050);
+  --btn-fg: var(--color-btn-clear-fg, #ffffff);
+}
+
+/* C / Clear Input (burnt orange) */
+.skeu-btn--ci {
+  --btn-base: var(--color-btn-ci, #d08868);
+  --btn-fg: var(--color-btn-ci-fg, #ffffff);
+}
+
+/* Backspace (yellow) */
+.skeu-btn--bs {
+  --btn-base: var(--color-btn-bs, #d0b870);
+  --btn-fg: var(--color-btn-bs-fg, #3a2a10);
+}
+
+/* Equals (blue) */
+.skeu-btn--eq {
+  --btn-base: var(--color-btn-eq, #4080c8);
+  --btn-fg: var(--color-btn-eq-fg, #ffffff);
+}
+
+/* Memory indicator (red) */
+.skeu-btn--memory {
+  --btn-base: var(--color-btn-memory, #c04040);
+  --btn-fg: var(--color-btn-memory-fg, #ffffff);
+}
+
+
+/* ============================================================
+   7. ICON VARIANT — JetBrainsMono Nerd Font glyph
+   ============================================================ */
+
+.skeu-btn__icon {
+  font-family: "JetBrainsMono Nerd Font", "JetBrains Mono", monospace;
+  font-weight: 700;
+}
+
+
+/* ============================================================
+   8. SPAN-2 VARIANT — Button spans 2 grid columns
+   ============================================================ */
+
+.skeu-btn--span-2,
+.btn--span-2 {
+  grid-column: span 2;
+}
+
+
+/* ============================================================
+   9. FOCUS-VISIBLE OUTLINE
+   ============================================================ */
+
+.skeu-btn:focus-visible {
+  outline: 2px solid var(--color-btn-eq, #4080c8);
+  outline-offset: -2px;
+}
+
+
+/* ============================================================
+   10. KEYBOARD PRESS ANIMATION
+   ============================================================ */
+
+.skeu-btn.keyboard-active {
+  animation: none;
+}
+
+
+/* ============================================================
+   11. RESPONSIVE ADJUSTMENTS
+   ============================================================ */
+
+/* Short viewport (landscape phones, small windows) */
+@media (max-height: 500px) {
+  .skeu-btn {
+    padding: 4px 2px;
+  }
+}
+
+/* Narrow viewport (extreme small) */
+@media (max-width: 300px) {
+  .skeu-btn {
+    font-size: var(--btn-font-size, max(10px, 2vh));
+  }
+}
+
+
+/* ============================================================
+   12. PRINT STYLES — Strip skeuomorphism
+   ============================================================ */
+
+@media print {
+  .skeu-btn {
+    box-shadow: none;
+    border: 1px solid #ccc;
+    background: #f0f0f0 !important;
+  }
+}

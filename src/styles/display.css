@@ -1,0 +1,186 @@
+/* =====================================================================
+ * LCD Display — Extracted display component styles
+ *
+ * Combines:
+ * Design notes:
+ *   - Outer frame uses lcd-frame color for the recessed border
+ *   - Inner screen has inset box-shadow for glass depth illusion
+ *   - Text uses JetBrainsMono monospace font
+ *   - Error state swaps to red palette
+ *   - Font sizes use clamp() for responsive scaling with px floors
+ * ===================================================================== */
+
+
+/* ---- LCD frame (outer container) ---- */
+.lcd-display {
+  --lcd-r: max(6px, 1.5cqh);
+
+  position: relative;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  border-radius: clamp(4px, min(3cqi, 15%), 12px);
+  background: var(--lcd-frame, #606850);
+  border: 2px solid var(--lcd-frame, #606850);
+  padding: 3px;
+  min-height: 40px;
+
+  /* Recessed frame — makes the LCD look sunk into the body */
+  box-shadow:
+    inset 0 2px 4px rgba(0, 0, 0, 0.3),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.1),
+    0 1px 0 rgba(255, 255, 255, 0.08);
+
+  transition:
+    background var(--transition-normal, 150ms ease),
+    border-color var(--transition-normal, 150ms ease);
+
+  /* Grid placement (when inside .inner-bevel grid) */
+  grid-row: 5;
+
+  /* Flex layout for inner screen */
+  display: flex;
+  align-items: stretch;
+}
+
+
+/* ---- LCD inner screen (glass depth) ---- */
+.lcd-display__inner {
+  flex: 1;
+  min-width: 0;
+  max-width: 100%;
+  margin: 3px;
+  border-radius: clamp(1px, min(2.5cqi, 12%), 9px);
+  background: var(--lcd-bg, #b8c890);
+  min-height: calc(100% - 6px);
+  padding: 4px 8px;
+  padding-inline-end: max(4px, 0.6em);
+
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  overflow: hidden;
+  position: relative;
+
+  /* Glass depth — simulates the LCD glass sitting below the frame */
+  box-shadow:
+    inset 0 2px 6px rgba(0, 0, 0, 0.12),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.06);
+
+  transition: background var(--transition-normal, 150ms ease);
+}
+
+
+/* ---- LCD clipping viewport: clips from the left so active input remains visible ---- */
+.lcd-display__clip {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  overflow: hidden;
+}
+
+.lcd-display__clip--truncated::before {
+  content: "...";
+  position: absolute;
+  left: 0;
+  z-index: 1;
+  padding-inline-end: 8px;
+  background: linear-gradient(90deg, var(--lcd-bg, #b8c890) 70%, transparent);
+  color: var(--lcd-fg, #2a3a1a);
+  font-family: "JetBrains Mono", "Consolas", monospace;
+  font-size: clamp(20px, 5cqh, 36px);
+  font-weight: 600;
+  pointer-events: none;
+}
+
+/* ---- LCD text ---- */
+.lcd-display__text {
+  display: block;
+  flex: 0 0 auto;
+  min-width: max-content;
+  width: max-content;
+  max-width: none;
+  font-family: "JetBrains Mono", "Consolas", monospace;
+  font-size: clamp(20px, 5cqh, 36px);
+  font-weight: 600;
+  color: var(--lcd-fg, #2a3a1a);
+  text-align: right;
+  white-space: nowrap;
+  overflow: visible;
+
+  /* Subtle LCD pixel shadow */
+  text-shadow: 0 0 1px rgba(0, 0, 0, 0.15);
+
+  transition:
+    color var(--transition-normal, 150ms ease),
+    font-size var(--transition-normal, 150ms ease);
+}
+
+
+/* =====================================================================
+ * Error state
+ * ===================================================================== */
+.lcd-display.error .lcd-display__inner,
+.lcd-display--error .lcd-display__inner {
+  background: var(--lcd-error-bg, #e8b0a0);
+}
+
+.lcd-display.error .lcd-display__text,
+.lcd-display--error .lcd-display__text {
+  color: var(--lcd-error-fg, #8a2020);
+  font-size: clamp(12px, 2.6cqh, 18px);
+}
+
+
+/* =====================================================================
+ * Dark mode (token overrides handled via custom properties)
+ * ===================================================================== */
+[data-theme="dark"] .lcd-display {
+  /* No structural changes needed; color tokens shift via custom props. */
+}
+
+
+/* =====================================================================
+ * Responsive breakpoints
+ * ===================================================================== */
+
+/* Short viewport (landscape phones, small windows) */
+@media (max-height: 500px) {
+  .lcd-display {
+    min-height: 30px;
+  }
+
+  .lcd-display__text {
+    font-size: 16px;
+  }
+}
+
+/* Narrow viewport */
+@media (max-width: 300px) {
+  .lcd-display__text {
+    font-size: clamp(14px, 5vw, 22px);
+  }
+}
+
+/* Large viewport (tablet / desktop) */
+@media (min-width: 500px) {
+  .lcd-display__text {
+    font-size: clamp(24px, 5cqh, 42px);
+  }
+}
+
+
+/* =====================================================================
+ * Print styles — strip shadows
+ * ===================================================================== */
+@media print {
+  .lcd-display__inner {
+    box-shadow: none;
+    border: 1px solid #999;
+  }
+}

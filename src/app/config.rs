@@ -6,16 +6,12 @@ use serde::{Deserialize, Serialize};
 /// Uses UUID v4 random bytes for selection (20 x 20 = 400 combinations).
 fn generate_random_name() -> String {
     const ADJECTIVES: [&str; 20] = [
-        "Happy", "Swift", "Cool", "Brave", "Bright",
-        "Calm", "Keen", "Warm", "Bold", "Cute",
-        "Deft", "Fair", "Kind", "Neat", "Pure",
-        "Wise", "Soft", "Wild", "Epic", "Nice",
+        "Happy", "Swift", "Cool", "Brave", "Bright", "Calm", "Keen", "Warm", "Bold", "Cute",
+        "Deft", "Fair", "Kind", "Neat", "Pure", "Wise", "Soft", "Wild", "Epic", "Nice",
     ];
     const NOUNS: [&str; 20] = [
-        "Panda", "Fox", "Owl", "Bear", "Wolf",
-        "Hawk", "Cat", "Deer", "Seal", "Wren",
-        "Hare", "Lynx", "Mink", "Dove", "Crab",
-        "Fish", "Moth", "Toad", "Ibis", "Goat",
+        "Panda", "Fox", "Owl", "Bear", "Wolf", "Hawk", "Cat", "Deer", "Seal", "Wren", "Hare",
+        "Lynx", "Mink", "Dove", "Crab", "Fish", "Moth", "Toad", "Ibis", "Goat",
     ];
 
     let uuid = uuid::Uuid::new_v4();
@@ -102,10 +98,7 @@ mod tests {
             toml::from_str(&serialized).expect("deserialization should succeed");
         assert_eq!(original.audio_mode, deserialized.audio_mode);
         assert_eq!(original.music_assets_path, deserialized.music_assets_path);
-        assert_eq!(
-            original.network.enabled,
-            deserialized.network.enabled
-        );
+        assert_eq!(original.network.enabled, deserialized.network.enabled);
         assert_eq!(
             original.network.allow_remote_control,
             deserialized.network.allow_remote_control
@@ -130,7 +123,12 @@ mod tests {
             nc.display_name
         );
         let parts: Vec<&str> = nc.display_name.splitn(3, ' ').collect();
-        assert_eq!(parts.len(), 2, "random name should be two words: {}", nc.display_name);
+        assert_eq!(
+            parts.len(),
+            2,
+            "random name should be two words: {}",
+            nc.display_name
+        );
     }
 
     #[test]
@@ -185,13 +183,16 @@ conflict_policy = "strict"
 
     #[test]
     fn roundtrip_with_non_default_values() {
-        let mut cfg = AppConfig::default();
-        cfg.audio_mode = "silent".to_string();
-        cfg.music_assets_path = Some("/custom/path".to_string());
-        cfg.network.enabled = false;
-        cfg.network.display_name = "MyDevice".to_string();
-        cfg.network.allow_remote_control = false;
-        cfg.network.conflict_policy = "strict".to_string();
+        let cfg = AppConfig {
+            audio_mode: "silent".to_string(),
+            music_assets_path: Some("/custom/path".to_string()),
+            network: NetworkConfig {
+                enabled: false,
+                display_name: "MyDevice".to_string(),
+                allow_remote_control: false,
+                conflict_policy: "strict".to_string(),
+            },
+        };
 
         let serialized = toml::to_string(&cfg).expect("serialization should succeed");
         let deserialized: AppConfig =

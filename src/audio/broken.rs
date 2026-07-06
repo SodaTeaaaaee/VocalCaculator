@@ -32,7 +32,9 @@ fn broken_variants_for_normal(normal_idx: u16) -> Option<&'static [u16]> {
 /// Xorshift64 PRNG - fast, no external dependency.
 fn xorshift64(state: &mut u64) -> u32 {
     let mut x = *state;
-    if x == 0 { x = 0x12345678ABCDEF01; }
+    if x == 0 {
+        x = 0x12345678ABCDEF01;
+    }
     x ^= x << 13;
     x ^= x >> 7;
     x ^= x << 17;
@@ -142,7 +144,10 @@ mod tests {
         let result_b = run(&events, 0xDEADBEEF);
 
         // The two seeds must produce different corruption sequences.
-        assert_ne!(result_a, result_b, "different seeds should yield different patterns");
+        assert_ne!(
+            result_a, result_b,
+            "different seeds should yield different patterns"
+        );
     }
 
     #[test]
@@ -197,7 +202,10 @@ mod tests {
             let result = run(&events, seed);
             assert_eq!(result.len(), events.len());
             for &idx in &result {
-                assert!(idx < 69, "index {idx} out of valid range 0..69 (seed={seed})");
+                assert!(
+                    idx < 69,
+                    "index {idx} out of valid range 0..69 (seed={seed})"
+                );
             }
         }
     }

@@ -737,7 +737,10 @@ mod tests {
         display(&mut c, &["5", "/", "0", "="]);
         let r = c.digit(3);
         assert!(r.is_error, "should remain in error state");
-        assert!(r.events.is_empty(), "digit in error state should produce no events");
+        assert!(
+            r.events.is_empty(),
+            "digit in error state should produce no events"
+        );
         assert_eq!(r.display, "错误");
     }
 
@@ -876,7 +879,10 @@ mod tests {
         // Enter "3." then press "." again.
         display(&mut c, &["3", "."]);
         let r = c.decimal_point();
-        assert_eq!(r.display, "3.", "second decimal point should not change display");
+        assert_eq!(
+            r.display, "3.",
+            "second decimal point should not change display"
+        );
         // The event is still emitted (design choice), but the input must not have two dots.
         assert_eq!(r.events, vec![VocalEvent::DecimalPoint]);
     }
@@ -909,7 +915,10 @@ mod tests {
         display(&mut c, &["5", "+"]);
         // Change operator to multiply.
         let r = c.operator(BinaryOp::Multiply);
-        assert_eq!(r.display, "5", "display should remain acc during operator change");
+        assert_eq!(
+            r.display, "5",
+            "display should remain acc during operator change"
+        );
         // Now enter 4 and evaluate: 5 * 4 = 20.
         assert_eq!(display(&mut c, &["4", "="]), "20");
     }
@@ -1003,7 +1012,10 @@ mod tests {
         let mut c = Calculator::new();
         display(&mut c, &["5"]);
         let r = c.backspace();
-        assert_eq!(r.display, "0", "backspace on single digit should return to idle showing 0");
+        assert_eq!(
+            r.display, "0",
+            "backspace on single digit should return to idle showing 0"
+        );
         // After backspace, state is Idle: next digit starts fresh input.
         assert_eq!(display(&mut c, &["3"]), "3");
     }
@@ -1039,7 +1051,10 @@ mod tests {
         display(&mut c, &["5", "+"]);
         // State is OpPending, not Input. Backspace should not change anything.
         let r = c.backspace();
-        assert_eq!(r.display, "5", "backspace after operator should be no-op on display");
+        assert_eq!(
+            r.display, "5",
+            "backspace after operator should be no-op on display"
+        );
         assert_eq!(r.events, vec![VocalEvent::Backspace]);
     }
 
@@ -1049,7 +1064,10 @@ mod tests {
         display(&mut c, &["5", "+", "3", "="]);
         // State is Evaluated. Backspace should not change anything.
         let r = c.backspace();
-        assert_eq!(r.display, "8", "backspace after equals should be no-op on display");
+        assert_eq!(
+            r.display, "8",
+            "backspace after equals should be no-op on display"
+        );
     }
 
     #[test]
@@ -1076,7 +1094,10 @@ mod tests {
         let r = c.square_root();
         assert!(r.is_error);
         // enter_error wraps the error in a single Error event.
-        assert_eq!(r.events, vec![VocalEvent::Error(CalcError::NegativeSquareRoot)]);
+        assert_eq!(
+            r.events,
+            vec![VocalEvent::Error(CalcError::NegativeSquareRoot)]
+        );
         // Subsequent actions in error state return empty.
         let r2 = c.digit(1);
         assert!(r2.is_error);
@@ -1113,7 +1134,10 @@ mod tests {
 
         // Pending should be cleared -- pressing "=" should be a no-op (no pending op).
         let r = c.equals();
-        assert_eq!(r.display, "42", "no pending op after reset, equals should keep display");
+        assert_eq!(
+            r.display, "42",
+            "no pending op after reset, equals should keep display"
+        );
     }
 
     #[test]
@@ -1123,7 +1147,10 @@ mod tests {
 
         c.reset_from_snapshot("错误", "不能除以零", "", true);
 
-        assert!(c.result(vec![]).is_error, "should be in error state after reset");
+        assert!(
+            c.result(vec![]).is_error,
+            "should be in error state after reset"
+        );
         // Actions in error state should return empty events.
         let r = c.digit(5);
         assert!(r.is_error);
@@ -1151,7 +1178,11 @@ mod tests {
 
         c.reset_from_snapshot("0", "", "", false);
 
-        assert_eq!(c.memory, Decimal::ZERO, "memory should be zeroed when indicator is empty");
+        assert_eq!(
+            c.memory,
+            Decimal::ZERO,
+            "memory should be zeroed when indicator is empty"
+        );
     }
 
     #[test]
@@ -1162,7 +1193,10 @@ mod tests {
 
         c.reset_from_snapshot("0", "", "M", false);
 
-        assert_eq!(c.memory, saved_memory, "memory should be preserved when indicator is 'M'");
+        assert_eq!(
+            c.memory, saved_memory,
+            "memory should be preserved when indicator is 'M'"
+        );
     }
 
     #[test]

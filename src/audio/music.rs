@@ -75,9 +75,8 @@ impl MusicTones {
         let mut wav_bytes = Vec::with_capacity(23);
 
         let note_freqs: [f64; 17] = [
-            FREQ_C3, FREQ_D3, FREQ_E3, FREQ_F3, FREQ_G3, FREQ_A3, FREQ_B3,
-            FREQ_C4, FREQ_D4, FREQ_E4, FREQ_F4, FREQ_G4, FREQ_A4, FREQ_B4,
-            FREQ_C5, FREQ_D5, FREQ_E5,
+            FREQ_C3, FREQ_D3, FREQ_E3, FREQ_F3, FREQ_G3, FREQ_A3, FREQ_B3, FREQ_C4, FREQ_D4,
+            FREQ_E4, FREQ_F4, FREQ_G4, FREQ_A4, FREQ_B4, FREQ_C5, FREQ_D5, FREQ_E5,
         ];
         for freq in &note_freqs {
             let wav = generate_tone_wav(*freq, TONE_DURATION, SAMPLE_RATE);
@@ -138,27 +137,42 @@ pub fn events_to_tone_indices(events: &[VocalEvent]) -> Vec<usize> {
         match event {
             VocalEvent::Digit(d) => {
                 result.push(match *d {
-                    0 => TONE_C3, 1 => TONE_C4, 2 => TONE_D4, 3 => TONE_E4,
-                    4 => TONE_F4, 5 => TONE_G4, 6 => TONE_A4, 7 => TONE_B4,
-                    8 => TONE_C5, 9 => TONE_D5, _ => TONE_C4,
+                    0 => TONE_C3,
+                    1 => TONE_C4,
+                    2 => TONE_D4,
+                    3 => TONE_E4,
+                    4 => TONE_F4,
+                    5 => TONE_G4,
+                    6 => TONE_A4,
+                    7 => TONE_B4,
+                    8 => TONE_C5,
+                    9 => TONE_D5,
+                    _ => TONE_C4,
                 });
             }
             VocalEvent::Operator(op) => {
                 result.push(match op {
-                    BinaryOp::Add => TONE_E5, BinaryOp::Subtract => TONE_G3,
-                    BinaryOp::Multiply => TONE_A3, BinaryOp::Divide => TONE_E3,
+                    BinaryOp::Add => TONE_E5,
+                    BinaryOp::Subtract => TONE_G3,
+                    BinaryOp::Multiply => TONE_A3,
+                    BinaryOp::Divide => TONE_E3,
                 });
             }
             VocalEvent::DecimalPoint => result.push(TONE_B3),
             VocalEvent::Equals => result.push(TONE_CHORD_MAJOR),
-            VocalEvent::Percent => { result.push(TONE_G4); result.push(TONE_C5); }
+            VocalEvent::Percent => {
+                result.push(TONE_G4);
+                result.push(TONE_C5);
+            }
             VocalEvent::MU => result.push(TONE_F4),
             VocalEvent::SquareRoot => result.push(TONE_ASCEND),
             VocalEvent::Backspace => result.push(TONE_CLICK),
             VocalEvent::Clear => result.push(TONE_CLICK),
             VocalEvent::AllClear => result.push(TONE_DESCEND),
-            VocalEvent::MemoryRecall | VocalEvent::MemoryAdd
-            | VocalEvent::MemorySubtract | VocalEvent::MemoryClear => result.push(TONE_E4),
+            VocalEvent::MemoryRecall
+            | VocalEvent::MemoryAdd
+            | VocalEvent::MemorySubtract
+            | VocalEvent::MemoryClear => result.push(TONE_E4),
             VocalEvent::SignNegative => result.push(TONE_G3),
             VocalEvent::SignPositive => result.push(TONE_C4),
             VocalEvent::Error(_) => result.push(TONE_ERROR),
@@ -167,9 +181,17 @@ pub fn events_to_tone_indices(events: &[VocalEvent]) -> Vec<usize> {
                 for ch in s.chars() {
                     if ch.is_ascii_digit() {
                         result.push(match ch as u8 - b'0' {
-                            0 => TONE_C3, 1 => TONE_C4, 2 => TONE_D4, 3 => TONE_E4,
-                            4 => TONE_F4, 5 => TONE_G4, 6 => TONE_A4, 7 => TONE_B4,
-                            8 => TONE_C5, 9 => TONE_D5, _ => TONE_C4,
+                            0 => TONE_C3,
+                            1 => TONE_C4,
+                            2 => TONE_D4,
+                            3 => TONE_E4,
+                            4 => TONE_F4,
+                            5 => TONE_G4,
+                            6 => TONE_A4,
+                            7 => TONE_B4,
+                            8 => TONE_C5,
+                            9 => TONE_D5,
+                            _ => TONE_C4,
                         });
                     }
                 }
@@ -308,52 +330,82 @@ mod tests {
 
     #[test]
     fn digit_0_maps_to_c3() {
-        assert_eq!(events_to_tone_indices(&[VocalEvent::Digit(0)]), vec![TONE_C3]);
+        assert_eq!(
+            events_to_tone_indices(&[VocalEvent::Digit(0)]),
+            vec![TONE_C3]
+        );
     }
 
     #[test]
     fn digit_1_maps_to_c4() {
-        assert_eq!(events_to_tone_indices(&[VocalEvent::Digit(1)]), vec![TONE_C4]);
+        assert_eq!(
+            events_to_tone_indices(&[VocalEvent::Digit(1)]),
+            vec![TONE_C4]
+        );
     }
 
     #[test]
     fn digit_2_maps_to_d4() {
-        assert_eq!(events_to_tone_indices(&[VocalEvent::Digit(2)]), vec![TONE_D4]);
+        assert_eq!(
+            events_to_tone_indices(&[VocalEvent::Digit(2)]),
+            vec![TONE_D4]
+        );
     }
 
     #[test]
     fn digit_3_maps_to_e4() {
-        assert_eq!(events_to_tone_indices(&[VocalEvent::Digit(3)]), vec![TONE_E4]);
+        assert_eq!(
+            events_to_tone_indices(&[VocalEvent::Digit(3)]),
+            vec![TONE_E4]
+        );
     }
 
     #[test]
     fn digit_4_maps_to_f4() {
-        assert_eq!(events_to_tone_indices(&[VocalEvent::Digit(4)]), vec![TONE_F4]);
+        assert_eq!(
+            events_to_tone_indices(&[VocalEvent::Digit(4)]),
+            vec![TONE_F4]
+        );
     }
 
     #[test]
     fn digit_5_maps_to_g4() {
-        assert_eq!(events_to_tone_indices(&[VocalEvent::Digit(5)]), vec![TONE_G4]);
+        assert_eq!(
+            events_to_tone_indices(&[VocalEvent::Digit(5)]),
+            vec![TONE_G4]
+        );
     }
 
     #[test]
     fn digit_6_maps_to_a4() {
-        assert_eq!(events_to_tone_indices(&[VocalEvent::Digit(6)]), vec![TONE_A4]);
+        assert_eq!(
+            events_to_tone_indices(&[VocalEvent::Digit(6)]),
+            vec![TONE_A4]
+        );
     }
 
     #[test]
     fn digit_7_maps_to_b4() {
-        assert_eq!(events_to_tone_indices(&[VocalEvent::Digit(7)]), vec![TONE_B4]);
+        assert_eq!(
+            events_to_tone_indices(&[VocalEvent::Digit(7)]),
+            vec![TONE_B4]
+        );
     }
 
     #[test]
     fn digit_8_maps_to_c5() {
-        assert_eq!(events_to_tone_indices(&[VocalEvent::Digit(8)]), vec![TONE_C5]);
+        assert_eq!(
+            events_to_tone_indices(&[VocalEvent::Digit(8)]),
+            vec![TONE_C5]
+        );
     }
 
     #[test]
     fn digit_9_maps_to_d5() {
-        assert_eq!(events_to_tone_indices(&[VocalEvent::Digit(9)]), vec![TONE_D5]);
+        assert_eq!(
+            events_to_tone_indices(&[VocalEvent::Digit(9)]),
+            vec![TONE_D5]
+        );
     }
 
     // --- events_to_tone_indices: Operator variants ---
@@ -418,10 +470,7 @@ mod tests {
 
     #[test]
     fn mu_maps_to_f4() {
-        assert_eq!(
-            events_to_tone_indices(&[VocalEvent::MU]),
-            vec![TONE_F4]
-        );
+        assert_eq!(events_to_tone_indices(&[VocalEvent::MU]), vec![TONE_F4]);
     }
 
     #[test]
@@ -466,7 +515,7 @@ mod tests {
         ];
         for event in events {
             assert_eq!(
-                events_to_tone_indices(&[event.clone()]),
+                events_to_tone_indices(std::slice::from_ref(&event)),
                 vec![TONE_E4],
                 "{:?} should map to TONE_E4",
                 event
@@ -600,14 +649,22 @@ mod tests {
     #[test]
     fn music_tones_count_is_23() {
         let tones = MusicTones::new();
-        assert_eq!(tones.count(), 23, "expected 23 tones: 17 notes + major chord + dissonant chord + ascend + descend + click + error");
+        assert_eq!(
+            tones.count(),
+            23,
+            "expected 23 tones: 17 notes + major chord + dissonant chord + ascend + descend + click + error"
+        );
     }
 
     #[test]
     fn music_tones_get_sound_returns_some_for_valid_indices() {
         let tones = MusicTones::new();
         for i in 0..23 {
-            assert!(tones.get_sound(i).is_some(), "get_sound({}) should return Some", i);
+            assert!(
+                tones.get_sound(i).is_some(),
+                "get_sound({}) should return Some",
+                i
+            );
         }
     }
 
@@ -622,7 +679,11 @@ mod tests {
     fn music_tones_get_wav_bytes_returns_some_for_valid_indices() {
         let tones = MusicTones::new();
         for i in 0..23 {
-            assert!(tones.get_wav_bytes(i).is_some(), "get_wav_bytes({}) should return Some", i);
+            assert!(
+                tones.get_wav_bytes(i).is_some(),
+                "get_wav_bytes({}) should return Some",
+                i
+            );
         }
     }
 
@@ -637,7 +698,11 @@ mod tests {
         let tones = MusicTones::new();
         for i in 0..23 {
             let wav = tones.get_wav_bytes(i).unwrap();
-            assert!(wav.len() >= 44, "WAV {} should have at least 44-byte header", i);
+            assert!(
+                wav.len() >= 44,
+                "WAV {} should have at least 44-byte header",
+                i
+            );
             assert_eq!(&wav[0..4], b"RIFF", "WAV {} should start with RIFF", i);
             assert_eq!(&wav[8..12], b"WAVE", "WAV {} should contain WAVE fmt", i);
             assert_eq!(&wav[12..16], b"fmt ", "WAV {} should contain fmt chunk", i);
@@ -656,7 +721,11 @@ mod tests {
     fn generate_ar7778_tone_is_normalized() {
         let samples = generate_ar7778_tone(440.0, 0.20, 44100);
         let max_val = samples.iter().map(|s| s.abs()).fold(0.0f64, f64::max);
-        assert!((max_val - 1.0).abs() < 1e-6, "tone should be normalized to peak 1.0, got {}", max_val);
+        assert!(
+            (max_val - 1.0).abs() < 1e-6,
+            "tone should be normalized to peak 1.0, got {}",
+            max_val
+        );
     }
 
     #[test]

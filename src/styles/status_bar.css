@@ -1,0 +1,128 @@
+/* Status bar: compact chips, state text, and SVG icon controls. */
+
+.status-bar {
+  grid-row: 2;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--layout-spacing);
+  padding: 2px;
+  overflow: hidden;
+}
+
+.status-chip {
+  flex: none;
+  max-width: 88px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  padding: 2px 7px;
+  font-size: clamp(10px, 1.8cqh, 12px);
+  font-weight: 800;
+  line-height: 1.35;
+}
+
+.status-chip--memory {
+  border-color: color-mix(in srgb, var(--btn-memory), transparent 35%);
+  background: color-mix(in srgb, var(--btn-memory), transparent 86%);
+  color: var(--btn-memory);
+}
+
+.status-chip--error {
+  border-color: color-mix(in srgb, var(--color-btn-clear), transparent 28%);
+  background: color-mix(in srgb, var(--color-btn-clear), transparent 84%);
+  color: var(--color-btn-clear);
+}
+
+.status-chip--remote {
+  border-color: color-mix(in srgb, var(--vc-net-remote), transparent 30%);
+  background: color-mix(in srgb, var(--vc-net-remote), transparent 86%);
+  color: var(--vc-net-remote);
+}
+
+.status-chip--executing {
+  border-color: color-mix(in srgb, var(--vc-net-executing), transparent 30%);
+  background: color-mix(in srgb, var(--vc-net-executing), transparent 86%);
+  color: var(--vc-net-executing);
+}
+
+.status-bar__spacer {
+  flex: 1 1 auto;
+  min-width: 4px;
+}
+
+.status-bar__info {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--status-fg);
+  font-size: var(--status-font-size);
+  font-weight: 600;
+}
+
+.status-bar__info--audio {
+  max-width: 42%;
+}
+
+.status-bar__info--mode {
+  flex: none;
+  max-width: 76px;
+}
+
+.status-icon-btn {
+  flex: none;
+  width: clamp(26px, 4.6cqh, 34px);
+  height: clamp(26px, 4.6cqh, 34px);
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--status-fg);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.status-icon-btn:hover {
+  background: var(--status-hover);
+}
+
+.status-icon-btn:active {
+  background: color-mix(in srgb, var(--status-hover), #000 6%);
+  box-shadow: inset 0 1px 3px rgba(15, 23, 42, 0.16);
+}
+
+.status-icon-btn:focus-visible {
+  outline: 2px solid var(--btn-eq);
+  outline-offset: 2px;
+}
+
+.status-icon-btn__icon {
+  font-size: clamp(15px, 2.6cqh, 19px);
+}
+
+.status-icon-btn--remote-controlled {
+  color: var(--vc-net-remote);
+}
+
+.status-icon-btn--executing-remotely {
+  color: var(--vc-net-executing);
+}
+
+.status-icon-btn--inactive {
+  opacity: 0.42;
+}
+
+@media (max-width: 340px) {
+  .status-bar__info--audio {
+    display: none;
+  }
+
+  .status-chip {
+    max-width: 58px;
+  }
+}

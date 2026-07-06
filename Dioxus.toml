@@ -1,0 +1,6 @@
+[application]
+name = "VocalCalculator"
+default_platform = "desktop"
+
+[web]
+title = "语音计算器"

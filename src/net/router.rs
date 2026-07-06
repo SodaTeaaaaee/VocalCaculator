@@ -76,7 +76,8 @@ impl RoutingMatrix {
     /// Remove all matrix entries involving the given peer (both as
     /// controller and as executor).
     pub fn remove_peer(&mut self, node_id: &NodeId) {
-        self.entries.retain(|(c, e), _| c != node_id && e != node_id);
+        self.entries
+            .retain(|(c, e), _| c != node_id && e != node_id);
         self.row_versions.remove(node_id);
     }
 
@@ -108,7 +109,9 @@ impl RoutingMatrix {
         if version <= current_version {
             log::debug!(
                 "RoutingMatrix::apply_delta: ignoring stale delta from owner {} (v{} <= v{})",
-                owner, version, current_version,
+                owner,
+                version,
+                current_version,
             );
             return;
         }
@@ -142,8 +145,7 @@ impl RoutingMatrix {
     /// sync -- it is managed exclusively through [`set_route`](Self::set_route).
     pub fn apply_sync(&mut self, entries: &[(NodeId, NodeId, bool, u64)]) {
         // Collect which controllers appear in the sync payload.
-        let sync_controllers: HashSet<NodeId> =
-            entries.iter().map(|(c, _, _, _)| *c).collect();
+        let sync_controllers: HashSet<NodeId> = entries.iter().map(|(c, _, _, _)| *c).collect();
 
         // Clear existing rows for non-local controllers that appear in the
         // sync.  This ensures entries the sender intentionally removed are
@@ -326,7 +328,7 @@ impl Router {
     // ---- Configuration ---------------------------------------------------
 
     /// Attach a tokio runtime handle so the router can perform async operations
-    /// from the synchronous slint callback context.
+    /// from a synchronous UI callback context.
     pub fn set_runtime_handle(&self, handle: tokio::runtime::Handle) {
         self.inner.borrow_mut().runtime_handle = Some(handle);
     }
@@ -419,7 +421,11 @@ impl Router {
         // for a row we do not own.
         self.send_message_to(
             from,
-            &NetworkMessage::RouteRevoke { from, to, version: 0 },
+            &NetworkMessage::RouteRevoke {
+                from,
+                to,
+                version: 0,
+            },
         );
     }
 
@@ -554,11 +560,8 @@ impl Router {
         }
 
         // Separate self (diagonal) from remote targets.
-        let remote_targets: Vec<NodeId> = targets
-            .iter()
-            .copied()
-            .filter(|id| *id != my_id)
-            .collect();
+        let remote_targets: Vec<NodeId> =
+            targets.iter().copied().filter(|id| *id != my_id).collect();
 
         if remote_targets.is_empty() {
             // The ONLY target is self -- execute locally.
@@ -694,7 +697,9 @@ impl Router {
                 let inner = self.inner.borrow();
                 inner.display.update_display(&snapshot.display);
                 inner.display.update_history(&snapshot.history);
-                inner.display.update_memory_indicator(&snapshot.memory_indicator);
+                inner
+                    .display
+                    .update_memory_indicator(&snapshot.memory_indicator);
                 inner.display.set_error_state(snapshot.is_error);
             }
             NetworkMessage::Ping => {
@@ -748,11 +753,20 @@ impl Router {
                     );
                 }
             }
-            NetworkMessage::ConnectionFailed { addr, reason, target_node_id } => {
+            NetworkMessage::ConnectionFailed {
+                addr,
+                reason,
+                target_node_id,
+            } => {
                 // Connection failure from the connect task. Revert the
                 // pending route if it still matches the target, and store
                 // the error for UI display.
-                log::warn!("Connection failed to {} ({:?}): {}", addr, target_node_id, reason);
+                log::warn!(
+                    "Connection failed to {} ({:?}): {}",
+                    addr,
+                    target_node_id,
+                    reason
+                );
 
                 // Compute revert details inside the borrow, then broadcast
                 // after dropping it (broadcast_routing_delta also borrows inner).
@@ -769,13 +783,13 @@ impl Router {
                         };
                         if should_revert {
                             inner.pending_control_request = None;
-                            inner.routing_matrix.set_route(
-                                my_id,
-                                pending_peer,
-                                false,
-                            );
-                            let version = inner.routing_matrix.row_versions
-                                .get(&my_id).copied().unwrap_or(0);
+                            inner.routing_matrix.set_route(my_id, pending_peer, false);
+                            let version = inner
+                                .routing_matrix
+                                .row_versions
+                                .get(&my_id)
+                                .copied()
+                                .unwrap_or(0);
                             revert = Some((my_id, pending_peer, version));
                             log::info!(
                                 "Reverted route to {} after connection failure",
@@ -874,7 +888,9 @@ impl Router {
         let mut inner = self.inner.borrow_mut();
         inner.display.update_display(&result.display);
         inner.display.update_history(&result.history);
-        inner.display.update_memory_indicator(&result.memory_indicator);
+        inner
+            .display
+            .update_memory_indicator(&result.memory_indicator);
         inner.display.set_error_state(result.is_error);
         if !inner.audio_muted
             && let Some(ref mut audio) = inner.audio
@@ -969,7 +985,12 @@ impl Router {
         let (ok, version) = {
             let mut inner = self.inner.borrow_mut();
             let ok = inner.routing_matrix.set_route(controller, executor, value);
-            let version = inner.routing_matrix.row_versions.get(&controller).copied().unwrap_or(0);
+            let version = inner
+                .routing_matrix
+                .row_versions
+                .get(&controller)
+                .copied()
+                .unwrap_or(0);
             (ok, version)
         };
         if ok {
@@ -993,7 +1014,10 @@ impl Router {
     pub fn revoke_remote_route(&self, controller: NodeId, executor: NodeId) {
         {
             let mut inner = self.inner.borrow_mut();
-            inner.routing_matrix.entries.insert((controller, executor), false);
+            inner
+                .routing_matrix
+                .entries
+                .insert((controller, executor), false);
         }
     }
 
@@ -1004,7 +1028,10 @@ impl Router {
     pub fn send_routing_sync_to(&self, node_id: NodeId) {
         let (entries, tx) = {
             let inner = self.inner.borrow();
-            (inner.routing_matrix.sync_entries(), inner.outgoing_tx.clone())
+            (
+                inner.routing_matrix.sync_entries(),
+                inner.outgoing_tx.clone(),
+            )
         };
         if let Some(tx) = tx {
             let msg = NetworkMessage::RoutingSync { entries };
@@ -1013,8 +1040,16 @@ impl Router {
     }
 
     /// Apply a remote routing delta to the local matrix.
-    pub fn apply_routing_delta(&self, owner: NodeId, version: u64, cells: &[(NodeId, NodeId, bool)]) {
-        self.inner.borrow_mut().routing_matrix.apply_delta(owner, version, cells);
+    pub fn apply_routing_delta(
+        &self,
+        owner: NodeId,
+        version: u64,
+        cells: &[(NodeId, NodeId, bool)],
+    ) {
+        self.inner
+            .borrow_mut()
+            .routing_matrix
+            .apply_delta(owner, version, cells);
     }
 
     /// Apply a full routing sync snapshot to the local matrix.
@@ -1145,23 +1180,12 @@ mod tests {
 
     /// Records every call made to the display updater so tests can assert on
     /// the exact sequence of UI updates.
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, Default)]
     struct RecordedCalls {
         pub displays: Vec<String>,
         pub histories: Vec<String>,
         pub memory_indicators: Vec<String>,
         pub error_states: Vec<bool>,
-    }
-
-    impl Default for RecordedCalls {
-        fn default() -> Self {
-            Self {
-                displays: Vec::new(),
-                histories: Vec::new(),
-                memory_indicators: Vec::new(),
-                error_states: Vec::new(),
-            }
-        }
     }
 
     struct MockDisplayUpdater {
@@ -1656,7 +1680,9 @@ mod tests {
         router.dispatch(CalcAction::Digit(8));
 
         // The broadcast from execute_local uses local_seq which is now 50.
-        let (_, msg) = rx.try_recv().expect("Expected broadcast from local dispatch");
+        let (_, msg) = rx
+            .try_recv()
+            .expect("Expected broadcast from local dispatch");
         match msg {
             NetworkMessage::StateUpdate(snap) => {
                 assert_eq!(snap.last_seq_applied, 50);
@@ -1954,7 +1980,13 @@ mod tests {
         // Peer should now be in our controllers list.
         let controllers = router.my_controllers();
         assert!(controllers.contains(&peer));
-        assert!(router.get_routing_matrix().get(&(peer, my_id)).copied().unwrap_or(false));
+        assert!(
+            router
+                .get_routing_matrix()
+                .get(&(peer, my_id))
+                .copied()
+                .unwrap_or(false)
+        );
     }
 
     #[test]
@@ -2014,11 +2046,14 @@ mod tests {
         assert!(router.my_control_targets().contains(&peer));
 
         // Revoke the route.
-        router.handle_network_message(peer, NetworkMessage::RouteRevoke {
-            from: my_id,
-            to: peer,
-            version: 2,
-        });
+        router.handle_network_message(
+            peer,
+            NetworkMessage::RouteRevoke {
+                from: my_id,
+                to: peer,
+                version: 2,
+            },
+        );
 
         // Route should be gone.
         assert!(!router.my_control_targets().contains(&peer));
@@ -2059,12 +2094,12 @@ mod tests {
         // A RoutingDelta should have been broadcast to other_peer.
         let mut found_delta = false;
         while let Ok((target, msg)) = rx.try_recv() {
-            if target == other_peer {
-                if let NetworkMessage::RoutingDelta { owner, cells, .. } = msg {
-                    assert_eq!(owner, remote_peer);
-                    assert_eq!(cells, vec![(remote_peer, my_id, false)]);
-                    found_delta = true;
-                }
+            if target == other_peer
+                && let NetworkMessage::RoutingDelta { owner, cells, .. } = msg
+            {
+                assert_eq!(owner, remote_peer);
+                assert_eq!(cells, vec![(remote_peer, my_id, false)]);
+                found_delta = true;
             }
         }
         assert!(
@@ -2080,13 +2115,25 @@ mod tests {
         let my_id = router.local_node_id();
 
         // Not controlled by peer initially.
-        assert!(!router.get_routing_matrix().get(&(peer, my_id)).copied().unwrap_or(false));
+        assert!(
+            !router
+                .get_routing_matrix()
+                .get(&(peer, my_id))
+                .copied()
+                .unwrap_or(false)
+        );
 
         // Apply delta: peer controls us.
         router.apply_routing_delta(peer, 1, &[(peer, my_id, true)]);
 
         // Now controlled by peer.
-        assert!(router.get_routing_matrix().get(&(peer, my_id)).copied().unwrap_or(false));
+        assert!(
+            router
+                .get_routing_matrix()
+                .get(&(peer, my_id))
+                .copied()
+                .unwrap_or(false)
+        );
     }
 
     #[test]
@@ -2097,10 +2144,7 @@ mod tests {
         let my_id = router.local_node_id();
 
         // Apply a full sync with two entries.
-        router.apply_routing_sync(&[
-            (peer_a, my_id, true, 1),
-            (my_id, peer_b, true, 1),
-        ]);
+        router.apply_routing_sync(&[(peer_a, my_id, true, 1), (my_id, peer_b, true, 1)]);
 
         let matrix = router.get_routing_matrix();
         assert!(matrix.get(&(peer_a, my_id)).copied().unwrap_or(false));
@@ -2127,16 +2171,25 @@ mod tests {
         // Establish B's presence: diagonal + a route from us to B.
         router.add_remote_session(peer_b);
         router.set_route(my_id, peer_b, true);
-        assert!(router.get_routing_matrix().get(&(peer_b, peer_b)).copied().unwrap_or(false));
-        assert!(router.get_routing_matrix().get(&(my_id, peer_b)).copied().unwrap_or(false));
+        assert!(
+            router
+                .get_routing_matrix()
+                .get(&(peer_b, peer_b))
+                .copied()
+                .unwrap_or(false)
+        );
+        assert!(
+            router
+                .get_routing_matrix()
+                .get(&(my_id, peer_b))
+                .copied()
+                .unwrap_or(false)
+        );
 
         // C connects and sends a RoutingSync that only knows about C itself.
         // This simulates the scenario where C has never heard of B.
         router.add_remote_session(peer_c);
-        router.apply_routing_sync(&[
-            (peer_c, peer_c, true, 0),
-            (my_id, my_id, true, 0),
-        ]);
+        router.apply_routing_sync(&[(peer_c, peer_c, true, 0), (my_id, my_id, true, 0)]);
 
         let matrix = router.get_routing_matrix();
 
@@ -2167,7 +2220,13 @@ mod tests {
 
         // Set a route (bumps local version to 1).
         router.set_route(my_id, peer, true);
-        assert!(router.get_routing_matrix().get(&(my_id, peer)).copied().unwrap_or(false));
+        assert!(
+            router
+                .get_routing_matrix()
+                .get(&(my_id, peer))
+                .copied()
+                .unwrap_or(false)
+        );
 
         // A sync arrives claiming our row has no route at version 0.
         // The local version (1) is higher, so the sync must be ignored.
@@ -2191,10 +2250,7 @@ mod tests {
 
         // Simulate receiving our own row from a peer at a higher version
         // (e.g. peer is echoing back a state we sent before a restart).
-        router.apply_routing_sync(&[
-            (my_id, peer, true, 5),
-            (peer, peer, true, 0),
-        ]);
+        router.apply_routing_sync(&[(my_id, peer, true, 5), (peer, peer, true, 0)]);
 
         let matrix = router.get_routing_matrix();
         assert!(
@@ -2213,7 +2269,10 @@ mod tests {
         // send_route_revoke is intentionally a no-op; the subsequent
         // set_route() call handles the RoutingDelta broadcast.
         router.send_route_revoke(peer);
-        assert!(rx.try_recv().is_err(), "send_route_revoke should not send any message");
+        assert!(
+            rx.try_recv().is_err(),
+            "send_route_revoke should not send any message"
+        );
 
         // set_route broadcasts the RoutingDelta to all connected peers.
         router.set_route(my_id, peer, false);
@@ -2279,8 +2338,11 @@ mod tests {
 
         // Speculative echo updates display.  Calculator accumulated: "3" + "7" = "37".
         let c = calls.borrow();
-        assert!(c.displays.iter().any(|d| d == "37"),
-            "Expected display '37' after sequential digits, got {:?}", c.displays);
+        assert!(
+            c.displays.iter().any(|d| d == "37"),
+            "Expected display '37' after sequential digits, got {:?}",
+            c.displays
+        );
 
         // Should see an Action envelope (not just StateUpdate).
         let mut found_action = false;
@@ -2289,6 +2351,9 @@ mod tests {
                 found_action = true;
             }
         }
-        assert!(found_action, "Expected Action envelope after pending cleared");
+        assert!(
+            found_action,
+            "Expected Action envelope after pending cleared"
+        );
     }
 }

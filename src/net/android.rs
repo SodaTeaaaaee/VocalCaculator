@@ -8,9 +8,9 @@
 use std::sync::Mutex;
 
 #[cfg(target_os = "android")]
-use jni::objects::{GlobalRef, JObject, JValue};
-#[cfg(target_os = "android")]
 use jni::JavaVM;
+#[cfg(target_os = "android")]
+use jni::objects::{GlobalRef, JObject, JValue};
 
 /// Application-wide multicast lock guard. Acquires on creation, releases on drop.
 #[cfg(target_os = "android")]
@@ -52,8 +52,7 @@ impl MulticastLockGuard {
             let mut env = vm.attach_current_thread().map_err(|e| e.to_string())?;
 
             // Cast *mut c_void to jobject for jni 0.21.
-            let ctx_obj =
-                unsafe { JObject::from_raw(ctx.context() as jni::sys::jobject) };
+            let ctx_obj = unsafe { JObject::from_raw(ctx.context() as jni::sys::jobject) };
 
             // 1. getSystemService(Context.WIFI_SERVICE)
             let wifi_str = env.new_string("wifi").map_err(|e| e.to_string())?;

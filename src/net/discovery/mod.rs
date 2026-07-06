@@ -1,11 +1,9 @@
-mod broadcast;
 mod multicast;
 mod peer_table;
 
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use broadcast::BroadcastTransport;
 use futures::{SinkExt, StreamExt};
 use multicast::MulticastTransport;
 use tokio::net::TcpListener;
@@ -28,22 +26,21 @@ pub struct DiscoveryExchange {
 
 /// Unified discovery service using the Localsend pattern:
 ///
-/// - **UDP multicast + broadcast**: sends announcements and listens for
+/// - **UDP multicast**: sends announcements and listens for
 ///   announcements from peers.
 /// - **TCP listener**: accepts incoming connections for bidirectional
 ///   identity exchange and peer confirmation.
 ///
 /// Flow:
-/// 1. Periodically send UDP announcements (multicast + broadcast).
-/// 2. Listen for UDP announcements from peers.
+/// 1. Periodically send UDP multicast announcements.
+/// 2. Listen for UDP multicast announcements from peers.
 /// 3. When a UDP announcement is received, connect to the peer via TCP.
 /// 4. Accept incoming TCP connections from peers who received our
 ///    announcements.
 /// 5. TCP connection = peer confirmed.
 pub struct DiscoveryService {
     tcp_listener: TcpListener,
-    multicast: Option<MulticastTransport>,
-    broadcast: BroadcastTransport,
+    multicast: MulticastTransport,
     announce_msg: DiscoveryMessage,
 }
 
@@ -64,31 +61,33 @@ impl DiscoveryService {
     /// Create a new discovery service with a custom TCP port.
     ///
     /// Binds a TCP listener on the given port for incoming peer connections.
-    /// Also initializes UDP multicast and broadcast transports for
-    /// announcements and listening.
+    /// Also initializes the UDP multicast transport for announcements and
+    /// listening.
     pub async fn new_with_port(
         local_node_id: crate::net::protocol::NodeId,
         display_name: String,
         tcp_port: u16,
         session_port: u16,
     ) -> Result<Self, anyhow::Error> {
-        use crate::net::protocol::{Capabilities, PROTOCOL_VERSION};
+        use crate::net::protocol::{Capabilities, DISCOVERY_PORT, PROTOCOL_VERSION};
 
-        // -- TCP listener (ephemeral port for peer handshake) -----------------
-        // Binds to port 0 so the OS picks a free port.  The actual port is
-        // advertised in the AnnounceV2 message via UDP, so peers always
-        // connect to the right address.  No SO_REUSEADDR needed — each
-        // instance gets its own unique port, avoiding Windows "port stealing"
-        // semantics where connections are non-deterministically delivered.
+        // -- TCP listener (fixed port for peer handshake) --------------------
+        // Uses SO_REUSEADDR so multiple instances can bind the same port.
+        let bind_port = if tcp_port == 0 {
+            DISCOVERY_PORT
+        } else {
+            tcp_port
+        };
         let bind_addr = SocketAddr::new(
             "0.0.0.0".parse().expect("valid constant address"),
-            tcp_port,
+            bind_port,
         );
         let socket = socket2::Socket::new(
             socket2::Domain::IPV4,
             socket2::Type::STREAM,
             Some(socket2::Protocol::TCP),
         )?;
+        socket.set_reuse_address(true)?;
         let sock_addr: socket2::SockAddr = bind_addr.into();
         socket.bind(&sock_addr)?;
         socket.listen(128)?;
@@ -98,22 +97,9 @@ impl DiscoveryService {
         let actual_port = tcp_listener.local_addr().map(|a| a.port()).unwrap_or(0);
         log::info!("TCP discovery listener bound on 0.0.0.0:{}", actual_port);
 
-        // -- UDP transports (send + receive) ---------------------------------
-        let multicast = match MulticastTransport::new().await {
-            Ok(t) => {
-                log::info!("Multicast transport active");
-                Some(t)
-            }
-            Err(e) => {
-                log::warn!(
-                    "Multicast transport unavailable, falling back to broadcast: {}",
-                    e
-                );
-                None
-            }
-        };
-
-        let broadcast = BroadcastTransport::new().await?;
+        // -- UDP multicast transport (send + receive) ------------------------
+        let multicast = MulticastTransport::new().await?;
+        log::info!("Multicast transport active");
 
         let hostname = hostname::get()
             .map(|h| h.to_string_lossy().to_string())
@@ -136,52 +122,13 @@ impl DiscoveryService {
         Ok(Self {
             tcp_listener,
             multicast,
-            broadcast,
             announce_msg,
         })
     }
 
-    /// Send a discovery announcement on **every** active UDP transport.
-    ///
-    /// Errors from individual transports are logged at warn level; the
-    /// method returns `Err` only when **all** transports fail.
+    /// Send a discovery announcement via UDP multicast.
     pub async fn announce(&self, msg: &DiscoveryMessage) -> Result<(), anyhow::Error> {
-        // Run multicast and broadcast in parallel to cut announce time in half.
-        let (mc_result, bc_result) = tokio::join!(
-            async {
-                if let Some(mc) = &self.multicast {
-                    mc.announce(msg).await
-                } else {
-                    Ok(())
-                }
-            },
-            self.broadcast.announce(msg),
-        );
-
-        let mut any_succeeded = false;
-        let mut last_err: Option<anyhow::Error> = None;
-
-        match mc_result {
-            Ok(()) => any_succeeded = true,
-            Err(e) => {
-                log::warn!("Multicast announce error: {}", e);
-                last_err = Some(e);
-            }
-        }
-
-        match bc_result {
-            Ok(()) => any_succeeded = true,
-            Err(e) => {
-                log::warn!("Broadcast announce error: {}", e);
-                last_err = Some(e);
-            }
-        }
-
-        if any_succeeded {
-            Ok(())
-        } else {
-            Err(last_err.unwrap_or_else(|| anyhow::anyhow!("no transports available")))
-        }
+        self.multicast.announce(msg).await
     }
 
     /// Return a reference to the pre-built announcement message.
@@ -189,20 +136,9 @@ impl DiscoveryService {
         &self.announce_msg
     }
 
-    /// Wait for the next **UDP announcement** from any transport.
-    ///
-    /// Uses `tokio::select!` to multiplex across multicast and broadcast
-    /// receive sockets.  Returns the first successfully decoded message.
+    /// Wait for the next **UDP multicast announcement**.
     pub async fn recv_announce(&self) -> Result<(DiscoveryMessage, SocketAddr), anyhow::Error> {
-        match &self.multicast {
-            Some(mc) => {
-                tokio::select! {
-                    result = mc.recv() => result,
-                    result = self.broadcast.recv() => result,
-                }
-            }
-            None => self.broadcast.recv().await,
-        }
+        self.multicast.recv().await
     }
 
     /// Wait for the next **incoming TCP connection** from a peer.
@@ -241,14 +177,11 @@ impl DiscoveryService {
         let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
 
         // Send our identity.
-        let bincode_bytes =
-            bincode::serde::encode_to_vec(&local_msg, bincode::config::standard())?;
+        let bincode_bytes = bincode::serde::encode_to_vec(&local_msg, bincode::config::standard())?;
         let mut payload = Vec::with_capacity(PROTOCOL_MAGIC.len() + bincode_bytes.len());
         payload.extend_from_slice(&PROTOCOL_MAGIC);
         payload.extend_from_slice(&bincode_bytes);
-        framed
-            .send(tokio_util::bytes::Bytes::from(payload))
-            .await?;
+        framed.send(tokio_util::bytes::Bytes::from(payload)).await?;
 
         // Read the peer's identity.
         let bytes = framed
@@ -257,9 +190,7 @@ impl DiscoveryService {
             .ok_or_else(|| anyhow::anyhow!("Connection closed before discovery message"))?
             .map_err(|e| anyhow::anyhow!("TCP read error: {}", e))?;
 
-        if bytes.len() < PROTOCOL_MAGIC.len()
-            || bytes[..PROTOCOL_MAGIC.len()] != PROTOCOL_MAGIC
-        {
+        if bytes.len() < PROTOCOL_MAGIC.len() || bytes[..PROTOCOL_MAGIC.len()] != PROTOCOL_MAGIC {
             return Err(anyhow::anyhow!("Invalid protocol magic from {}", peer_addr));
         }
 

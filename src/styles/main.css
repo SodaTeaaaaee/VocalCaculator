@@ -1,0 +1,363 @@
+/* VocalCalculator theme tokens and base application styles. */
+
+@font-face {
+  font-family: "Noto Sans SC";
+  src: url("/assets/fonts/NotoSansSC-Regular.otf") format("opentype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "JetBrainsMono Nerd Font";
+  src: url("/assets/fonts/JetBrainsMonoNerdFont-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  color-scheme: light;
+
+  --vc-window-bg: #f1f4f7;
+  --vc-body-fill: #d9e0e7;
+  --vc-body-edge: #9aa7b4;
+  --vc-body-inner: #edf1f4;
+  --vc-body-inner-border: #c3ccd6;
+  --vc-brand-fg: #405060;
+
+  --vc-lcd-bg: #bed19a;
+  --vc-lcd-fg: #203318;
+  --vc-lcd-frame: #566451;
+  --vc-lcd-error-bg: #f0b2a8;
+  --vc-lcd-error-fg: #8d1f1f;
+
+  --vc-btn-digit-bg: #eef2f5;
+  --vc-btn-digit-fg: #17202a;
+  --vc-btn-op-bg: #f0ad4f;
+  --vc-btn-op-fg: #30220d;
+  --vc-btn-func-bg: #c9d2dc;
+  --vc-btn-func-fg: #263341;
+  --vc-btn-clear-bg: #d95f55;
+  --vc-btn-clear-fg: #ffffff;
+  --vc-btn-ci-bg: #d88463;
+  --vc-btn-ci-fg: #ffffff;
+  --vc-btn-bs-bg: #d7bd66;
+  --vc-btn-bs-fg: #30250f;
+  --vc-btn-eq-bg: #2f7fc7;
+  --vc-btn-eq-fg: #ffffff;
+  --vc-btn-memory-bg: #b94545;
+  --vc-btn-memory-fg: #ffffff;
+
+  --vc-status-fg: #566271;
+  --vc-status-hover-bg: #d8e0e8;
+  --vc-net-connected: #2f7fc7;
+  --vc-net-executing: #2a9d55;
+  --vc-net-remote: #4f72d9;
+
+  --vc-panel-bg: #f7f9fb;
+  --vc-panel-border: #d0d8e1;
+  --vc-panel-input-bg: #eef2f5;
+  --vc-panel-input-border: #c6d0da;
+  --vc-overlay-backdrop: rgba(15, 23, 42, 0.38);
+
+  --vc-matrix-bg: #edf2f6;
+  --vc-matrix-cell-bg: #f7f9fb;
+  --vc-matrix-cell-border: #cbd5df;
+  --vc-matrix-header-bg: #dde5ee;
+  --vc-matrix-self-fg: #187a3a;
+  --vc-matrix-peer-fg: #263341;
+  --vc-matrix-empty-fg: #778493;
+  --vc-matrix-check-bg: #23874a;
+  --vc-matrix-check-unchecked: #dfe6ed;
+  --vc-matrix-check-border: #aab7c5;
+
+  --vc-toggle-on-bg: #24864b;
+  --vc-toggle-on-hover: #2c9d59;
+  --vc-toggle-off-bg: #8e3c3c;
+  --vc-toggle-off-hover: #a34848;
+  --vc-toggle-knob-bg: #ffffff;
+  --vc-toggle-knob-border: #b8c2cc;
+
+  --vc-section-fg: #3d4a58;
+  --vc-title-fg: #17202a;
+  --vc-save-success: #23874a;
+  --vc-glow-remote: rgba(79, 114, 217, 0.45);
+  --vc-glow-executing: rgba(42, 157, 85, 0.45);
+
+  --body-margin: 0px;
+  --inner-margin: clamp(2px, 0.5cqh, 5px);
+  --body-radius: 0px;
+  --brand-h: clamp(26px, 4.8cqh, 38px);
+  --status-h: clamp(30px, 5.8cqh, 44px);
+  --volume-h: clamp(30px, 5.4cqh, 42px);
+  --history-h: clamp(16px, 2.8cqh, 22px);
+  --lcd-h: clamp(58px, 11cqh, 92px);
+  --layout-gap: clamp(4px, 0.75cqh, 7px);
+  --layout-spacing: clamp(5px, 0.9cqh, 8px);
+  --layout-padding: clamp(8px, 1.4cqh, 14px);
+  --btn-font-size: clamp(15px, 2.9cqh, 23px);
+  --status-font-size: clamp(11px, 2cqh, 15px);
+  --brand-font-size: clamp(12px, 2.2cqh, 16px);
+
+  --transition-fast: 90ms ease;
+  --transition-normal: 160ms ease;
+  --shadow-hardware: 0 16px 36px rgba(31, 41, 55, 0.18), 0 3px 8px rgba(31, 41, 55, 0.12);
+  --shadow-panel: 0 18px 44px rgba(15, 23, 42, 0.18);
+
+  --color-body-fill: var(--vc-body-fill);
+  --color-body-edge: var(--vc-body-edge);
+  --color-body-inner: var(--vc-body-inner);
+  --color-inner-border: var(--vc-body-inner-border);
+  --color-brand: var(--vc-brand-fg);
+  --color-status-fg: var(--vc-status-fg);
+  --color-status-hover: var(--vc-status-hover-bg);
+  --color-btn-digit: var(--vc-btn-digit-bg);
+  --color-btn-digit-fg: var(--vc-btn-digit-fg);
+  --color-btn-op: var(--vc-btn-op-bg);
+  --color-btn-op-fg: var(--vc-btn-op-fg);
+  --color-btn-func: var(--vc-btn-func-bg);
+  --color-btn-func-fg: var(--vc-btn-func-fg);
+  --color-btn-clear: var(--vc-btn-clear-bg);
+  --color-btn-clear-fg: var(--vc-btn-clear-fg);
+  --color-btn-ci: var(--vc-btn-ci-bg);
+  --color-btn-ci-fg: var(--vc-btn-ci-fg);
+  --color-btn-bs: var(--vc-btn-bs-bg);
+  --color-btn-bs-fg: var(--vc-btn-bs-fg);
+  --color-btn-eq: var(--vc-btn-eq-bg);
+  --color-btn-eq-fg: var(--vc-btn-eq-fg);
+  --color-btn-memory: var(--vc-btn-memory-bg);
+  --color-btn-memory-fg: var(--vc-btn-memory-fg);
+  --lcd-frame: var(--vc-lcd-frame);
+  --lcd-bg: var(--vc-lcd-bg);
+  --lcd-fg: var(--vc-lcd-fg);
+  --lcd-error-bg: var(--vc-lcd-error-bg);
+  --lcd-error-fg: var(--vc-lcd-error-fg);
+  --body-edge: var(--vc-body-edge);
+  --body-fill: var(--vc-body-fill);
+  --body-inner: var(--vc-body-inner);
+  --body-inner-edge: var(--vc-body-inner-border);
+  --status-fg: var(--vc-status-fg);
+  --status-hover: var(--vc-status-hover-bg);
+  --title-fg: var(--vc-title-fg);
+  --card-inset-bg: var(--vc-panel-input-bg);
+  --card-inset-edge: var(--vc-panel-input-border);
+  --toggle-off: var(--vc-toggle-off-bg);
+  --toggle-off-hover: var(--vc-toggle-off-hover);
+  --toggle-on: var(--vc-toggle-on-bg);
+  --toggle-on-hover: var(--vc-toggle-on-hover);
+  --toggle-knob: var(--vc-toggle-knob-bg);
+  --toggle-knob-border: var(--vc-toggle-knob-border);
+  --matrix-bg: var(--vc-matrix-bg);
+  --matrix-cell-bg: var(--vc-matrix-cell-bg);
+  --matrix-header-bg: var(--vc-matrix-header-bg);
+  --matrix-empty-fg: var(--vc-matrix-empty-fg);
+  --matrix-self-label: var(--vc-matrix-self-fg);
+  --matrix-checked: var(--vc-matrix-check-bg);
+  --matrix-unchecked-bg: var(--vc-matrix-check-unchecked);
+  --matrix-unchecked-edge: var(--vc-matrix-check-border);
+  --btn-eq: var(--vc-btn-eq-bg);
+  --btn-memory: var(--vc-btn-memory-bg);
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --vc-window-bg: #11151b;
+  --vc-body-fill: #2a3038;
+  --vc-body-edge: #46515e;
+  --vc-body-inner: #20262e;
+  --vc-body-inner-border: #151a20;
+  --vc-brand-fg: #aab6c4;
+
+  --vc-lcd-bg: #263b2a;
+  --vc-lcd-fg: #aee2a6;
+  --vc-lcd-frame: #12171b;
+  --vc-lcd-error-bg: #402322;
+  --vc-lcd-error-fg: #ff9b91;
+
+  --vc-btn-digit-bg: #3a424d;
+  --vc-btn-digit-fg: #eef3f8;
+  --vc-btn-op-bg: #7a5323;
+  --vc-btn-op-fg: #ffdaa2;
+  --vc-btn-func-bg: #303741;
+  --vc-btn-func-fg: #c6d0db;
+  --vc-btn-clear-bg: #6c2b2b;
+  --vc-btn-clear-fg: #ffd0ca;
+  --vc-btn-ci-bg: #6d4328;
+  --vc-btn-ci-fg: #ffd5bd;
+  --vc-btn-bs-bg: #6b5828;
+  --vc-btn-bs-fg: #ffe2a4;
+  --vc-btn-eq-bg: #1f568a;
+  --vc-btn-eq-fg: #d5ebff;
+  --vc-btn-memory-bg: #6b2c35;
+  --vc-btn-memory-fg: #ffd8dd;
+
+  --vc-status-fg: #a1adba;
+  --vc-status-hover-bg: #39424d;
+  --vc-panel-bg: #1b2128;
+  --vc-panel-border: #343d48;
+  --vc-panel-input-bg: #252c35;
+  --vc-panel-input-border: #3a4552;
+
+  --vc-matrix-bg: #1b2027;
+  --vc-matrix-cell-bg: #222933;
+  --vc-matrix-header-bg: #2b333e;
+  --vc-matrix-empty-fg: #7f8b98;
+  --vc-matrix-self-fg: #74d58f;
+  --vc-matrix-check-bg: #3fb469;
+  --vc-matrix-check-unchecked: #2d3540;
+  --vc-matrix-check-border: #4b5664;
+
+  --vc-toggle-on-bg: #2f8f55;
+  --vc-toggle-on-hover: #39a764;
+  --vc-toggle-off-bg: #633030;
+  --vc-toggle-off-hover: #773939;
+  --vc-toggle-knob-bg: #d9e1ea;
+  --vc-toggle-knob-border: #778493;
+
+  --vc-section-fg: #c6d0db;
+  --vc-title-fg: #f3f7fb;
+  --shadow-hardware: 0 18px 42px rgba(0, 0, 0, 0.38), 0 3px 8px rgba(0, 0, 0, 0.28);
+  --shadow-panel: 0 18px 44px rgba(0, 0, 0, 0.34);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    color-scheme: dark;
+    --vc-window-bg: #11151b;
+    --vc-body-fill: #2a3038;
+    --vc-body-edge: #46515e;
+    --vc-body-inner: #20262e;
+    --vc-body-inner-border: #151a20;
+    --vc-brand-fg: #aab6c4;
+    --vc-lcd-bg: #263b2a;
+    --vc-lcd-fg: #aee2a6;
+    --vc-lcd-frame: #12171b;
+    --vc-lcd-error-bg: #402322;
+    --vc-lcd-error-fg: #ff9b91;
+    --vc-btn-digit-bg: #3a424d;
+    --vc-btn-digit-fg: #eef3f8;
+    --vc-btn-op-bg: #7a5323;
+    --vc-btn-op-fg: #ffdaa2;
+    --vc-btn-func-bg: #303741;
+    --vc-btn-func-fg: #c6d0db;
+    --vc-btn-clear-bg: #6c2b2b;
+    --vc-btn-clear-fg: #ffd0ca;
+    --vc-btn-ci-bg: #6d4328;
+    --vc-btn-ci-fg: #ffd5bd;
+    --vc-btn-bs-bg: #6b5828;
+    --vc-btn-bs-fg: #ffe2a4;
+    --vc-btn-eq-bg: #1f568a;
+    --vc-btn-eq-fg: #d5ebff;
+    --vc-btn-memory-bg: #6b2c35;
+    --vc-btn-memory-fg: #ffd8dd;
+    --vc-status-fg: #a1adba;
+    --vc-status-hover-bg: #39424d;
+    --vc-panel-bg: #1b2128;
+    --vc-panel-border: #343d48;
+    --vc-panel-input-bg: #252c35;
+    --vc-panel-input-border: #3a4552;
+    --vc-matrix-bg: #1b2027;
+    --vc-matrix-cell-bg: #222933;
+    --vc-matrix-header-bg: #2b333e;
+    --vc-matrix-empty-fg: #7f8b98;
+    --vc-matrix-self-fg: #74d58f;
+    --vc-matrix-check-bg: #3fb469;
+    --vc-matrix-check-unchecked: #2d3540;
+    --vc-matrix-check-border: #4b5664;
+    --vc-toggle-on-bg: #2f8f55;
+    --vc-toggle-on-hover: #39a764;
+    --vc-toggle-off-bg: #633030;
+    --vc-toggle-off-hover: #773939;
+    --vc-toggle-knob-bg: #d9e1ea;
+    --vc-toggle-knob-border: #778493;
+    --vc-section-fg: #c6d0db;
+    --vc-title-fg: #f3f7fb;
+    --shadow-hardware: 0 18px 42px rgba(0, 0, 0, 0.38), 0 3px 8px rgba(0, 0, 0, 0.28);
+    --shadow-panel: 0 18px 44px rgba(0, 0, 0, 0.34);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  height: 100dvh;
+  display: flex;
+  justify-content: stretch;
+  align-items: stretch;
+  padding: 0;
+  overflow: hidden;
+  background: var(--vc-window-bg);
+  color: var(--vc-title-fg);
+  font-family: "Noto Sans SC", "Segoe UI", system-ui, sans-serif;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  -webkit-tap-highlight-color: transparent;
+}
+
+.vc-icon {
+  width: 1em;
+  height: 1em;
+  display: block;
+  flex: none;
+}
+
+.keyboard-focus-trap {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+  outline: none;
+}
+
+.calculator-window,
+.calculator-body,
+.calculator-body-inner,
+.lcd-display,
+.lcd-display__inner,
+.skeu-btn,
+.status-bar,
+.status-icon-btn,
+.volume-row__mute-btn,
+.overlay-card,
+.overlay-card__inner,
+.workbench,
+.panel-action,
+.toggle-switch,
+.toggle-switch__knob,
+.matrix-cell {
+  transition:
+    background-color 0.2s ease,
+    border-color 0.2s ease,
+    color 0.2s ease,
+    box-shadow 0.2s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    scroll-behavior: auto !important;
+    transition-duration: 1ms !important;
+  }
+}

@@ -5,9 +5,9 @@ mod handle;
 mod handshake;
 pub mod protocol;
 pub mod router;
+mod runtime;
 pub mod session;
 pub mod state;
-mod runtime;
 
 #[cfg(test)]
 mod tests;
@@ -17,14 +17,16 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::app::storage::Storage;
+use crate::ui::events::UiEvent;
 use protocol::{NetworkCommand, NetworkMessage, NodeId};
 use session::SessionSender;
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{Notify, mpsc};
 
-slint::include_modules!();
+// UI-facing display types live in the Dioxus UI layer.
 
-pub use router::{Router, RoutingConfig};
 pub use handle::NetworkHandle;
+pub use router::{Router, RoutingConfig};
 pub use state::{NetworkState, PeerInfo};
 
 // ---------------------------------------------------------------------------
@@ -39,14 +41,14 @@ pub struct NetworkManager {
     local_node_id: NodeId,
     /// Display name for handshake and discovery.
     local_display_name: String,
+    /// Ed25519 public key advertised during handshake (32 bytes).
+    local_pubkey: [u8; 32],
 
     /// Outgoing message channel: Router sends `(target_node_id, msg)` here.
     outgoing_tx: mpsc::UnboundedSender<(NodeId, NetworkMessage)>,
 
-    /// Inbound message queue: the runtime pushes messages here; the main
-    /// thread drains them via [`process_incoming`].
-    /// Each message is paired with the sender's NodeId.
-    incoming_rx: mpsc::UnboundedReceiver<(NodeId, NetworkMessage)>,
+    /// Channel for sending [`UiEvent`]s to the UI layer.
+    ui_event_tx: mpsc::UnboundedSender<UiEvent>,
 
     /// Command channel to the runtime.
     command_tx: mpsc::UnboundedSender<NetworkCommand>,
@@ -69,17 +71,25 @@ pub struct NetworkManager {
 
 impl NetworkManager {
     /// Create a new `NetworkManager` (does not start the runtime).
-    pub fn new(local_display_name: String) -> Self {
+    ///
+    /// Identity fields (`node_id`, `display_name`, `pubkey`) are derived
+    /// from the provided [`Storage`], ensuring a stable identity across
+    /// restarts.
+    pub fn new(storage: Arc<Storage>, ui_event_tx: mpsc::UnboundedSender<UiEvent>) -> Self {
+        let local_node_id = storage.identity().node_id();
+        let local_display_name = storage.config().network.display_name.clone();
+        let local_pubkey = storage.identity().public_key_bytes();
+
         let (outgoing_tx, _) = mpsc::unbounded_channel();
-        let (_, incoming_rx) = mpsc::unbounded_channel();
         let (command_tx, _) = mpsc::unbounded_channel();
 
         Self {
             state: Arc::new(Mutex::new(NetworkState::default())),
-            local_node_id: NodeId::new_v4(),
+            local_node_id,
             local_display_name,
+            local_pubkey,
             outgoing_tx,
-            incoming_rx,
+            ui_event_tx,
             command_tx,
             sessions: Arc::new(Mutex::new(HashMap::new())),
             runtime_handle: None,
@@ -105,23 +115,23 @@ impl NetworkManager {
     pub fn start(&mut self) -> NetworkHandle {
         let local_id = self.local_node_id;
         let display_name = self.local_display_name.clone();
+        let local_pubkey = self.local_pubkey;
         let net_state = self.state.clone();
         let shutdown = self.shutdown_flag.clone();
         let shutdown_notify = self.shutdown_notify.clone();
         let sessions = self.sessions.clone();
+        let ui_event_tx = self.ui_event_tx.clone();
 
         let (outgoing_tx, outgoing_rx) = mpsc::unbounded_channel::<(NodeId, NetworkMessage)>();
-        let (incoming_tx, incoming_rx) = mpsc::unbounded_channel::<(NodeId, NetworkMessage)>();
         let (command_tx, command_rx) = mpsc::unbounded_channel::<NetworkCommand>();
 
-
         self.outgoing_tx = outgoing_tx.clone();
-        self.incoming_rx = incoming_rx;
         self.command_tx = command_tx.clone();
 
-        // The runtime handle is sent back from the spawned thread via a
-        // oneshot channel.
-        let (handle_tx, handle_rx) = tokio::sync::oneshot::channel();
+        // The runtime handle is sent back from the spawned OS thread via a
+        // standard channel.  This method can be called while Dioxus is running
+        // inside a Tokio runtime, so do not use Tokio's blocking_recv here.
+        let (handle_tx, handle_rx) = std::sync::mpsc::sync_channel(1);
 
         let thread_handle = std::thread::Builder::new()
             .name("vocal-calc-net".into())
@@ -145,10 +155,11 @@ impl NetworkManager {
                     runtime::run_network_runtime(
                         local_id,
                         display_name,
+                        local_pubkey,
                         net_state,
                         sessions,
                         outgoing_rx,
-                        incoming_tx,
+                        ui_event_tx,
                         command_rx,
                         shutdown,
                         shutdown_notify,
@@ -160,23 +171,13 @@ impl NetworkManager {
 
         // Block briefly to obtain the runtime handle.
         let runtime_handle = handle_rx
-            .blocking_recv()
+            .recv()
             .expect("Runtime thread panicked before sending handle");
 
         self.runtime_handle = Some(runtime_handle.clone());
         self._thread_handle = Some(thread_handle);
 
         handle::new_handle(outgoing_tx, runtime_handle)
-    }
-
-    /// Drain incoming messages from the runtime and forward each to `handler`.
-    ///
-    /// Called from the Slint timer on the main thread.
-    /// The handler receives (sender_id, message).
-    pub fn process_incoming(&mut self, mut handler: impl FnMut(NodeId, NetworkMessage)) {
-        while let Ok((sender_id, msg)) = self.incoming_rx.try_recv() {
-            handler(sender_id, msg);
-        }
     }
 
     /// Gracefully shut down the networking runtime.
@@ -191,7 +192,9 @@ impl NetworkManager {
     /// Sends a `ConnectToPeer` command through the command channel to the
     /// networking runtime, which will spawn the actual TCP connection task.
     pub fn connect_to_peer(&self, addr: SocketAddr, target_node_id: Option<NodeId>) {
-        let _ = self.command_tx.send(NetworkCommand::ConnectToPeer(addr, target_node_id));
+        let _ = self
+            .command_tx
+            .send(NetworkCommand::ConnectToPeer(addr, target_node_id));
     }
 
     /// Trigger a LAN peer discovery scan (broadcasts Discover + Announce).
@@ -208,13 +211,8 @@ impl NetworkManager {
     /// only after a restart (the runtime captures the name at startup).
     pub fn update_display_name(&mut self, name: String) {
         self.local_display_name = name.clone();
-        let sessions = self
-            .sessions
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let msg = protocol::NetworkMessage::PeerNameUpdate {
-            display_name: name,
-        };
+        let sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let msg = protocol::NetworkMessage::PeerNameUpdate { display_name: name };
         for sender in sessions.values() {
             let _ = sender.send(msg.clone());
         }

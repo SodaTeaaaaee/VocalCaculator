@@ -4,18 +4,22 @@
 //! steady-state session loop:
 //!
 //! 1. **Hello** — magic-prefixed, bincode-serialized [`NetworkMessage::Hello`]
-//!    containing `node_id`, `display_name`, `protocol_version`, and `app_id`.
+//!    containing `node_id`, `display_name`, `protocol_version`, `app_id`,
+//!    and `public_key` (Ed25519, 32 bytes; all-zeros for legacy peers).
 //! 2. **HMAC** — raw 32-byte HMAC-SHA256 tag computed over the Hello bytes,
 //!    sent as a separate length-delimited frame (no magic prefix).
-//! 3. **HelloAck** — the peer's Hello, same shape, sent by the server side.
+//! 3. **HelloAck** — the peer's HelloAck, same shape, sent by the server side,
+//!    also carrying the server's `public_key`.
 //!
 //! The *server* (accepted connection) receives Hello + HMAC, verifies, then
 //! sends HelloAck.  The *client* (outgoing connection) sends Hello + HMAC,
 //! then receives HelloAck.
+//!
+//! After HMAC verification, the caller can check `paired_devices` to
+//! determine whether the remote's public key is paired and trusted.
 
 use super::protocol::{
-    NetworkMessage, NodeId, PROTOCOL_VERSION, PROTOCOL_MAGIC,
-    APP_ID, APP_KEY, HmacSha256,
+    APP_ID, APP_KEY, HmacSha256, NetworkMessage, NodeId, PROTOCOL_MAGIC, PROTOCOL_VERSION,
 };
 use super::session::{FramedStream, recv_msg, send_msg};
 use futures::{SinkExt, StreamExt};
@@ -31,26 +35,36 @@ use hmac::Mac;
 /// 2. Check `app_id` matches [`APP_ID`].
 /// 3. Receive the 32-byte HMAC-SHA256 tag.
 /// 4. Verify the HMAC against the raw Hello bytes.
-/// 5. Send HelloAck (with `app_id`).
+/// 5. Send HelloAck (with `app_id` and local public key).
+///
+/// Returns `(remote_node_id, remote_display_name, remote_public_key, framed)`.
+/// The caller can then check `paired_devices` to determine pairing status.
 pub(super) async fn server_handshake(
     mut framed: FramedStream,
     local_id: NodeId,
     local_name: &str,
-) -> Result<(NodeId, String, FramedStream), Box<dyn std::error::Error>> {
+    local_pubkey: [u8; 32],
+) -> Result<(NodeId, String, [u8; 32], FramedStream), Box<dyn std::error::Error>> {
     // -- Receive Hello ----------------------------------------------------
     let (msg, hello_raw) = recv_msg_with_raw(&mut framed)
         .await?
         .ok_or("Connection closed before Hello")?;
 
-    let (remote_id, remote_name, remote_ver, remote_app_id) = match msg {
+    let (remote_id, remote_name, remote_ver, remote_app_id, remote_pubkey) = match msg {
         NetworkMessage::Hello {
             node_id,
             display_name,
             protocol_version,
             app_id,
-        } => (node_id, display_name, protocol_version, app_id),
+            public_key,
+        } => (node_id, display_name, protocol_version, app_id, public_key),
         other => return Err(format!("Expected Hello, got {:?}", other).into()),
     };
+
+    // -- Backward compat: detect legacy peers (no pubkey) -----------------
+    // If the remote sent all-zeros for public_key, treat as a legacy peer
+    // that does not support ed25519 pairing.
+    let remote_pubkey_supported = remote_pubkey != [0u8; 32];
 
     // -- App ID check -----------------------------------------------------
     if remote_app_id != APP_ID {
@@ -70,6 +84,7 @@ pub(super) async fn server_handshake(
                 display_name: local_name.to_string(),
                 protocol_version: 0,
                 app_id: APP_ID.to_string(),
+                public_key: local_pubkey,
             },
         )
         .await;
@@ -100,7 +115,7 @@ pub(super) async fn server_handshake(
         return Err("HMAC verification failed".into());
     }
 
-    // -- Send HelloAck ----------------------------------------------------
+    // -- Send HelloAck (with our public key) ------------------------------
     send_msg(
         &mut framed,
         &NetworkMessage::HelloAck {
@@ -108,11 +123,24 @@ pub(super) async fn server_handshake(
             display_name: local_name.to_string(),
             protocol_version: PROTOCOL_VERSION,
             app_id: APP_ID.to_string(),
+            public_key: local_pubkey,
         },
     )
     .await?;
 
-    Ok((remote_id, remote_name, framed))
+    if remote_pubkey_supported {
+        log::debug!(
+            "Handshake with {}: remote provided ed25519 public key",
+            remote_id,
+        );
+    } else {
+        log::debug!(
+            "Handshake with {}: legacy peer (no ed25519 public key)",
+            remote_id,
+        );
+    }
+
+    Ok((remote_id, remote_name, remote_pubkey, framed))
 }
 
 // ---------------------------------------------------------------------------
@@ -121,19 +149,24 @@ pub(super) async fn server_handshake(
 
 /// Client-side handshake: send Hello + HMAC, receive HelloAck.
 ///
-/// 1. Serialize Hello, compute HMAC-SHA256, send Hello (magic-prefixed)
-///    followed by the raw 32-byte HMAC tag.
+/// 1. Serialize Hello (with local public key), compute HMAC-SHA256,
+///    send Hello (magic-prefixed) followed by the raw 32-byte HMAC tag.
 /// 2. Receive HelloAck and verify `app_id`.
+///
+/// Returns `(remote_node_id, remote_display_name, remote_public_key, framed)`.
+/// The caller can then check `paired_devices` to determine pairing status.
 pub(super) async fn client_handshake(
     mut framed: FramedStream,
     local_id: NodeId,
     local_name: &str,
-) -> Result<(NodeId, String, FramedStream), Box<dyn std::error::Error>> {
+    local_pubkey: [u8; 32],
+) -> Result<(NodeId, String, [u8; 32], FramedStream), Box<dyn std::error::Error>> {
     let hello = NetworkMessage::Hello {
         node_id: local_id,
         display_name: local_name.to_string(),
         protocol_version: PROTOCOL_VERSION,
         app_id: APP_ID.to_string(),
+        public_key: local_pubkey,
     };
 
     // Compute HMAC over the raw bincode-serialized Hello.
@@ -152,13 +185,14 @@ pub(super) async fn client_handshake(
         .await?
         .ok_or("Connection closed before HelloAck")?;
 
-    let (remote_id, remote_name, remote_ver, remote_app_id) = match msg {
+    let (remote_id, remote_name, remote_ver, remote_app_id, remote_pubkey) = match msg {
         NetworkMessage::HelloAck {
             node_id,
             display_name,
             protocol_version,
             app_id,
-        } => (node_id, display_name, protocol_version, app_id),
+            public_key,
+        } => (node_id, display_name, protocol_version, app_id, public_key),
         other => return Err(format!("Expected HelloAck, got {:?}", other).into()),
     };
 
@@ -178,7 +212,7 @@ pub(super) async fn client_handshake(
         .into());
     }
 
-    Ok((remote_id, remote_name, framed))
+    Ok((remote_id, remote_name, remote_pubkey, framed))
 }
 
 // ---------------------------------------------------------------------------
@@ -192,17 +226,13 @@ async fn recv_msg_with_raw(
 ) -> Result<Option<(NetworkMessage, tokio_util::bytes::Bytes)>, Box<dyn std::error::Error>> {
     match reader.next().await {
         Some(Ok(bytes)) => {
-            if bytes.len() < PROTOCOL_MAGIC.len()
-                || bytes[..PROTOCOL_MAGIC.len()] != PROTOCOL_MAGIC
+            if bytes.len() < PROTOCOL_MAGIC.len() || bytes[..PROTOCOL_MAGIC.len()] != PROTOCOL_MAGIC
             {
                 return Err("Invalid protocol magic bytes".into());
             }
             let bytes = bytes.freeze();
             let raw = bytes.slice(PROTOCOL_MAGIC.len()..);
-            let (msg, _) = bincode::serde::decode_from_slice(
-                &raw,
-                bincode::config::standard(),
-            )?;
+            let (msg, _) = bincode::serde::decode_from_slice(&raw, bincode::config::standard())?;
             Ok(Some((msg, raw)))
         }
         Some(Err(e)) => Err(e.into()),

@@ -130,7 +130,8 @@ pub(crate) fn parse_wav_info(data: &[u8]) -> Option<WavInfo> {
     let mut pos = 12usize;
     while pos + 8 <= data.len() {
         let chunk_id = &data[pos..pos + 4];
-        let cs = u32::from_le_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]]) as usize;
+        let cs = u32::from_le_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]])
+            as usize;
         let cstart = pos + 8;
         if chunk_id == b"fmt " && cstart + 16 <= data.len() {
             info.audio_format = u16::from_le_bytes([data[cstart], data[cstart + 1]]);
@@ -152,7 +153,10 @@ pub(crate) fn parse_wav_info(data: &[u8]) -> Option<WavInfo> {
         }
     }
 
-    if info.data_offset == 0 || info.data_size == 0 || info.data_offset + info.data_size > data.len() {
+    if info.data_offset == 0
+        || info.data_size == 0
+        || info.data_offset + info.data_size > data.len()
+    {
         return None;
     }
     Some(info)
@@ -167,7 +171,8 @@ pub fn concat_wav_buffers(buffers: &[&[u8]]) -> Option<Vec<u8>> {
         return None;
     }
 
-    let infos: Vec<WavInfo> = buffers.iter()
+    let infos: Vec<WavInfo> = buffers
+        .iter()
         .map(|b| parse_wav_info(b))
         .collect::<Option<Vec<_>>>()?;
 
@@ -212,4 +217,3 @@ pub fn concat_wav_buffers(buffers: &[&[u8]]) -> Option<Vec<u8>> {
 
     Some(out)
 }
-

@@ -11,9 +11,7 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use vocal_calculator::net::discovery::DiscoveryService;
-use vocal_calculator::net::protocol::{
-    Capabilities, DiscoveryMessage, PROTOCOL_VERSION,
-};
+use vocal_calculator::net::protocol::{Capabilities, DiscoveryMessage, PROTOCOL_VERSION};
 
 /// Helper: build a unique AnnounceV2 message.
 fn make_announce(display_name: &str, tcp_port: u16, session_port: u16) -> DiscoveryMessage {
@@ -46,21 +44,27 @@ async fn recv_announce_from(
             return None;
         }
         match tokio::time::timeout(remaining, svc.recv_announce()).await {
-            Ok(Ok((DiscoveryMessage::Announce {
-                display_name,
-                tcp_port,
-                ..
-            }, _addr))) => {
+            Ok(Ok((
+                DiscoveryMessage::Announce {
+                    display_name,
+                    tcp_port,
+                    ..
+                },
+                _addr,
+            ))) => {
                 if display_name == expected_name {
                     return Some((display_name, tcp_port));
                 }
                 continue;
             }
-            Ok(Ok((DiscoveryMessage::AnnounceV2 {
-                display_name,
-                tcp_port,
-                ..
-            }, _addr))) => {
+            Ok(Ok((
+                DiscoveryMessage::AnnounceV2 {
+                    display_name,
+                    tcp_port,
+                    ..
+                },
+                _addr,
+            ))) => {
                 if display_name == expected_name {
                     return Some((display_name, tcp_port));
                 }
@@ -95,10 +99,7 @@ async fn discovery_announce_bidirectional() {
 
     // -- Direction 1: A announces, B should receive via UDP ----------------
     let msg_a = make_announce("NodeA", 42101, 50101);
-    svc_a
-        .announce(&msg_a)
-        .await
-        .expect("A failed to announce");
+    svc_a.announce(&msg_a).await.expect("A failed to announce");
 
     let result_b = recv_announce_from(&svc_b, "NodeA", Duration::from_secs(5)).await;
     assert!(
@@ -112,10 +113,7 @@ async fn discovery_announce_bidirectional() {
 
     // -- Direction 2: B announces, A should receive via UDP ----------------
     let msg_b = make_announce("NodeB", 42102, 50102);
-    svc_b
-        .announce(&msg_b)
-        .await
-        .expect("B failed to announce");
+    svc_b.announce(&msg_b).await.expect("B failed to announce");
 
     let result_a = recv_announce_from(&svc_a, "NodeB", Duration::from_secs(5)).await;
     assert!(
@@ -155,10 +153,7 @@ async fn discovery_tcp_exchange() {
     // A connects to B's TCP port.
     let connect_result = tokio::time::timeout(
         Duration::from_secs(5),
-        DiscoveryService::connect_and_exchange(
-            "127.0.0.1:42104".parse().unwrap(),
-            &local_msg_a,
-        ),
+        DiscoveryService::connect_and_exchange("127.0.0.1:42104".parse().unwrap(), &local_msg_a),
     )
     .await
     .expect("A connect timed out")

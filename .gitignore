@@ -48,9 +48,5 @@ Thumbs.db
 .agents/
 .claude/
 
-# Agent-generated CSS reference files (will be rewritten in migration Phase 2)
-ui/*.css
-ui/tokens/
-
 # Rust dependency snapshots are local-only unless we explicitly choose to vendor.
 /vendor/
