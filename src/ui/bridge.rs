@@ -500,6 +500,7 @@ fn dispatch_event(ctx: &mut CalcContext, event: UiEvent) -> bool {
                 "host_unreachable" => "设备不可达".to_string(),
                 "network_unreachable" => "网络不可达".to_string(),
                 "permission_denied" => "访问被拒绝".to_string(),
+                "remote_control_disabled" => "对方未开启远程控制".to_string(),
                 other => format!("连接失败: {}", other),
             };
             let mut needs_sync = false;
@@ -776,9 +777,7 @@ pub fn sync_network_state(mut ctx: CalcContext) {
         *ctx.net.remote_controlled.write() = is_remote_controlled;
 
         // --- Routing matrix UI sync ---
-        let matrix = router.get_routing_matrix();
-
-        let mut node_ids: Vec<NodeId> = matrix.keys().flat_map(|(c, e)| vec![*c, *e]).collect();
+        let mut node_ids = router.routing_node_ids();
         node_ids.sort_by(|a, b| {
             let a_name = state
                 .peers
@@ -798,7 +797,6 @@ pub fn sync_network_state(mut ctx: CalcContext) {
 
         let n = node_ids.len();
         let mut names = Vec::with_capacity(n);
-        let mut cells = Vec::with_capacity(n * n);
         let mut my_idx: i32 = -1;
 
         for (i, nid) in node_ids.iter().enumerate() {
@@ -814,10 +812,8 @@ pub fn sync_network_state(mut ctx: CalcContext) {
                 uuid_str[..8].to_string()
             };
             names.push(display_name);
-            for other in &node_ids {
-                cells.push(matrix.get(&(*nid, *other)).copied().unwrap_or(false));
-            }
         }
+        let cells = router.routing_cells_for_order(&node_ids);
 
         // Store sorted node IDs so handle_route_toggled uses the same
         // ordering as the last render (Bug 9 fix).
@@ -1097,6 +1093,10 @@ pub fn handle_route_toggled(mut ctx: CalcContext, row: i32, col: i32, value: boo
         if has_session {
             let ok = router.set_route(from_id, to_id, true);
             if ok {
+                router.clear_pending_control_request();
+                router.set_pending_control_request(to_id);
+                *ctx.net.status.write() = "等待授权...".to_string();
+                *ctx.net.executing_remotely.write() = false;
                 log::info!("Route set: {} -> {}", from_id, to_id);
             } else {
                 log::warn!("Route set failed: {} -> {}", from_id, to_id);

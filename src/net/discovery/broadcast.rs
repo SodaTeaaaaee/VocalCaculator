@@ -12,13 +12,13 @@ use crate::net::protocol::{
 ///
 /// Following the Localsend pattern:
 /// - **Send socket**: ephemeral port with `SO_BROADCAST`, sends
-///   announcements containing our TCP discovery port.
+///   announcements containing our current session endpoint.
 /// - **Receive socket**: fixed port 4243, listens for broadcast
 ///   announcements from peers.  `SO_REUSEADDR` is set so multiple
 ///   instances can share the port.
 ///
-/// The actual peer confirmation happens via TCP (handled by
-/// [`DiscoveryService`]), not via UDP.
+/// Identity confirmation and authorization happen later on the session TCP
+/// connection, not on a separate discovery TCP listener.
 pub struct BroadcastTransport {
     send_socket: UdpSocket,
     recv_socket: UdpSocket,

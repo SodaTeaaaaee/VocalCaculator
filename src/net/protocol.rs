@@ -90,6 +90,38 @@ pub enum NetworkMessage {
         to: NodeId,
         version: u64,
     },
+    /// Ask an executor to allow this controller to route actions to it.
+    RouteRequest {
+        request_id: u64,
+        controller: NodeId,
+        executor: NodeId,
+    },
+    /// Authorize a pending route request.
+    RouteGrant {
+        request_id: u64,
+        controller: NodeId,
+        executor: NodeId,
+    },
+    /// Deny a pending route request.
+    RouteDenied {
+        request_id: u64,
+        controller: NodeId,
+        executor: NodeId,
+        reason: String,
+    },
+    /// Release an authorized or pending route.
+    RouteRelease {
+        controller: NodeId,
+        executor: NodeId,
+    },
+    /// Challenge used by protocol v4 peers to prove key ownership.
+    AuthChallenge {
+        nonce: [u8; 32],
+    },
+    /// Proof-of-possession signature over an AuthChallenge nonce.
+    AuthProof {
+        signature: Vec<u8>,
+    },
     // Keepalive
     Ping,
     Pong,
@@ -158,16 +190,14 @@ pub enum DiscoveryMessage {
     },
 }
 
-/// Current protocol version for handshake negotiation (v3 = ed25519 key exchange).
-pub const PROTOCOL_VERSION: u16 = 3;
+/// Current protocol version for handshake negotiation (v4 = explicit route auth messages).
+pub const PROTOCOL_VERSION: u16 = 4;
 /// Minimum Hello protocol version that carries Ed25519 public keys.
 pub const HELLO_VERSION_WITH_KEYS: u16 = 3;
 /// IPv4 multicast address used for LAN peer discovery.
 pub const DISCOVERY_MULTICAST_ADDR: &str = "224.0.0.167";
 /// UDP port for multicast discovery messages.
 pub const DISCOVERY_PORT: u16 = 42420;
-/// Fixed TCP port for discovery handshake (TCP-based discovery, Localsend pattern).
-pub const DISCOVERY_TCP_PORT: u16 = 42000;
 /// mDNS service type for LAN discovery.
 pub const MDNS_SERVICE_TYPE: &str = "_vocalcalc._tcp.local.";
 /// Interval between heartbeat pings in seconds.

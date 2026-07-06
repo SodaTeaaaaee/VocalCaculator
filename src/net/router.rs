@@ -222,6 +222,31 @@ impl RoutingMatrix {
         self.entries.clone()
     }
 
+    /// Return every node currently represented in the matrix.
+    pub fn node_ids(&self) -> Vec<NodeId> {
+        let mut node_ids: Vec<NodeId> = self.entries.keys().flat_map(|(c, e)| [*c, *e]).collect();
+        node_ids.sort();
+        node_ids.dedup();
+        node_ids
+    }
+
+    /// Return a row-major boolean snapshot for a caller-provided node order.
+    pub fn cells_for_order(&self, node_ids: &[NodeId]) -> Vec<bool> {
+        let n = node_ids.len();
+        let mut cells = Vec::with_capacity(n * n);
+        for controller in node_ids {
+            for executor in node_ids {
+                cells.push(
+                    self.entries
+                        .get(&(*controller, *executor))
+                        .copied()
+                        .unwrap_or(false),
+                );
+            }
+        }
+        cells
+    }
+
     /// Return all entries with their row versions, suitable for building a
     /// [`NetworkMessage::RoutingSync`] message.
     pub fn sync_entries(&self) -> Vec<(NodeId, NodeId, bool, u64)> {
@@ -266,6 +291,8 @@ struct RouterInner {
     runtime_handle: Option<tokio::runtime::Handle>,
     /// Peer we sent a ControlRequest to, waiting for grant.
     pending_control_request: Option<NodeId>,
+    /// Request id for the current pending route request.
+    pending_route_request_id: Option<u64>,
     /// When true, local audio playback is suppressed in apply_result().
     /// Set by the UI (user toggle) or automatically when controlling a
     /// remote executor (routing mute).
@@ -316,6 +343,7 @@ impl Router {
             local_seq: 0,
             runtime_handle: None,
             pending_control_request: None,
+            pending_route_request_id: None,
             audio_muted: false,
             last_state_update_seq: 0,
             last_connection_error: None,
@@ -371,10 +399,30 @@ impl Router {
         inner.routing_matrix.add_peer(id);
     }
 
-    /// Set a pending control request target. The poll timer will attempt
-    /// to send the ControlRequest message when the session is ready.
+    /// Set a pending control request target and send RouteRequest if a
+    /// session already exists. If not, add_remote_session will send it later.
     pub fn set_pending_control_request(&self, node_id: NodeId) {
-        self.inner.borrow_mut().pending_control_request = Some(node_id);
+        let (my_id, request_id, has_session) = {
+            let mut inner = self.inner.borrow_mut();
+            let request_id = Self::timestamp_ms();
+            inner.pending_control_request = Some(node_id);
+            inner.pending_route_request_id = Some(request_id);
+            (
+                inner.local_node_id,
+                request_id,
+                inner.connected_peers.contains(&node_id),
+            )
+        };
+        if has_session {
+            self.send_message_to(
+                node_id,
+                &NetworkMessage::RouteRequest {
+                    request_id,
+                    controller: my_id,
+                    executor: node_id,
+                },
+            );
+        }
     }
 
     /// Return the peer we are waiting for a ControlGrant from, if any.
@@ -384,7 +432,9 @@ impl Router {
 
     /// Clear the pending control request (e.g. on disconnect or timeout).
     pub fn clear_pending_control_request(&self) {
-        self.inner.borrow_mut().pending_control_request = None;
+        let mut inner = self.inner.borrow_mut();
+        inner.pending_control_request = None;
+        inner.pending_route_request_id = None;
     }
 
     /// Return whether we are currently waiting for a ControlGrant.
@@ -434,9 +484,28 @@ impl Router {
     /// Register a remote node as connected and add its diagonal to the
     /// routing matrix (self-control for the new peer).
     pub fn add_remote_session(&self, node_id: NodeId) {
-        let mut inner = self.inner.borrow_mut();
-        inner.connected_peers.insert(node_id);
-        inner.routing_matrix.add_peer(node_id);
+        let pending_request = {
+            let mut inner = self.inner.borrow_mut();
+            inner.connected_peers.insert(node_id);
+            inner.routing_matrix.add_peer(node_id);
+            if inner.pending_control_request == Some(node_id) {
+                inner
+                    .pending_route_request_id
+                    .map(|request_id| (inner.local_node_id, request_id))
+            } else {
+                None
+            }
+        };
+        if let Some((my_id, request_id)) = pending_request {
+            self.send_message_to(
+                node_id,
+                &NetworkMessage::RouteRequest {
+                    request_id,
+                    controller: my_id,
+                    executor: node_id,
+                },
+            );
+        }
     }
 
     /// Remove a remote node from the connected set and purge all its
@@ -445,6 +514,10 @@ impl Router {
         let mut inner = self.inner.borrow_mut();
         inner.connected_peers.remove(node_id);
         inner.routing_matrix.remove_peer(node_id);
+        if inner.pending_control_request.as_ref() == Some(node_id) {
+            inner.pending_control_request = None;
+            inner.pending_route_request_id = None;
+        }
     }
 
     /// Clean up all routing state when a peer disconnects.
@@ -507,6 +580,10 @@ impl Router {
         // route entries locally).
         let mut inner = self.inner.borrow_mut();
         inner.routing_matrix.remove_peer(node_id);
+        if inner.pending_control_request.as_ref() == Some(node_id) {
+            inner.pending_control_request = None;
+            inner.pending_route_request_id = None;
+        }
     }
 
     /// Returns `true` if a session is registered for the given node.
@@ -713,6 +790,34 @@ impl Router {
             NetworkMessage::RouteRevoke { from, to, version } => {
                 self.handle_route_revoke(from, to, version);
             }
+            NetworkMessage::RouteRequest {
+                request_id,
+                controller,
+                executor,
+            } => {
+                self.handle_route_request(sender_id, request_id, controller, executor);
+            }
+            NetworkMessage::RouteGrant {
+                request_id,
+                controller,
+                executor,
+            } => {
+                self.handle_route_grant(sender_id, request_id, controller, executor);
+            }
+            NetworkMessage::RouteDenied {
+                request_id,
+                controller,
+                executor,
+                reason,
+            } => {
+                self.handle_route_denied(sender_id, request_id, controller, executor, reason);
+            }
+            NetworkMessage::RouteRelease {
+                controller,
+                executor,
+            } => {
+                self.handle_route_release(sender_id, controller, executor);
+            }
             NetworkMessage::RoutingDelta {
                 owner,
                 version,
@@ -740,18 +845,6 @@ impl Router {
                 let mut inner = self.inner.borrow_mut();
                 log::debug!("RoutingSync from {} ({} entries)", sender_id, entries.len());
                 inner.routing_matrix.apply_sync(&entries);
-                // If we were waiting for this peer to accept our connection,
-                // receiving its RoutingSync is proof that the session is live
-                // and the peer has processed our state.
-                if let Some(pending) = inner.pending_control_request
-                    && sender_id == pending
-                {
-                    inner.pending_control_request = None;
-                    log::info!(
-                        "Cleared pending control request: RoutingSync from target {}",
-                        pending,
-                    );
-                }
             }
             NetworkMessage::ConnectionFailed {
                 addr,
@@ -808,10 +901,204 @@ impl Router {
                     self.broadcast_routing_delta(my_id, version, &[(my_id, peer, false)]);
                 }
             }
+            NetworkMessage::AuthChallenge { .. } | NetworkMessage::AuthProof { .. } => {
+                log::trace!(
+                    "Route auth proof message received; session handshake already verified"
+                );
+            }
             other => {
                 log::debug!("Unhandled network message: {:?}", other);
             }
         }
+    }
+
+    // ---- Route authorization handlers ------------------------------------
+
+    fn handle_route_request(
+        &self,
+        sender_id: NodeId,
+        request_id: u64,
+        controller: NodeId,
+        executor: NodeId,
+    ) {
+        let my_id = self.inner.borrow().local_node_id;
+        if sender_id != controller || executor != my_id {
+            log::warn!(
+                "RouteRequest rejected: sender={} controller={} executor={} my_id={}",
+                sender_id,
+                controller,
+                executor,
+                my_id,
+            );
+            return;
+        }
+
+        if !self.inner.borrow().config.allow_remote_control {
+            self.send_message_to(
+                controller,
+                &NetworkMessage::RouteDenied {
+                    request_id,
+                    controller,
+                    executor,
+                    reason: "remote_control_disabled".to_string(),
+                },
+            );
+            return;
+        }
+
+        {
+            let mut inner = self.inner.borrow_mut();
+            let version = inner
+                .routing_matrix
+                .row_versions
+                .get(&controller)
+                .copied()
+                .unwrap_or(0)
+                + 1;
+            inner
+                .routing_matrix
+                .apply_delta(controller, version, &[(controller, executor, true)]);
+        }
+
+        self.send_message_to(
+            controller,
+            &NetworkMessage::RouteGrant {
+                request_id,
+                controller,
+                executor,
+            },
+        );
+        log::info!("RouteRequest granted: {} -> {}", controller, executor);
+    }
+
+    fn handle_route_grant(
+        &self,
+        sender_id: NodeId,
+        request_id: u64,
+        controller: NodeId,
+        executor: NodeId,
+    ) {
+        let grant = {
+            let mut inner = self.inner.borrow_mut();
+            let my_id = inner.local_node_id;
+            if controller != my_id || sender_id != executor {
+                log::warn!(
+                    "RouteGrant rejected: sender={} controller={} executor={} my_id={}",
+                    sender_id,
+                    controller,
+                    executor,
+                    my_id,
+                );
+                return;
+            }
+            let id_matches = inner
+                .pending_route_request_id
+                .map(|id| id == request_id)
+                .unwrap_or(true);
+            if inner.pending_control_request != Some(executor) || !id_matches {
+                log::debug!("Ignoring stale RouteGrant from {}", sender_id);
+                return;
+            }
+
+            inner.pending_control_request = None;
+            inner.pending_route_request_id = None;
+            inner.routing_matrix.set_route(my_id, executor, true);
+            let version = inner
+                .routing_matrix
+                .row_versions
+                .get(&my_id)
+                .copied()
+                .unwrap_or(0);
+            (my_id, version)
+        };
+
+        self.broadcast_routing_delta(grant.0, grant.1, &[(controller, executor, true)]);
+        log::info!("RouteGrant accepted: {} -> {}", controller, executor);
+    }
+
+    fn handle_route_denied(
+        &self,
+        sender_id: NodeId,
+        request_id: u64,
+        controller: NodeId,
+        executor: NodeId,
+        reason: String,
+    ) {
+        let revert = {
+            let mut inner = self.inner.borrow_mut();
+            let my_id = inner.local_node_id;
+            if controller != my_id || sender_id != executor {
+                log::warn!(
+                    "RouteDenied rejected: sender={} controller={} executor={} my_id={}",
+                    sender_id,
+                    controller,
+                    executor,
+                    my_id,
+                );
+                return;
+            }
+            let id_matches = inner
+                .pending_route_request_id
+                .map(|id| id == request_id)
+                .unwrap_or(true);
+            if inner.pending_control_request != Some(executor) || !id_matches {
+                log::debug!("Ignoring stale RouteDenied from {}", sender_id);
+                return;
+            }
+
+            inner.pending_control_request = None;
+            inner.pending_route_request_id = None;
+            inner.routing_matrix.set_route(my_id, executor, false);
+            inner.last_connection_error = Some(reason);
+            let version = inner
+                .routing_matrix
+                .row_versions
+                .get(&my_id)
+                .copied()
+                .unwrap_or(0);
+            (my_id, version)
+        };
+
+        self.broadcast_routing_delta(revert.0, revert.1, &[(controller, executor, false)]);
+        log::info!("RouteDenied applied: {} -/-> {}", controller, executor);
+    }
+
+    fn handle_route_release(&self, sender_id: NodeId, controller: NodeId, executor: NodeId) {
+        if sender_id != controller && sender_id != executor {
+            log::warn!(
+                "RouteRelease rejected: sender={} controller={} executor={}",
+                sender_id,
+                controller,
+                executor,
+            );
+            return;
+        }
+
+        let my_id = self.inner.borrow().local_node_id;
+        if controller == my_id {
+            self.set_route(controller, executor, false);
+            if self.pending_control_request() == Some(executor) {
+                self.clear_pending_control_request();
+            }
+            return;
+        }
+
+        let version = {
+            let mut inner = self.inner.borrow_mut();
+            let version = inner
+                .routing_matrix
+                .row_versions
+                .get(&controller)
+                .copied()
+                .unwrap_or(0)
+                + 1;
+            inner
+                .routing_matrix
+                .apply_delta(controller, version, &[(controller, executor, false)]);
+            version
+        };
+        self.broadcast_routing_delta(controller, version, &[(controller, executor, false)]);
+        log::info!("RouteRelease applied: {} -/-> {}", controller, executor);
     }
 
     // ---- Route revocation handler ----------------------------------------
@@ -972,7 +1259,14 @@ impl Router {
     /// Notify a peer that this node is disconnecting by revoking all
     /// routes involving both nodes.
     pub fn send_release_to(&self, node_id: NodeId) {
-        self.send_route_revoke(node_id);
+        let my_id = self.inner.borrow().local_node_id;
+        self.send_message_to(
+            node_id,
+            &NetworkMessage::RouteRelease {
+                controller: my_id,
+                executor: node_id,
+            },
+        );
     }
 
     // ---- Routing matrix public API ----------------------------------------
@@ -1088,6 +1382,17 @@ impl Router {
     /// Return a snapshot of the full routing matrix for UI display.
     pub fn get_routing_matrix(&self) -> HashMap<(NodeId, NodeId), bool> {
         self.inner.borrow().routing_matrix.get_matrix()
+    }
+
+    /// Return every node represented in the routing matrix without cloning
+    /// the full cell map.
+    pub fn routing_node_ids(&self) -> Vec<NodeId> {
+        self.inner.borrow().routing_matrix.node_ids()
+    }
+
+    /// Return a row-major snapshot for a caller-provided node order.
+    pub fn routing_cells_for_order(&self, node_ids: &[NodeId]) -> Vec<bool> {
+        self.inner.borrow().routing_matrix.cells_for_order(node_ids)
     }
 
     /// Take the last connection error, clearing it from the router.
@@ -2286,6 +2591,133 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
+    fn route_request_denied_when_remote_control_disabled() {
+        let (router, _calls, mut rx) = make_router_with_channel();
+        let controller = NodeId::new_v4();
+        let my_id = router.local_node_id();
+        router.add_remote_session(controller);
+
+        router.handle_network_message(
+            controller,
+            NetworkMessage::RouteRequest {
+                request_id: 42,
+                controller,
+                executor: my_id,
+            },
+        );
+
+        let (target, msg) = rx.try_recv().expect("expected RouteDenied");
+        assert_eq!(target, controller);
+        match msg {
+            NetworkMessage::RouteDenied {
+                request_id,
+                controller: c,
+                executor,
+                reason,
+            } => {
+                assert_eq!(request_id, 42);
+                assert_eq!(c, controller);
+                assert_eq!(executor, my_id);
+                assert_eq!(reason, "remote_control_disabled");
+            }
+            other => panic!("expected RouteDenied, got {:?}", other),
+        }
+        assert!(!router.my_controllers().contains(&controller));
+    }
+
+    #[test]
+    fn route_request_granted_when_remote_control_allowed() {
+        let (router, _calls, mut rx) = make_router_with_channel();
+        let controller = NodeId::new_v4();
+        let my_id = router.local_node_id();
+        router.set_allow_remote_control(true);
+        router.add_remote_session(controller);
+
+        router.handle_network_message(
+            controller,
+            NetworkMessage::RouteRequest {
+                request_id: 7,
+                controller,
+                executor: my_id,
+            },
+        );
+
+        let (target, msg) = rx.try_recv().expect("expected RouteGrant");
+        assert_eq!(target, controller);
+        assert!(matches!(
+            msg,
+            NetworkMessage::RouteGrant {
+                request_id: 7,
+                controller: c,
+                executor
+            } if c == controller && executor == my_id
+        ));
+        assert!(router.my_controllers().contains(&controller));
+    }
+
+    #[test]
+    fn route_grant_clears_pending_request() {
+        let (router, _calls, mut rx) = make_router_with_channel();
+        let peer = NodeId::new_v4();
+        let my_id = router.local_node_id();
+        router.add_remote_session(peer);
+        router.set_route(my_id, peer, true);
+        router.set_pending_control_request(peer);
+
+        let mut request_id = None;
+        while let Ok((_, msg)) = rx.try_recv() {
+            if let NetworkMessage::RouteRequest { request_id: id, .. } = msg {
+                request_id = Some(id);
+            }
+        }
+        let request_id = request_id.expect("RouteRequest should be sent");
+
+        router.handle_network_message(
+            peer,
+            NetworkMessage::RouteGrant {
+                request_id,
+                controller: my_id,
+                executor: peer,
+            },
+        );
+
+        assert!(!router.is_awaiting_grant());
+        assert!(router.my_control_targets().contains(&peer));
+    }
+
+    #[test]
+    fn route_denied_clears_pending_and_reverts_route() {
+        let (router, _calls, mut rx) = make_router_with_channel();
+        let peer = NodeId::new_v4();
+        let my_id = router.local_node_id();
+        router.add_remote_session(peer);
+        router.set_route(my_id, peer, true);
+        router.set_pending_control_request(peer);
+
+        let mut request_id = None;
+        while let Ok((_, msg)) = rx.try_recv() {
+            if let NetworkMessage::RouteRequest { request_id: id, .. } = msg {
+                request_id = Some(id);
+            }
+        }
+        let request_id = request_id.expect("RouteRequest should be sent");
+
+        router.handle_network_message(
+            peer,
+            NetworkMessage::RouteDenied {
+                request_id,
+                controller: my_id,
+                executor: peer,
+                reason: "blocked".to_string(),
+            },
+        );
+
+        assert!(!router.is_awaiting_grant());
+        assert!(!router.my_control_targets().contains(&peer));
+        assert_eq!(router.take_connection_error().as_deref(), Some("blocked"));
+    }
+
+    #[test]
     fn dispatch_falls_back_to_local_when_awaiting_grant() {
         let (router, calls, mut rx) = make_router_with_channel();
         let peer = NodeId::new_v4();
@@ -2294,8 +2726,9 @@ mod tests {
         let my_id = router.local_node_id();
         router.set_route(my_id, peer, true);
         router.set_pending_control_request(peer);
-        // Drain the RoutingDelta broadcast from set_route.
-        let _ = rx.try_recv();
+        // Drain setup messages (RoutingDelta + RouteRequest). The dispatch
+        // below must not send an Action while the grant is pending.
+        while rx.try_recv().is_ok() {}
 
         // Dispatch should execute locally (not send Action envelope) while pending.
         router.dispatch(CalcAction::Digit(5));

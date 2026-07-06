@@ -243,6 +243,30 @@ fn roundtrip_all_message_variants() {
             to: NodeId::new_v4(),
             version: 1,
         },
+        NetworkMessage::RouteRequest {
+            request_id: 1,
+            controller: NodeId::new_v4(),
+            executor: NodeId::new_v4(),
+        },
+        NetworkMessage::RouteGrant {
+            request_id: 1,
+            controller: NodeId::new_v4(),
+            executor: NodeId::new_v4(),
+        },
+        NetworkMessage::RouteDenied {
+            request_id: 1,
+            controller: NodeId::new_v4(),
+            executor: NodeId::new_v4(),
+            reason: "denied".into(),
+        },
+        NetworkMessage::RouteRelease {
+            controller: NodeId::new_v4(),
+            executor: NodeId::new_v4(),
+        },
+        NetworkMessage::AuthChallenge { nonce: [7u8; 32] },
+        NetworkMessage::AuthProof {
+            signature: vec![1, 2, 3],
+        },
         NetworkMessage::RoutingDelta {
             owner: NodeId::new_v4(),
             version: 1,

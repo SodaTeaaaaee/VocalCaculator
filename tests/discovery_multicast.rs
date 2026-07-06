@@ -3,7 +3,7 @@
 //! Creates two `DiscoveryService` instances on different TCP ports and
 //! verifies that:
 //! 1. UDP announcements are received by both sides.
-//! 2. TCP peer exchange works (connect_and_exchange).
+//! 2. Announcements resolve directly to the advertised session endpoint.
 //!
 //! Run with:  cargo test --test discovery_multicast -- --nocapture --test-threads=1
 
@@ -36,7 +36,7 @@ async fn recv_announce_from(
     svc: &DiscoveryService,
     expected_name: &str,
     timeout: Duration,
-) -> Option<(String, u16)> {
+) -> Option<(String, u16, u16)> {
     let deadline = Instant::now() + timeout;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -53,7 +53,7 @@ async fn recv_announce_from(
                 _addr,
             ))) => {
                 if display_name == expected_name {
-                    return Some((display_name, tcp_port));
+                    return Some((display_name, tcp_port, tcp_port));
                 }
                 continue;
             }
@@ -61,12 +61,13 @@ async fn recv_announce_from(
                 DiscoveryMessage::AnnounceV2 {
                     display_name,
                     tcp_port,
+                    session_port,
                     ..
                 },
                 _addr,
             ))) => {
                 if display_name == expected_name {
-                    return Some((display_name, tcp_port));
+                    return Some((display_name, tcp_port, session_port));
                 }
                 continue;
             }
@@ -90,10 +91,10 @@ async fn discovery_announce_bidirectional() {
     let id_a = Uuid::new_v4();
     let id_b = Uuid::new_v4();
 
-    let svc_a = DiscoveryService::new_with_port(id_a, "NodeA".into(), 42101, 50101)
+    let svc_a = DiscoveryService::new_with_port(id_a, "NodeA".into(), 42101, 50101, [0u8; 32])
         .await
         .expect("Failed to create DiscoveryService A");
-    let svc_b = DiscoveryService::new_with_port(id_b, "NodeB".into(), 42102, 50102)
+    let svc_b = DiscoveryService::new_with_port(id_b, "NodeB".into(), 42102, 50102, [1u8; 32])
         .await
         .expect("Failed to create DiscoveryService B");
 
@@ -106,9 +107,10 @@ async fn discovery_announce_bidirectional() {
         result_b.is_some(),
         "B did not receive A's Announce within 5 seconds — UDP may be broken"
     );
-    let (name, port) = result_b.unwrap();
+    let (name, port, session_port) = result_b.unwrap();
     assert_eq!(name, "NodeA");
     assert_eq!(port, 42101);
+    assert_eq!(session_port, 50101);
     println!("[OK] A -> B: B received Announce from NodeA:42101");
 
     // -- Direction 2: B announces, A should receive via UDP ----------------
@@ -120,65 +122,34 @@ async fn discovery_announce_bidirectional() {
         result_a.is_some(),
         "A did not receive B's Announce within 5 seconds — UDP may be broken"
     );
-    let (name, port) = result_a.unwrap();
+    let (name, port, session_port) = result_a.unwrap();
     assert_eq!(name, "NodeB");
     assert_eq!(port, 42102);
+    assert_eq!(session_port, 50102);
     println!("[OK] B -> A: A received Announce from NodeB:42102");
 }
 
-/// Test: TCP peer exchange — A connects to B's TCP port, both sides
-/// exchange DiscoveryMessage, and A learns B's identity.
+/// Test: discovery resolves directly to the current session port.
 #[tokio::test]
-async fn discovery_tcp_exchange() {
+async fn discovery_endpoint_uses_session_port() {
     let id_a = Uuid::new_v4();
     let id_b = Uuid::new_v4();
 
-    let svc_a = DiscoveryService::new_with_port(id_a, "NodeA".into(), 42103, 50103)
+    let svc_a = DiscoveryService::new_with_port(id_a, "NodeA".into(), 50103, 50103, [0u8; 32])
         .await
         .expect("Failed to create DiscoveryService A");
-    let svc_b = DiscoveryService::new_with_port(id_b, "NodeB".into(), 42104, 50104)
+    let svc_b = DiscoveryService::new_with_port(id_b, "NodeB".into(), 50104, 50104, [1u8; 32])
         .await
         .expect("Failed to create DiscoveryService B");
 
-    let local_msg_a = svc_a.announce_msg().clone();
+    let endpoint = svc_a
+        .endpoint_from_announcement(svc_b.announce_msg(), "127.0.0.1:9".parse().unwrap())
+        .expect("B announcement should resolve to an endpoint");
 
-    // Spawn B's accept task.
-    let accept_handle = tokio::spawn(async move {
-        tokio::time::timeout(Duration::from_secs(5), svc_b.accept_peer())
-            .await
-            .expect("B accept timed out")
-            .expect("B accept failed")
-    });
-
-    // A connects to B's TCP port.
-    let connect_result = tokio::time::timeout(
-        Duration::from_secs(5),
-        DiscoveryService::connect_and_exchange("127.0.0.1:42104".parse().unwrap(), &local_msg_a),
-    )
-    .await
-    .expect("A connect timed out")
-    .expect("A connect failed");
-
-    // Verify A learned B's identity.
-    assert_eq!(connect_result.node_id, id_b);
-    assert_eq!(connect_result.display_name, "NodeB");
-    assert_eq!(connect_result.tcp_port, 42104);
-    assert_eq!(connect_result.session_port, 50104);
-    println!(
-        "[OK] A connected to B: learned {} ({})",
-        connect_result.display_name, connect_result.node_id,
-    );
-
-    // Verify B learned A's identity.
-    let b_exchange = accept_handle.await.expect("B accept task panicked");
-    assert_eq!(b_exchange.node_id, id_a);
-    assert_eq!(b_exchange.display_name, "NodeA");
-    assert_eq!(b_exchange.tcp_port, 42103);
-    assert_eq!(b_exchange.session_port, 50103);
-    println!(
-        "[OK] B accepted from A: learned {} ({})",
-        b_exchange.display_name, b_exchange.node_id,
-    );
+    assert_eq!(endpoint.node_id, id_b);
+    assert_eq!(endpoint.display_name, "NodeB");
+    assert_eq!(endpoint.address.port(), 50104);
+    assert_eq!(endpoint.session_port, 50104);
 }
 
 /// Test: Discover message round-trips via UDP.
@@ -187,10 +158,10 @@ async fn discovery_discover_roundtrip() {
     let id_a = Uuid::new_v4();
     let id_b = Uuid::new_v4();
 
-    let svc_a = DiscoveryService::new_with_port(id_a, "NodeA".into(), 42105, 50105)
+    let svc_a = DiscoveryService::new_with_port(id_a, "NodeA".into(), 42105, 50105, [0u8; 32])
         .await
         .expect("Failed to create DiscoveryService A");
-    let svc_b = DiscoveryService::new_with_port(id_b, "NodeB".into(), 42106, 50106)
+    let svc_b = DiscoveryService::new_with_port(id_b, "NodeB".into(), 42106, 50106, [1u8; 32])
         .await
         .expect("Failed to create DiscoveryService B");
 

@@ -12,13 +12,13 @@ use crate::net::protocol::{
 ///
 /// Following the Localsend pattern:
 /// - **Send socket**: ephemeral port, sends announcements containing our
-///   TCP discovery port.
-/// - **Receive socket**: fixed port 4242, joins the multicast group,
+///   current session endpoint.
+/// - **Receive socket**: shared UDP discovery port, joins the multicast group,
 ///   listens for announcements from peers.  `SO_REUSEADDR` is set so
 ///   multiple instances can share the port.
 ///
-/// The actual peer confirmation happens via TCP (handled by
-/// [`DiscoveryService`]), not via UDP.
+/// Identity confirmation and authorization happen later on the session TCP
+/// connection, not on a separate discovery TCP listener.
 pub struct MulticastTransport {
     send_socket: UdpSocket,
     recv_socket: Arc<UdpSocket>,
@@ -64,7 +64,7 @@ impl MulticastTransport {
             send_socket.local_addr().map(|a| a.port()).unwrap_or(0),
         );
 
-        // -- Receive socket (fixed multicast port, joins group) -------------
+        // -- Receive socket (shared multicast port, joins group) -------------
         let recv_sock = socket2::Socket::new(
             socket2::Domain::IPV4,
             socket2::Type::DGRAM,

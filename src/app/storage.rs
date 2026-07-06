@@ -11,7 +11,7 @@ use crate::app::identity::DeviceIdentity;
 // Schema constants
 // ---------------------------------------------------------------------------
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 
 /// Metadata table: string keys to byte values.  Used for schema versioning
 /// and other small configuration values.
@@ -25,6 +25,23 @@ const PAIRED_DEVICES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("pair
 // Data types
 // ---------------------------------------------------------------------------
 
+/// User-level trust policy for a paired device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeviceTrust {
+    /// Route requests from this device may be granted automatically.
+    Trusted,
+    /// Route requests from this device should ask the user each time.
+    AskEachTime,
+    /// Route requests from this device are denied.
+    Blocked,
+}
+
+impl Default for DeviceTrust {
+    fn default() -> Self {
+        Self::AskEachTime
+    }
+}
+
 /// Information about a remote device that has been paired with this instance.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PairedDevice {
@@ -36,7 +53,7 @@ pub struct PairedDevice {
     pub address: String,
     /// Ed25519 public key of the remote device (32 bytes).
     pub public_key: [u8; 32],
-    /// Whether the user has explicitly trusted this device.
+    /// Legacy mirror of [`trust_state`](Self::trust_state) for old callers.
     pub is_trusted: bool,
     /// Epoch millis when the device was first seen.
     pub first_seen: u64,
@@ -44,6 +61,58 @@ pub struct PairedDevice {
     pub last_seen: u64,
     /// Epoch millis when the pairing was confirmed (user accepted).
     pub paired_at: u64,
+    /// Explicit trust policy used by route authorization.
+    pub trust_state: DeviceTrust,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PairedDeviceV1 {
+    node_id: Uuid,
+    display_name: String,
+    address: String,
+    public_key: [u8; 32],
+    is_trusted: bool,
+    first_seen: u64,
+    last_seen: u64,
+    paired_at: u64,
+}
+
+impl From<PairedDeviceV1> for PairedDevice {
+    fn from(value: PairedDeviceV1) -> Self {
+        Self {
+            node_id: value.node_id,
+            display_name: value.display_name,
+            address: value.address,
+            public_key: value.public_key,
+            is_trusted: value.is_trusted,
+            first_seen: value.first_seen,
+            last_seen: value.last_seen,
+            paired_at: value.paired_at,
+            trust_state: if value.is_trusted {
+                DeviceTrust::Trusted
+            } else {
+                DeviceTrust::AskEachTime
+            },
+        }
+    }
+}
+
+fn decode_paired_device(bytes: &[u8]) -> Result<PairedDevice, anyhow::Error> {
+    match bincode::serde::decode_from_slice::<PairedDevice, _>(bytes, bincode::config::standard()) {
+        Ok((device, consumed)) if consumed == bytes.len() => Ok(device),
+        Ok((_device, _consumed)) => {
+            let (old, _): (PairedDeviceV1, _) =
+                bincode::serde::decode_from_slice(bytes, bincode::config::standard())?;
+            Ok(old.into())
+        }
+        Err(new_err) => match bincode::serde::decode_from_slice::<PairedDeviceV1, _>(
+            bytes,
+            bincode::config::standard(),
+        ) {
+            Ok((old, _)) => Ok(old.into()),
+            Err(_) => Err(new_err.into()),
+        },
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -136,8 +205,7 @@ impl Storage {
         let mut devices = Vec::new();
         for result in table.iter()? {
             let (_key, value) = result?;
-            let (device, _): (PairedDevice, _) =
-                bincode::serde::decode_from_slice(value.value(), bincode::config::standard())?;
+            let device = decode_paired_device(value.value())?;
             devices.push(device);
         }
         Ok(devices)
@@ -180,8 +248,7 @@ impl Storage {
                 guard.map(|g| g.value().to_vec())
             };
             if let Some(device_bytes) = existing {
-                let (mut device, _): (PairedDevice, _) =
-                    bincode::serde::decode_from_slice(&device_bytes, bincode::config::standard())?;
+                let mut device = decode_paired_device(&device_bytes)?;
                 device.last_seen = timestamp_ms;
                 let value = bincode::serde::encode_to_vec(&device, bincode::config::standard())?;
                 table.insert(key.as_slice(), value.as_slice())?;
@@ -204,9 +271,39 @@ impl Storage {
                 guard.map(|g| g.value().to_vec())
             };
             if let Some(device_bytes) = existing {
-                let (mut device, _): (PairedDevice, _) =
-                    bincode::serde::decode_from_slice(&device_bytes, bincode::config::standard())?;
+                let mut device = decode_paired_device(&device_bytes)?;
                 device.is_trusted = trusted;
+                device.trust_state = if trusted {
+                    DeviceTrust::Trusted
+                } else {
+                    DeviceTrust::AskEachTime
+                };
+                let value = bincode::serde::encode_to_vec(&device, bincode::config::standard())?;
+                table.insert(key.as_slice(), value.as_slice())?;
+            }
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    /// Set the explicit trust policy on a paired device.
+    pub fn set_trust_state(
+        &self,
+        node_id: &Uuid,
+        trust_state: DeviceTrust,
+    ) -> Result<(), anyhow::Error> {
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(PAIRED_DEVICES)?;
+            let key: [u8; 16] = node_id.into_bytes();
+            let existing = {
+                let guard = table.get(key.as_slice())?;
+                guard.map(|g| g.value().to_vec())
+            };
+            if let Some(device_bytes) = existing {
+                let mut device = decode_paired_device(&device_bytes)?;
+                device.trust_state = trust_state;
+                device.is_trusted = matches!(trust_state, DeviceTrust::Trusted);
                 let value = bincode::serde::encode_to_vec(&device, bincode::config::standard())?;
                 table.insert(key.as_slice(), value.as_slice())?;
             }
@@ -274,9 +371,48 @@ impl Storage {
             write_txn.commit()?;
         }
 
-        // Future migrations go here:
-        // if from_version < 2 { ... }
+        if from_version < 2 {
+            log::info!("Migrating storage schema v1 -> v2");
+            self.migrate_paired_devices_to_trust_state()?;
+        }
 
+        Ok(())
+    }
+
+    fn migrate_paired_devices_to_trust_state(&self) -> Result<(), anyhow::Error> {
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(PAIRED_DEVICES)?;
+            let updates: Vec<(Vec<u8>, Vec<u8>)> = {
+                let mut updates = Vec::new();
+                for result in table.iter()? {
+                    let (key, value) = result?;
+                    let bytes = value.value();
+                    let already_v2 = bincode::serde::decode_from_slice::<PairedDevice, _>(
+                        bytes,
+                        bincode::config::standard(),
+                    )
+                    .map(|(_, consumed)| consumed == bytes.len())
+                    .unwrap_or(false);
+                    if already_v2 {
+                        continue;
+                    }
+
+                    let (old, _): (PairedDeviceV1, _) =
+                        bincode::serde::decode_from_slice(bytes, bincode::config::standard())?;
+                    let upgraded: PairedDevice = old.into();
+                    let encoded =
+                        bincode::serde::encode_to_vec(&upgraded, bincode::config::standard())?;
+                    updates.push((key.value().to_vec(), encoded));
+                }
+                updates
+            };
+
+            for (key, value) in updates {
+                table.insert(key.as_slice(), value.as_slice())?;
+            }
+        }
+        write_txn.commit()?;
         Ok(())
     }
 }

@@ -34,6 +34,7 @@ socket2 = "0.6"
 hmac = "0.12"
 sha2 = "0.10"
 hostname = "0.4"
+mdns-sd = "0.20.1"
 ed25519-dalek = { version = "2", features = ["serde"] }
 getrandom = "0.2"
 redb = "2"
