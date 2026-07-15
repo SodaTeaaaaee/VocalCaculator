@@ -16,7 +16,14 @@ use crate::components::panel_controls::PanelSection;
 pub struct PeerDisplayInfo {
     pub name: String,
     pub address: String,
+    /// Active TCP session with this peer.
     pub is_connected: bool,
+    /// Routing is active from this device to the peer.
+    pub route_active: bool,
+    /// The peer is waiting for local approval to control this device.
+    pub approval_pending: bool,
+    /// Pairing/trust policy shown to the user.
+    pub trust_label: String,
     /// Round-trip latency in milliseconds, or -1 if unknown.
     pub latency_ms: i32,
     /// Ordinal index of this peer in the list (assigned by the poll timer).
@@ -75,6 +82,8 @@ pub struct NetworkPanelProps {
     pub onconnect: EventHandler<String>,
     /// Disconnect from the peer identified by its stringified NodeId.
     pub ondisconnect: EventHandler<String>,
+    pub onapprove_route: EventHandler<String>,
+    pub ondeny_route: EventHandler<String>,
     pub onscan: EventHandler<MouseEvent>,
     pub ontoggle_remote_control: EventHandler<MouseEvent>,
     pub ontoggle_mute: EventHandler<MouseEvent>,
@@ -111,6 +120,8 @@ pub fn NetworkPanel(props: NetworkPanelProps) -> Element {
                 matrix_cells: props.matrix_cells.clone(),
                 onconnect: props.onconnect,
                 ondisconnect: props.ondisconnect,
+                onapprove_route: props.onapprove_route,
+                ondeny_route: props.ondeny_route,
                 onscan: props.onscan,
                 ontoggle_remote_control: props.ontoggle_remote_control,
                 ontoggle_mute: props.ontoggle_mute,
@@ -162,6 +173,8 @@ pub struct NetworkPanelContentProps {
     pub onconnect: EventHandler<String>,
     /// Disconnect from the peer identified by its stringified NodeId.
     pub ondisconnect: EventHandler<String>,
+    pub onapprove_route: EventHandler<String>,
+    pub ondeny_route: EventHandler<String>,
     pub onscan: EventHandler<MouseEvent>,
     pub ontoggle_remote_control: EventHandler<MouseEvent>,
     pub ontoggle_mute: EventHandler<MouseEvent>,
@@ -217,7 +230,7 @@ pub fn NetworkPanelContent(props: NetworkPanelContentProps) -> Element {
             // ---- Allow remote control toggle ----
             ToggleSwitch {
                 on: props.allow_remote_control,
-                label: "允许远程控制".to_string(),
+                label: "允许远控请求".to_string(),
                 icon: Some(IconName::Lock),
                 on_toggle: move |evt| props.ontoggle_remote_control.call(evt),
             }
@@ -248,8 +261,14 @@ pub fn NetworkPanelContent(props: NetworkPanelContentProps) -> Element {
                         for peer in props.peers.iter() {
                             {
                                 let is_connected = peer.is_connected;
-                                let row_class = if is_connected {
+                                let route_active = peer.route_active;
+                                let approval_pending = peer.approval_pending;
+                                let row_class = if route_active {
+                                    "peer-row peer-row--connected peer-row--route-active"
+                                } else if is_connected {
                                     "peer-row peer-row--connected"
+                                } else if approval_pending {
+                                    "peer-row peer-row--pending"
                                 } else {
                                     "peer-row"
                                 };
@@ -260,6 +279,15 @@ pub fn NetworkPanelContent(props: NetworkPanelContentProps) -> Element {
                                 };
                                 let node_id = peer.node_id_string.clone();
                                 let node_id_for_disconnect = node_id.clone();
+                                let node_id_for_approve = node_id.clone();
+                                let node_id_for_deny = node_id.clone();
+                                let session_label = if route_active {
+                                    "远程执行"
+                                } else if is_connected {
+                                    "已连接"
+                                } else {
+                                    "未连接"
+                                };
 
                                 rsx! {
                                     div {
@@ -269,8 +297,10 @@ pub fn NetworkPanelContent(props: NetworkPanelContentProps) -> Element {
                                             class: "peer-row__info",
 
                                             span {
-                                                class: if is_connected { "peer-row__status-icon peer-row__status-icon--connected" } else { "peer-row__status-icon" },
-                                                if is_connected {
+                                                class: if route_active { "peer-row__status-icon peer-row__status-icon--route" } else if is_connected { "peer-row__status-icon peer-row__status-icon--connected" } else { "peer-row__status-icon" },
+                                                if route_active {
+                                                    Icon { name: IconName::Bolt }
+                                                } else if is_connected {
                                                     Icon { name: IconName::Check }
                                                 }
                                             }
@@ -286,15 +316,33 @@ pub fn NetworkPanelContent(props: NetworkPanelContentProps) -> Element {
                                             }
 
                                             span {
+                                                class: "peer-row__trust",
+                                                "{peer.trust_label}"
+                                            }
+
+                                            span {
                                                 class: "peer-row__latency",
-                                                "{latency_display}"
+                                                "{session_label} · {latency_display}"
                                             }
                                         }
 
                                         div {
                                             class: "peer-row__actions",
 
-                                            if is_connected {
+                                            if approval_pending {
+                                                button {
+                                                    class: "network-action-btn network-action-btn--approve",
+                                                    r#type: "button",
+                                                    onclick: move |_| props.onapprove_route.call(node_id_for_approve.clone()),
+                                                    "授权"
+                                                }
+                                                button {
+                                                    class: "network-action-btn",
+                                                    r#type: "button",
+                                                    onclick: move |_| props.ondeny_route.call(node_id_for_deny.clone()),
+                                                    "拒绝"
+                                                }
+                                            } else if route_active {
                                                 button {
                                                     class: "network-action-btn",
                                                     r#type: "button",
@@ -306,7 +354,11 @@ pub fn NetworkPanelContent(props: NetworkPanelContentProps) -> Element {
                                                     class: "network-action-btn",
                                                     r#type: "button",
                                                     onclick: move |_| props.onconnect.call(node_id.clone()),
-                                                    "连接"
+                                                    if is_connected {
+                                                        "远程执行"
+                                                    } else {
+                                                        "连接"
+                                                    }
                                                 }
                                             }
                                         }

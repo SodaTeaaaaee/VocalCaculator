@@ -15,10 +15,12 @@ mod tests;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
+use crate::app::network_mode::NetworkMode;
 use crate::app::storage::Storage;
 use crate::ui::events::UiEvent;
+use ed25519_dalek::SigningKey;
 use protocol::{NetworkCommand, NetworkMessage, NodeId};
 use session::SessionSender;
 use tokio::sync::{Notify, mpsc};
@@ -40,9 +42,11 @@ pub struct NetworkManager {
     /// This node's unique identifier.
     local_node_id: NodeId,
     /// Display name for handshake and discovery.
-    local_display_name: String,
+    local_display_name: Arc<RwLock<String>>,
     /// Ed25519 public key advertised during handshake (32 bytes).
     local_pubkey: [u8; 32],
+    /// Ed25519 signing key used for protocol v4 possession proofs.
+    local_signing_key: SigningKey,
 
     /// Outgoing message channel: Router sends `(target_node_id, msg)` here.
     outgoing_tx: mpsc::UnboundedSender<(NodeId, NetworkMessage)>,
@@ -77,8 +81,10 @@ impl NetworkManager {
     /// restarts.
     pub fn new(storage: Arc<Storage>, ui_event_tx: mpsc::UnboundedSender<UiEvent>) -> Self {
         let local_node_id = storage.identity().node_id();
-        let local_display_name = storage.config().network.display_name.clone();
+        let local_display_name =
+            Arc::new(RwLock::new(storage.config().network.display_name.clone()));
         let local_pubkey = storage.identity().public_key_bytes();
+        let local_signing_key = storage.identity().signing_key();
 
         let (outgoing_tx, _) = mpsc::unbounded_channel();
         let (command_tx, _) = mpsc::unbounded_channel();
@@ -88,6 +94,7 @@ impl NetworkManager {
             local_node_id,
             local_display_name,
             local_pubkey,
+            local_signing_key,
             outgoing_tx,
             ui_event_tx,
             command_tx,
@@ -111,11 +118,18 @@ impl NetworkManager {
 
     /// Start the networking runtime on a dedicated OS thread.
     ///
+    /// `mode` controls socket behavior inside the runtime: `Lan` binds the
+    /// fixed session port and starts discovery; `LoopbackTest` binds an
+    /// ephemeral loopback-only port and skips discovery entirely; `Offline`
+    /// is rejected defense-in-depth (callers should not reach this method
+    /// at all in that mode -- see `ui::bridge::init_networking`).
+    ///
     /// Returns a [`NetworkHandle`] that the Router can use to send messages.
-    pub fn start(&mut self) -> NetworkHandle {
+    pub fn start(&mut self, mode: NetworkMode) -> NetworkHandle {
         let local_id = self.local_node_id;
         let display_name = self.local_display_name.clone();
         let local_pubkey = self.local_pubkey;
+        let local_signing_key = self.local_signing_key.clone();
         let net_state = self.state.clone();
         let shutdown = self.shutdown_flag.clone();
         let shutdown_notify = self.shutdown_notify.clone();
@@ -156,6 +170,7 @@ impl NetworkManager {
                         local_id,
                         display_name,
                         local_pubkey,
+                        local_signing_key,
                         net_state,
                         sessions,
                         outgoing_rx,
@@ -163,6 +178,7 @@ impl NetworkManager {
                         command_rx,
                         shutdown,
                         shutdown_notify,
+                        mode,
                     )
                     .await;
                 });
@@ -202,20 +218,22 @@ impl NetworkManager {
         let _ = self.command_tx.send(NetworkCommand::Scan);
     }
 
-    /// Update the local display name and broadcast the change to all
-    /// connected peers immediately.
-    ///
-    /// The new name is persisted in config by the caller before this
-    /// method is invoked.  Connected peers will see the change on the
-    /// next poll-timer tick; new connections will use the updated name
-    /// only after a restart (the runtime captures the name at startup).
+    /// Update the local display name, broadcast it to connected peers, and
+    /// trigger a discovery announce so future handshakes use the same name.
     pub fn update_display_name(&mut self, name: String) {
-        self.local_display_name = name.clone();
+        {
+            let mut display_name = self
+                .local_display_name
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            *display_name = name.clone();
+        }
         let sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         let msg = protocol::NetworkMessage::PeerNameUpdate { display_name: name };
         for sender in sessions.values() {
             let _ = sender.send(msg.clone());
         }
+        let _ = self.command_tx.send(NetworkCommand::Scan);
     }
 
     /// Return the set of node IDs that have active TCP sessions.

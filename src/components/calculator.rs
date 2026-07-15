@@ -11,6 +11,7 @@ use super::brand_label::BrandLabel;
 use super::button_grid::ButtonGrid;
 use super::display::LcdDisplay;
 use super::history_text::HistoryText;
+#[cfg(not(target_os = "android"))]
 use super::icon::{Icon, IconName};
 use super::keyboard::KeyboardHandler;
 use super::network_panel::{NetworkPanel, NetworkPanelContent, PeerDisplayInfo};
@@ -215,6 +216,8 @@ pub struct CalculatorUIProps {
     pub on_close_network_settings: EventHandler<()>,
     pub on_connect_to_peer: EventHandler<String>,
     pub on_disconnect_peer: EventHandler<String>,
+    pub on_approve_route_request: EventHandler<String>,
+    pub on_deny_route_request: EventHandler<String>,
     pub on_scan_peers: EventHandler<()>,
     pub on_toggle_remote_control: EventHandler<()>,
     pub on_route_toggled: EventHandler<(i32, i32, bool)>,
@@ -396,6 +399,8 @@ pub fn CalculatorUI(props: CalculatorUIProps) -> Element {
                 on_save_display_name: props.on_save_display_name,
                 on_connect_to_peer: props.on_connect_to_peer,
                 on_disconnect_peer: props.on_disconnect_peer,
+                on_approve_route_request: props.on_approve_route_request,
+                on_deny_route_request: props.on_deny_route_request,
                 on_scan_peers: props.on_scan_peers,
                 on_toggle_remote_control: props.on_toggle_remote_control,
                 on_route_toggled: props.on_route_toggled,
@@ -419,6 +424,8 @@ pub fn CalculatorUI(props: CalculatorUIProps) -> Element {
                     onclose: move |_| props.on_close_network_settings.call(()),
                     onconnect: move |id| props.on_connect_to_peer.call(id),
                     ondisconnect: move |id| props.on_disconnect_peer.call(id),
+                    onapprove_route: move |id| props.on_approve_route_request.call(id),
+                    ondeny_route: move |id| props.on_deny_route_request.call(id),
                     onscan: move |_| props.on_scan_peers.call(()),
                     ontoggle_remote_control: move |_| props.on_toggle_remote_control.call(()),
                     ontoggle_mute: move |_| props.on_toggle_mute.call(()),
@@ -476,6 +483,7 @@ pub fn CalculatorUI(props: CalculatorUIProps) -> Element {
 }
 
 #[component]
+#[cfg(not(target_os = "android"))]
 fn AppChrome() -> Element {
     let window = dioxus::desktop::use_window();
     let drag_window = window.clone();
@@ -499,6 +507,12 @@ fn AppChrome() -> Element {
             }
         }
     }
+}
+
+#[component]
+#[cfg(target_os = "android")]
+fn AppChrome() -> Element {
+    rsx! {}
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -539,6 +553,8 @@ struct WorkbenchProps {
     on_save_display_name: EventHandler<String>,
     on_connect_to_peer: EventHandler<String>,
     on_disconnect_peer: EventHandler<String>,
+    on_approve_route_request: EventHandler<String>,
+    on_deny_route_request: EventHandler<String>,
     on_scan_peers: EventHandler<()>,
     on_toggle_remote_control: EventHandler<()>,
     on_route_toggled: EventHandler<(i32, i32, bool)>,
@@ -591,7 +607,7 @@ fn Workbench(props: WorkbenchProps) -> Element {
         "播放中"
     };
     let remote_state_text = if props.allow_remote_control {
-        "允许"
+        "允许请求"
     } else {
         "禁止"
     };
@@ -728,6 +744,8 @@ fn Workbench(props: WorkbenchProps) -> Element {
                                     matrix_cells: props.matrix_cells.clone(),
                                     onconnect: move |id| props.on_connect_to_peer.call(id),
                                     ondisconnect: move |id| props.on_disconnect_peer.call(id),
+                                    onapprove_route: move |id| props.on_approve_route_request.call(id),
+                                    ondeny_route: move |id| props.on_deny_route_request.call(id),
                                     onscan: move |_| props.on_scan_peers.call(()),
                                     ontoggle_remote_control: move |_| props.on_toggle_remote_control.call(()),
                                     ontoggle_mute: move |_| props.on_toggle_mute.call(()),

@@ -1,20 +1,48 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
+use ed25519_dalek::SigningKey;
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::sync::{Notify, mpsc};
 
-use super::discovery::{DiscoveryEndpoint, DiscoveryService};
+use super::discovery::{DiscoveryEndpoint, DiscoveryService, public_key_fingerprint};
 use super::protocol::{
-    ConnectionDirection, DiscoveryMessage, NetworkCommand, NetworkMessage, NodeId,
+    ConnectionDirection, DiscoveryMessage, NetworkCommand, NetworkMessage, NodeId, SESSION_TCP_PORT,
 };
 use super::session::{self, SessionSender};
 use super::state::{NetworkState, PeerInfo};
+use crate::app::network_mode::NetworkMode;
 use crate::ui::events::{PeerDiscoveryPayload, UiEvent};
 
 const DISCOVERY_ENDPOINT_RETRY_SECS: u64 = 30;
+
+/// Pure selection of the TCP session-listener bind address for a given
+/// [`NetworkMode`].
+///
+/// `Lan` always binds the fixed [`SESSION_TCP_PORT`] on all interfaces so
+/// peers can reach this node without an out-of-band port exchange.
+/// `LoopbackTest` binds an OS-assigned ephemeral port on the loopback
+/// interface only, so no traffic ever reaches the real LAN. `Offline` has
+/// no meaningful bind address; callers must not reach the bind step in
+/// that mode (see the defense-in-depth check in
+/// [`run_network_runtime`]) -- it is included here only so the function is
+/// total.
+pub(crate) fn session_bind_addr(mode: NetworkMode) -> SocketAddr {
+    match mode {
+        NetworkMode::Lan => SocketAddr::new(
+            "0.0.0.0".parse().expect("valid constant address"),
+            SESSION_TCP_PORT,
+        ),
+        NetworkMode::LoopbackTest => {
+            SocketAddr::new("127.0.0.1".parse().expect("valid constant address"), 0)
+        }
+        NetworkMode::Offline => {
+            SocketAddr::new("127.0.0.1".parse().expect("valid constant address"), 0)
+        }
+    }
+}
 
 fn peer_payload(
     state: &NetworkState,
@@ -48,8 +76,9 @@ fn peer_payload(
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_network_runtime(
     local_id: NodeId,
-    display_name: String,
+    display_name: Arc<RwLock<String>>,
     local_pubkey: [u8; 32],
+    local_signing_key: SigningKey,
     net_state: Arc<Mutex<NetworkState>>,
     sessions: Arc<Mutex<HashMap<NodeId, SessionSender>>>,
     mut outgoing_rx: mpsc::UnboundedReceiver<(NodeId, NetworkMessage)>,
@@ -57,13 +86,32 @@ pub(super) async fn run_network_runtime(
     mut command_rx: mpsc::UnboundedReceiver<NetworkCommand>,
     shutdown: Arc<AtomicBool>,
     shutdown_notify: Arc<Notify>,
+    mode: NetworkMode,
 ) {
-    log::info!("Network runtime started (node={})", local_id);
+    log::info!(
+        "Network runtime started (node={}, mode={:?})",
+        local_id,
+        mode
+    );
+
+    // Defense in depth: the composition root (`ui::bridge::init_networking`)
+    // already gates on `NetworkMode::Offline` and never constructs a
+    // `NetworkManager` in that case. If `Offline` reaches here anyway,
+    // refuse to create any socket and exit immediately -- the dedicated
+    // OS thread that called this function simply ends.
+    if mode == NetworkMode::Offline {
+        log::error!(
+            "run_network_runtime invoked with NetworkMode::Offline; this should have been \
+             gated at the composition root. Refusing to create any network socket."
+        );
+        return;
+    }
 
     // -- Task 1: TCP session listener ----------------------------------------
     let listener_display = display_name.clone();
     let listener_id = local_id;
     let listener_shutdown = shutdown.clone();
+    let listener_signing_key = local_signing_key.clone();
 
     // Session tasks send commands back to the runtime through this channel.
     // It is merged with the external command_rx below.
@@ -100,9 +148,10 @@ pub(super) async fn run_network_runtime(
     // Clone the session command sender for the listener task.
     let listener_cmd_tx = session_cmd_tx.clone();
 
-    // Bind the session listener on port 0 so the OS assigns an available
-    // ephemeral application port. Discovery publishes the resolved port.
-    let bind_addr = SocketAddr::new("0.0.0.0".parse().expect("valid constant address"), 0);
+    // In `Lan` mode this binds the fixed session port on all interfaces so
+    // peers can reach it without an out-of-band port exchange; in
+    // `LoopbackTest` it binds an OS-assigned ephemeral port on loopback only.
+    let bind_addr = session_bind_addr(mode);
     let session_listener = match bind_tcp_with_reuse(bind_addr) {
         Ok(l) => {
             match l.local_addr() {
@@ -112,9 +161,21 @@ pub(super) async fn run_network_runtime(
             l
         }
         Err(e) => {
-            log::error!("Failed to bind TCP session listener: {}", e);
+            log::error!(
+                "Failed to bind TCP session listener on {}: {}",
+                bind_addr,
+                e
+            );
             let _ = ui_event_tx.send(UiEvent::ConnectionError("bind_failed".to_string()));
-            let _ = ui_event_tx.send(UiEvent::NetworkStatusUpdate("网络端口无法监听".to_string()));
+            let status = if mode == NetworkMode::Lan {
+                format!(
+                    "网络端口 {} 被占用或不可用，局域网协作暂时无法使用，本机计算器仍可正常使用",
+                    SESSION_TCP_PORT
+                )
+            } else {
+                "网络端口无法监听，本机计算器仍可正常使用".to_string()
+            };
+            let _ = ui_event_tx.send(UiEvent::NetworkStatusUpdate(status));
             return;
         }
     };
@@ -127,6 +188,11 @@ pub(super) async fn run_network_runtime(
             return;
         }
     };
+    // Diagnostic only: in `Lan` mode this always equals `SESSION_TCP_PORT`
+    // (the bind itself requested that fixed port); in `LoopbackTest` it is
+    // the OS-assigned ephemeral loopback port, which is never advertised
+    // since discovery does not run in that mode.
+    log::debug!("Session listener local port resolved to {}", session_port);
 
     let listener_handle = tokio::spawn(async move {
         let listener = session_listener;
@@ -148,13 +214,22 @@ pub(super) async fn run_network_runtime(
                     });
                     log::info!("Accepted TCP session from {}", peer_addr);
                     let cmd_tx = listener_cmd_tx.clone();
-                    let name = listener_display.clone();
+                    let name = read_display_name(&listener_display);
                     let id = listener_id;
                     let pubkey = local_pubkey;
+                    let signing_key = listener_signing_key.clone();
 
                     tokio::spawn(async move {
-                        session::run_accepted_session(stream, peer_addr, id, name, pubkey, cmd_tx)
-                            .await;
+                        session::run_accepted_session(
+                            stream,
+                            peer_addr,
+                            id,
+                            name,
+                            pubkey,
+                            signing_key,
+                            cmd_tx,
+                        )
+                        .await;
                     });
                 }
                 Ok(Err(e)) => {
@@ -169,6 +244,11 @@ pub(super) async fn run_network_runtime(
     });
 
     // -- Task 2: Discovery endpoint publishing/resolution -------------------
+    // Discovery is intentionally decoupled from the rest of the runtime's
+    // lifetime -- see the final `select!` below, which no longer includes
+    // this task's `JoinHandle`. It is also skipped entirely outside `Lan`
+    // mode: `LoopbackTest` must not create any mDNS daemon, multicast
+    // socket, or other non-loopback socket.
     let discovery_display = display_name.clone();
     let discovery_state = net_state.clone();
     let discovery_id = local_id;
@@ -178,79 +258,50 @@ pub(super) async fn run_network_runtime(
     // Channel for discovered peers -> command processor (TCP connect).
     let (discovered_peer_tx, mut discovered_peer_rx) = mpsc::unbounded_channel::<SocketAddr>();
 
-    let discovery_handle = tokio::spawn(async move {
-        let discovery = match DiscoveryService::new(
-            discovery_id,
-            discovery_display.clone(),
-            session_port,
-            local_pubkey,
-        )
-        .await
-        {
-            Ok(d) => Arc::new(d),
-            Err(e) => {
-                log::warn!("Discovery service unavailable: {}", e);
-                return;
-            }
-        };
+    if mode != NetworkMode::Lan {
+        log::info!(
+            "Discovery skipped for network mode {:?} (loopback-only, no LAN sockets)",
+            mode
+        );
+        drop(discovered_peer_tx);
+    } else {
+        tokio::spawn(async move {
+            let discovery = match DiscoveryService::new(
+                discovery_id,
+                read_display_name(&discovery_display),
+                SESSION_TCP_PORT,
+                local_pubkey,
+            )
+            .await
+            {
+                Ok(d) => Arc::new(d),
+                Err(e) => {
+                    log::warn!("Discovery service unavailable: {}", e);
+                    return;
+                }
+            };
 
-        let announce_msg = discovery.announce_msg().clone();
+            // Low-rate fallback announce. The first tick fires immediately and
+            // sends a short burst; later ticks keep stale UDP-only peers refreshed
+            // without constant LAN chatter.
+            let mut announce_interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            announce_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-        // Low-rate fallback announce. The first tick fires immediately and
-        // sends a short burst; later ticks keep stale UDP-only peers refreshed
-        // without constant LAN chatter.
-        let mut announce_interval = tokio::time::interval(std::time::Duration::from_secs(60));
-        announce_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut endpoint_attempts: HashMap<NodeId, (SocketAddr, std::time::Instant)> =
+                HashMap::new();
 
-        let mut endpoint_attempts: HashMap<NodeId, (SocketAddr, std::time::Instant)> =
-            HashMap::new();
-
-        loop {
-            if discovery_shutdown.load(Ordering::Relaxed) {
-                break;
-            }
-
-            tokio::select! {
-                // -------------------------------------------------------
-                // Path A: mDNS/DNS-SD resolved endpoint.
-                // -------------------------------------------------------
-                result = discovery.recv_mdns_endpoint() => {
-                    match result {
-                        Ok(endpoint) => {
-                            let node_id = endpoint.node_id;
-                            let peer_addr = register_discovered_endpoint(
-                                endpoint,
-                                &discovery_state,
-                                &discovery_ui,
-                            );
-                            if should_attempt_discovered_session(&mut endpoint_attempts, node_id, peer_addr) {
-                                let _ = discovered_peer_tx.send(peer_addr);
-                            }
-                        }
-                        Err(e) => {
-                            log::debug!("mDNS discovery receive error: {}", e);
-                        }
-                    }
+            loop {
+                if discovery_shutdown.load(Ordering::Relaxed) {
+                    break;
                 }
 
-                // -------------------------------------------------------
-                // Path B: UDP multicast fallback announcement.
-                // -------------------------------------------------------
-                result = discovery.recv_announce() => {
-                    match result {
-                        Ok((msg, udp_addr)) => {
-                            if matches!(msg, DiscoveryMessage::Discover) {
-                                let disc = discovery.clone();
-                                let msg = announce_msg.clone();
-                                tokio::spawn(async move {
-                                    if let Err(e) = disc.announce(&msg).await {
-                                        log::warn!("Discovery reply-announce error: {}", e);
-                                    }
-                                });
-                                continue;
-                            }
-
-                            if let Some(endpoint) = discovery.endpoint_from_announcement(&msg, udp_addr) {
+                tokio::select! {
+                    // -------------------------------------------------------
+                    // Path A: mDNS/DNS-SD resolved endpoint.
+                    // -------------------------------------------------------
+                    result = discovery.recv_mdns_endpoint() => {
+                        match result {
+                            Ok(endpoint) => {
                                 let node_id = endpoint.node_id;
                                 let peer_addr = register_discovered_endpoint(
                                     endpoint,
@@ -261,44 +312,87 @@ pub(super) async fn run_network_runtime(
                                     let _ = discovered_peer_tx.send(peer_addr);
                                 }
                             }
-                        }
-                        Err(e) => {
-                            log::debug!("UDP recv error: {}", e);
+                            Err(e) => {
+                                log::debug!("mDNS discovery receive error: {}", e);
+                            }
                         }
                     }
-                }
 
-                // -------------------------------------------------------
-                // Scan command from the command processor.
-                // -------------------------------------------------------
-                _ = scan_cmd_rx.recv() => {
-                    let disc = discovery.clone();
-                    let msg = announce_msg.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = disc.announce(&DiscoveryMessage::Discover).await {
-                            log::warn!("Discovery scan discover error: {}", e);
-                        }
-                        if let Err(e) = disc.announce(&msg).await {
-                            log::warn!("Discovery scan announce error: {}", e);
-                        }
-                    });
-                }
+                    // -------------------------------------------------------
+                    // Path B: UDP multicast fallback announcement.
+                    // -------------------------------------------------------
+                    result = discovery.recv_announce() => {
+                        match result {
+                            Ok((msg, udp_addr)) => {
+                                if matches!(msg, DiscoveryMessage::Discover) {
+                                    let disc = discovery.clone();
+                                    let name = read_display_name(&discovery_display);
+                                    let msg = disc.announce_msg(&name);
+                                    tokio::spawn(async move {
+                                        if let Err(e) = disc.announce(&msg).await {
+                                            log::warn!("Discovery reply-announce error: {}", e);
+                                        }
+                                    });
+                                    continue;
+                                }
 
-                // -------------------------------------------------------
-                // Low-rate UDP fallback announce.
-                // -------------------------------------------------------
-                _ = announce_interval.tick() => {
-                    let disc = discovery.clone();
-                    let msg = announce_msg.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = disc.announce(&msg).await {
-                            log::warn!("Discovery announce error: {}", e);
+                                if let Some(endpoint) = discovery.endpoint_from_announcement(&msg, udp_addr) {
+                                    let node_id = endpoint.node_id;
+                                    let peer_addr = register_discovered_endpoint(
+                                        endpoint,
+                                        &discovery_state,
+                                        &discovery_ui,
+                                    );
+                                    if should_attempt_discovered_session(&mut endpoint_attempts, node_id, peer_addr) {
+                                        let _ = discovered_peer_tx.send(peer_addr);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                log::debug!("UDP recv error: {}", e);
+                            }
                         }
-                    });
+                    }
+
+                    // -------------------------------------------------------
+                    // Scan command from the command processor.
+                    // -------------------------------------------------------
+                    _ = scan_cmd_rx.recv() => {
+                        let disc = discovery.clone();
+                        let name = read_display_name(&discovery_display);
+                        if let Err(e) = disc.update_display_name(&name) {
+                            log::warn!("Discovery display-name update failed: {}", e);
+                        }
+                        let msg = disc.announce_msg(&name);
+                        tokio::spawn(async move {
+                            if let Err(e) = disc.announce(&DiscoveryMessage::Discover).await {
+                                log::warn!("Discovery scan discover error: {}", e);
+                            }
+                            if let Err(e) = disc.announce(&msg).await {
+                                log::warn!("Discovery scan announce error: {}", e);
+                            }
+                        });
+                    }
+
+                    // -------------------------------------------------------
+                    // Low-rate UDP fallback announce.
+                    // -------------------------------------------------------
+                    _ = announce_interval.tick() => {
+                        let disc = discovery.clone();
+                        let name = read_display_name(&discovery_display);
+                        let msg = disc.announce_msg(&name);
+                        tokio::spawn(async move {
+                            if let Err(e) = disc.announce(&msg).await {
+                                log::warn!("Discovery announce error: {}", e);
+                            }
+                        });
+                    }
                 }
             }
-        }
-    });
+
+            log::warn!("Discovery task exited");
+        });
+    }
 
     // -- Task 3: Outgoing message router ------------------------------------
     let router_sessions = sessions.clone();
@@ -334,6 +428,7 @@ pub(super) async fn run_network_runtime(
     let cmd_incoming = ui_event_tx.clone();
     let cmd_display = display_name.clone();
     let cmd_id = local_id;
+    let cmd_signing_key = local_signing_key.clone();
     let cmd_state = net_state.clone();
     let cmd_session_tx = session_cmd_tx;
     let cmd_scan_tx = scan_cmd_tx;
@@ -357,6 +452,39 @@ pub(super) async fn run_network_runtime(
                     match cmd {
                         NetworkCommand::RegisterSession(reg) => {
                             let node_id = reg.node_id;
+                            let fingerprint_ok = {
+                                let state = cmd_state
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner());
+                                match state.peers.get_peer(&node_id) {
+                                    Some(peer) => match &peer.public_key_fingerprint {
+                                        Some(expected) => {
+                                            let actual =
+                                                public_key_fingerprint(&reg.info.public_key);
+                                            if *expected != actual {
+                                                log::warn!(
+                                                    "Session fingerprint mismatch for {}: expected {}, got {}",
+                                                    node_id,
+                                                    expected,
+                                                    actual,
+                                                );
+                                                false
+                                            } else {
+                                                true
+                                            }
+                                        }
+                                        None => true,
+                                    },
+                                    None => true,
+                                }
+                            };
+                            if !fingerprint_ok {
+                                drop(reg.sender);
+                                let _ = cmd_incoming.send(UiEvent::ConnectionError(
+                                    "fingerprint_mismatch".to_string(),
+                                ));
+                                continue;
+                            }
                             log::info!(
                                 "Session registered: {} ({}) dir={:?}",
                                 reg.info.display_name,
@@ -423,7 +551,10 @@ pub(super) async fn run_network_runtime(
                                     .lock()
                                     .unwrap_or_else(|e| e.into_inner());
                                 state.peers.add_peer(reg.info);
-                                state.is_connected = true;
+                                state.is_connected = !cmd_sessions
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .is_empty();
                                 if let Some(payload) = peer_payload(&state, &node_id, true) {
                                     let _ = cmd_incoming.send(UiEvent::PeerDiscovered(payload));
                                 }
@@ -442,17 +573,21 @@ pub(super) async fn run_network_runtime(
                                 // session's entry is still valid.
                             } else {
                                 log::info!("Session unregistered: {}", node_id);
-                                cmd_sessions
-                                    .lock()
-                                    .unwrap_or_else(|e| e.into_inner())
-                                    .remove(&node_id);
+                                let has_sessions = {
+                                    let mut sessions = cmd_sessions
+                                        .lock()
+                                        .unwrap_or_else(|e| e.into_inner());
+                                    sessions.remove(&node_id);
+                                    !sessions.is_empty()
+                                };
                                 let mut state = cmd_state
                                     .lock()
                                     .unwrap_or_else(|e| e.into_inner());
-                                state.peers.remove(&node_id);
-                                state.is_connected = !state.peers.is_empty();
+                                state.is_connected = has_sessions;
+                                if let Some(payload) = peer_payload(&state, &node_id, false) {
+                                    let _ = cmd_incoming.send(UiEvent::PeerDiscovered(payload));
+                                }
                                 let _ = cmd_incoming.send(UiEvent::SessionLost(node_id.to_string()));
-                                let _ = cmd_incoming.send(UiEvent::PeerLost(node_id.to_string()));
                             }
                         }
                         NetworkCommand::IncomingMessage(sender_id, msg) => {
@@ -464,10 +599,13 @@ pub(super) async fn run_network_runtime(
                             // again here created an infinite amplification
                             // loop in 3+ node topologies because there was
                             // no message-ID / TTL / dedup mechanism.
-                            // If a peer is only reachable through an
-                            // intermediate node (asymmetric topology), it
-                            // will receive the full matrix via RoutingSync
-                            // on its next connection.
+                            // Asymmetric topologies are repaired by
+                            // owner-signed RoutingRowAnnounce messages:
+                            // an intermediate node may relay another
+                            // owner's row, and receivers verify the owner
+                            // signature before applying it. RoutingSync is
+                            // still sender-row-only and is not trusted for
+                            // third-party rows.
                             // Serialize the message and forward as a UiEvent
                             // so the UI event loop can dispatch it.
                             match bincode::serde::encode_to_vec(&msg, bincode::config::standard()) {
@@ -495,9 +633,10 @@ pub(super) async fn run_network_runtime(
                             }
                             log::info!("Connecting to peer at {} (target={:?})", addr, target_node_id);
                             let ses_tx = cmd_session_tx.clone();
-                            let name = cmd_display.clone();
+                            let name = read_display_name(&cmd_display);
                             let id = cmd_id;
                             let pubkey = local_pubkey;
+                            let signing_key = cmd_signing_key.clone();
                             let incoming = cmd_incoming.clone();
                             let in_flight = in_flight_connects.clone();
 
@@ -515,7 +654,13 @@ pub(super) async fn run_network_runtime(
                                             log::warn!("set_nodelay failed on outgoing stream: {e}");
                                         });
                                         if let Err(e) = session::run_connecting_session(
-                                            stream, addr, id, name, pubkey, ses_tx,
+                                            stream,
+                                            addr,
+                                            id,
+                                            name,
+                                            pubkey,
+                                            signing_key,
+                                            ses_tx,
                                         )
                                         .await {
                                             log::warn!("Session failed to {}: {}", addr, e);
@@ -573,9 +718,10 @@ pub(super) async fn run_network_runtime(
                 Some(peer_addr) = discovered_peer_rx.recv() => {
                     log::info!("Discovery: establishing session with peer at {}", peer_addr);
                     let ses_tx = cmd_session_tx.clone();
-                    let name = cmd_display.clone();
+                    let name = read_display_name(&cmd_display);
                     let id = cmd_id;
                     let pubkey = local_pubkey;
+                    let signing_key = cmd_signing_key.clone();
 
                     tokio::spawn(async move {
                         // TCP connect with 5-second timeout (same as user-initiated).
@@ -593,7 +739,13 @@ pub(super) async fn run_network_runtime(
                                 // Discovery connections don't set pending_control_request,
                                 // so we don't need to propagate errors to the UI.
                                 let _ = session::run_connecting_session(
-                                    stream, peer_addr, id, name, pubkey, ses_tx,
+                                    stream,
+                                    peer_addr,
+                                    id,
+                                    name,
+                                    pubkey,
+                                    signing_key,
+                                    ses_tx,
                                 )
                                 .await;
                             }
@@ -616,10 +768,13 @@ pub(super) async fn run_network_runtime(
         }
     });
 
-    // -- Wait for shutdown or all tasks to exit -------------------------
+    // -- Wait for shutdown or a core task to exit ------------------------
+    // The discovery task is intentionally NOT part of this select: its
+    // JoinHandle is detached (see above) so a discovery failure or exit
+    // never tears down the listener/router/command-processor tasks or the
+    // local calculator's ability to keep running.
     tokio::select! {
         _ = listener_handle => log::info!("TCP session listener exited"),
-        _ = discovery_handle => log::info!("Discovery exited"),
         _ = router_handle => log::info!("Outgoing router exited"),
         _ = cmd_handle => log::info!("Command processor exited"),
         _ = wait_for_shutdown(shutdown, shutdown_notify) => {
@@ -645,6 +800,13 @@ async fn wait_for_shutdown(flag: Arc<AtomicBool>, notify: Arc<Notify>) {
     }
 }
 
+fn read_display_name(display_name: &Arc<RwLock<String>>) -> String {
+    display_name
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
 fn register_discovered_endpoint(
     endpoint: DiscoveryEndpoint,
     state: &Arc<Mutex<NetworkState>>,
@@ -664,6 +826,7 @@ fn register_discovered_endpoint(
             tcp_port: endpoint.session_port,
             last_seen: std::time::Instant::now(),
             public_key: [0u8; 32],
+            public_key_fingerprint: fingerprint.clone(),
         });
         state.peers.remove_expired();
         if let Some(payload) = peer_payload(&state, &node_id, false) {
@@ -716,7 +879,9 @@ fn should_attempt_discovered_session(
 /// The socket is created via `socket2` so that socket options can be set
 /// before `bind()`.  After binding and listening the socket is switched to
 /// non-blocking mode and converted into a tokio listener.
-fn bind_tcp_with_reuse(addr: SocketAddr) -> Result<tokio::net::TcpListener, std::io::Error> {
+pub(crate) fn bind_tcp_with_reuse(
+    addr: SocketAddr,
+) -> Result<tokio::net::TcpListener, std::io::Error> {
     let domain = if addr.is_ipv4() {
         Domain::IPV4
     } else {

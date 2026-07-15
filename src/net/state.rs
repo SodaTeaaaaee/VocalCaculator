@@ -18,6 +18,9 @@ pub struct PeerInfo {
     /// Ed25519 public key received during handshake (32 bytes).
     /// All-zeros if the remote did not provide one (legacy peer).
     pub public_key: [u8; 32],
+    /// SHA-256 fingerprint prefix advertised during discovery (mDNS `pkfp`).
+    /// Used to detect discovery/session public-key mismatches before trust.
+    pub public_key_fingerprint: Option<String>,
 }
 
 /// Snapshot of the current network state (peers, connection status, latency).

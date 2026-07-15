@@ -48,7 +48,14 @@ pub struct AudioUiState {
 pub struct PeerDisplayInfo {
     pub name: Signal<String>,
     pub address: Signal<String>,
+    /// Active TCP session with this peer.
     pub is_connected: Signal<bool>,
+    /// Local routing matrix currently sends calculator actions to this peer.
+    pub route_active: Signal<bool>,
+    /// This peer has asked to control us and is waiting for user approval.
+    pub approval_pending: Signal<bool>,
+    /// Pairing/trust policy shown in the network panel.
+    pub trust_label: Signal<String>,
     pub latency_ms: Signal<i32>,
     pub index: Signal<i32>,
     pub node_id_string: Signal<String>,

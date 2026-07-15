@@ -1,4 +1,5 @@
 use super::*;
+use crate::app::identity::DeviceIdentity;
 use crate::core::action::CalcAction;
 use crate::core::token::BinaryOp;
 use crate::net::protocol::*;
@@ -275,6 +276,24 @@ fn roundtrip_all_message_variants() {
         NetworkMessage::RoutingSync {
             entries: vec![(NodeId::new_v4(), NodeId::new_v4(), true, 1)],
         },
+        NetworkMessage::RoutingRowRequest {
+            owner: NodeId::new_v4(),
+        },
+        NetworkMessage::RoutingRowAnnounce {
+            owner: NodeId::new_v4(),
+            version: 1,
+            cells: vec![(NodeId::new_v4(), NodeId::new_v4(), true)],
+            owner_public_key: [8u8; 32],
+            signature: vec![9, 10, 11],
+        },
+        NetworkMessage::PairingRequest {
+            public_key: [1u8; 32],
+            pairing_code_hash: [2u8; 32],
+        },
+        NetworkMessage::PairingConfirm {
+            signature: vec![3, 4, 5],
+        },
+        NetworkMessage::PairingReject,
         NetworkMessage::Ping,
         NetworkMessage::Pong,
         NetworkMessage::PeerNameUpdate {
@@ -297,6 +316,18 @@ fn roundtrip_all_message_variants() {
     }
 }
 
+#[test]
+fn protocol_magic_byte_layout() {
+    assert_eq!(PROTOCOL_MAGIC.len(), 8, "PROTOCOL_MAGIC should be 8 bytes");
+    assert_eq!(
+        &PROTOCOL_MAGIC[..6],
+        b"VOCALC",
+        "First 6 bytes should be 'VOCALC'"
+    );
+    assert_eq!(PROTOCOL_MAGIC[6], 0x01, "Byte 6 should be version 0x01");
+    assert_eq!(PROTOCOL_MAGIC[7], 0x00, "Byte 7 should be reserved 0x00");
+}
+
 // ---- TCP session integration test ------------------------------------
 
 #[tokio::test]
@@ -307,8 +338,14 @@ async fn tcp_session_handshake_and_message_passing() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
-    let client_id = NodeId::new_v4();
-    let server_id = NodeId::new_v4();
+    let client_identity = DeviceIdentity::generate();
+    let server_identity = DeviceIdentity::generate();
+    let client_id = client_identity.node_id();
+    let server_id = server_identity.node_id();
+    let client_pubkey = client_identity.public_key_bytes();
+    let server_pubkey = server_identity.public_key_bytes();
+    let client_signing_key = client_identity.signing_key();
+    let server_signing_key = server_identity.signing_key();
 
     // Shared channel to collect messages the server-side session
     // forwards to the "Router" (i.e. IncomingMessage commands).
@@ -322,7 +359,8 @@ async fn tcp_session_handshake_and_message_passing() {
             peer_addr,
             server_id,
             "Server".into(),
-            [0u8; 32],
+            server_pubkey,
+            server_signing_key,
             server_cmd_tx.clone(),
         )
         .await;
@@ -337,7 +375,8 @@ async fn tcp_session_handshake_and_message_passing() {
             addr,
             client_id,
             "Client".into(),
-            [0u8; 32],
+            client_pubkey,
+            client_signing_key,
             client_cmd_tx,
         )
         .await;
@@ -440,6 +479,7 @@ fn network_manager_uses_provided_node_id() {
 mod handshake_failure_tests {
     use super::super::handshake::server_handshake;
     use super::super::session::FramedStream;
+    use crate::app::identity::DeviceIdentity;
     use crate::net::protocol::*;
     use futures::SinkExt;
     use hmac::Mac;
@@ -484,17 +524,17 @@ mod handshake_failure_tests {
     /// Build a correctly-formed client-side Hello + HMAC pair and return the
     /// (hello_msg, hmac_tag) ready for sending.
     fn build_valid_hello(
-        node_id: Uuid,
+        identity: &DeviceIdentity,
         name: &str,
         version: u16,
         app_id: &str,
     ) -> (NetworkMessage, Vec<u8>) {
         let hello = NetworkMessage::Hello {
-            node_id,
+            node_id: identity.node_id(),
             display_name: name.to_string(),
             protocol_version: version,
             app_id: app_id.to_string(),
-            public_key: [0u8; 32],
+            public_key: identity.public_key_bytes(),
         };
         let raw = serialize_hello(&hello);
         let tag = compute_hmac(&raw);
@@ -505,13 +545,19 @@ mod handshake_failure_tests {
     /// The error is converted to `String` so the future is `Send`-safe for `tokio::spawn`.
     async fn accept_and_handshake(
         listener: TcpListener,
-        server_id: Uuid,
+        server_identity: DeviceIdentity,
     ) -> Result<(Uuid, String, [u8; 32], FramedStream), String> {
         let (stream, _peer) = listener.accept().await.unwrap();
         let framed = Framed::new(stream, LengthDelimitedCodec::new());
-        server_handshake(framed, server_id, "Server", [0u8; 32])
-            .await
-            .map_err(|e| e.to_string())
+        server_handshake(
+            framed,
+            server_identity.node_id(),
+            "Server",
+            server_identity.public_key_bytes(),
+            &server_identity.signing_key(),
+        )
+        .await
+        .map_err(|e| e.to_string())
     }
 
     // -----------------------------------------------------------------------
@@ -521,17 +567,18 @@ mod handshake_failure_tests {
     async fn rejects_wrong_app_id() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let server_id = Uuid::new_v4();
+        let server_identity = DeviceIdentity::generate();
 
-        let server = tokio::spawn(accept_and_handshake(listener, server_id));
+        let server = tokio::spawn(accept_and_handshake(listener, server_identity));
 
         let client = tokio::spawn(async move {
             let stream = TcpStream::connect(addr).await.unwrap();
             let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
 
             // Send Hello with a bogus app_id but HMAC computed over it.
+            let client_identity = DeviceIdentity::generate();
             let (hello, tag) =
-                build_valid_hello(Uuid::new_v4(), "BadClient", PROTOCOL_VERSION, "WRONG_APP");
+                build_valid_hello(&client_identity, "BadClient", PROTOCOL_VERSION, "WRONG_APP");
             send_magic_msg(&mut framed, &hello).await;
             send_raw_frame(&mut framed, &tag).await;
 
@@ -557,17 +604,18 @@ mod handshake_failure_tests {
     async fn rejects_wrong_protocol_version() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let server_id = Uuid::new_v4();
+        let server_identity = DeviceIdentity::generate();
 
-        let server = tokio::spawn(accept_and_handshake(listener, server_id));
+        let server = tokio::spawn(accept_and_handshake(listener, server_identity));
 
         let client = tokio::spawn(async move {
             let stream = TcpStream::connect(addr).await.unwrap();
             let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
 
             // Correct app_id but wrong protocol version.
+            let client_identity = DeviceIdentity::generate();
             let (hello, tag) =
-                build_valid_hello(Uuid::new_v4(), "BadClient", PROTOCOL_VERSION + 99, APP_ID);
+                build_valid_hello(&client_identity, "BadClient", PROTOCOL_VERSION + 99, APP_ID);
             send_magic_msg(&mut framed, &hello).await;
             send_raw_frame(&mut framed, &tag).await;
 
@@ -604,21 +652,22 @@ mod handshake_failure_tests {
     async fn rejects_bad_hmac() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let server_id = Uuid::new_v4();
+        let server_identity = DeviceIdentity::generate();
 
-        let server = tokio::spawn(accept_and_handshake(listener, server_id));
+        let server = tokio::spawn(accept_and_handshake(listener, server_identity));
 
         let client = tokio::spawn(async move {
             let stream = TcpStream::connect(addr).await.unwrap();
             let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
 
             // Valid Hello with correct fields.
+            let client_identity = DeviceIdentity::generate();
             let hello = NetworkMessage::Hello {
-                node_id: Uuid::new_v4(),
+                node_id: client_identity.node_id(),
                 display_name: "BadClient".to_string(),
                 protocol_version: PROTOCOL_VERSION,
                 app_id: APP_ID.to_string(),
-                public_key: [0u8; 32],
+                public_key: client_identity.public_key_bytes(),
             };
             send_magic_msg(&mut framed, &hello).await;
 
@@ -650,9 +699,9 @@ mod handshake_failure_tests {
     async fn rejects_non_hello_message() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let server_id = Uuid::new_v4();
+        let server_identity = DeviceIdentity::generate();
 
-        let server = tokio::spawn(accept_and_handshake(listener, server_id));
+        let server = tokio::spawn(accept_and_handshake(listener, server_identity));
 
         let client = tokio::spawn(async move {
             let stream = TcpStream::connect(addr).await.unwrap();
@@ -682,21 +731,22 @@ mod handshake_failure_tests {
     async fn rejects_truncated_hmac() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let server_id = Uuid::new_v4();
+        let server_identity = DeviceIdentity::generate();
 
-        let server = tokio::spawn(accept_and_handshake(listener, server_id));
+        let server = tokio::spawn(accept_and_handshake(listener, server_identity));
 
         let client = tokio::spawn(async move {
             let stream = TcpStream::connect(addr).await.unwrap();
             let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
 
             // Valid Hello with correct fields.
+            let client_identity = DeviceIdentity::generate();
             let hello = NetworkMessage::Hello {
-                node_id: Uuid::new_v4(),
+                node_id: client_identity.node_id(),
                 display_name: "BadClient".to_string(),
                 protocol_version: PROTOCOL_VERSION,
                 app_id: APP_ID.to_string(),
-                public_key: [0u8; 32],
+                public_key: client_identity.public_key_bytes(),
             };
             send_magic_msg(&mut framed, &hello).await;
 
@@ -719,5 +769,140 @@ mod handshake_failure_tests {
             "unexpected error: {err}"
         );
         client.abort();
+    }
+
+    #[tokio::test]
+    async fn rejects_zero_public_key_for_protocol_v4() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_identity = DeviceIdentity::generate();
+
+        let server = tokio::spawn(accept_and_handshake(listener, server_identity));
+
+        let client = tokio::spawn(async move {
+            let stream = TcpStream::connect(addr).await.unwrap();
+            let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
+
+            let hello = NetworkMessage::Hello {
+                node_id: Uuid::new_v4(),
+                display_name: "LegacyClient".to_string(),
+                protocol_version: PROTOCOL_VERSION,
+                app_id: APP_ID.to_string(),
+                public_key: [0u8; 32],
+            };
+            let raw = serialize_hello(&hello);
+            let tag = compute_hmac(&raw);
+            send_magic_msg(&mut framed, &hello).await;
+            send_raw_frame(&mut framed, &tag).await;
+
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                futures::future::pending::<()>(),
+            )
+            .await;
+        });
+
+        let result = server.await.unwrap();
+        assert!(result.is_err(), "server should reject v4 zero public key");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("requires an Ed25519 public key"),
+            "unexpected error: {err}"
+        );
+        client.abort();
+    }
+
+    #[tokio::test]
+    async fn rejects_node_id_public_key_mismatch() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_identity = DeviceIdentity::generate();
+
+        let server = tokio::spawn(accept_and_handshake(listener, server_identity));
+
+        let client = tokio::spawn(async move {
+            let stream = TcpStream::connect(addr).await.unwrap();
+            let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
+            let client_identity = DeviceIdentity::generate();
+
+            let hello = NetworkMessage::Hello {
+                node_id: Uuid::new_v4(),
+                display_name: "MismatchClient".to_string(),
+                protocol_version: PROTOCOL_VERSION,
+                app_id: APP_ID.to_string(),
+                public_key: client_identity.public_key_bytes(),
+            };
+            let raw = serialize_hello(&hello);
+            let tag = compute_hmac(&raw);
+            send_magic_msg(&mut framed, &hello).await;
+            send_raw_frame(&mut framed, &tag).await;
+
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                futures::future::pending::<()>(),
+            )
+            .await;
+        });
+
+        let result = server.await.unwrap();
+        assert!(result.is_err(), "server should reject mismatched node id");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Node ID/public key mismatch"),
+            "unexpected error: {err}"
+        );
+        client.abort();
+    }
+}
+
+// ---- Fixed-port / mode-threading tests (Task B) -----------------------
+//
+// Loopback-only, pure-function tests: no real LAN sockets, no multicast
+// group join, no mDNS daemon.
+
+mod fixed_port_tests {
+    use crate::app::network_mode::NetworkMode;
+    use crate::net::protocol::{DISCOVERY_PORT, LAN_FIXED_PORT, SESSION_TCP_PORT};
+    use crate::net::runtime::{bind_tcp_with_reuse, session_bind_addr};
+
+    #[test]
+    fn session_bind_addr_lan_is_fixed_port_all_interfaces() {
+        let addr = session_bind_addr(NetworkMode::Lan);
+        assert_eq!(addr.ip().to_string(), "0.0.0.0");
+        assert_eq!(addr.port(), 42420);
+        assert_eq!(addr.port(), SESSION_TCP_PORT);
+    }
+
+    #[test]
+    fn session_bind_addr_loopback_test_is_loopback_ephemeral() {
+        let addr = session_bind_addr(NetworkMode::LoopbackTest);
+        assert!(addr.ip().is_loopback());
+        assert_eq!(addr.port(), 0);
+    }
+
+    #[test]
+    fn fixed_port_constants_are_consistent() {
+        assert_eq!(SESSION_TCP_PORT, DISCOVERY_PORT);
+        assert_eq!(DISCOVERY_PORT, LAN_FIXED_PORT);
+        assert_eq!(LAN_FIXED_PORT, 42420);
+    }
+
+    #[test]
+    fn bind_tcp_with_reuse_errors_cleanly_on_occupied_loopback_port() {
+        // Occupy an ephemeral loopback port with a plain std listener first,
+        // then try to bind the same address again through the helper used
+        // by the network runtime. This must fail cleanly (no panic) rather
+        // than silently succeeding or hanging -- SO_REUSEADDR alone does not
+        // allow two independent listeners on the same address.
+        let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = occupied.local_addr().unwrap();
+
+        let result = bind_tcp_with_reuse(addr);
+        assert!(
+            result.is_err(),
+            "expected bind_tcp_with_reuse to fail on an already-bound loopback port"
+        );
+
+        drop(occupied);
     }
 }

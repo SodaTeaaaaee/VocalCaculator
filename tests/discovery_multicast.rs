@@ -5,13 +5,51 @@
 //! 1. UDP announcements are received by both sides.
 //! 2. Announcements resolve directly to the advertised session endpoint.
 //!
-//! Run with:  cargo test --test discovery_multicast -- --nocapture --test-threads=1
+//! # Real network traffic -- double opt-in required
+//!
+//! Every test in this file constructs real `DiscoveryService` instances,
+//! which start real mDNS daemons and join a real UDP multicast group on the
+//! LAN interface. This file does not compile at all unless the
+//! `real-network-tests` Cargo feature is enabled, and every test is
+//! additionally `#[ignore]`d and panics immediately unless the
+//! `VOCAL_CALCULATOR_ALLOW_LAN_TESTS=1` environment variable is set. Both
+//! gates must be satisfied to actually run these tests:
+//!
+//!     cargo test --test discovery_multicast --features real-network-tests \
+//!         -- --ignored --nocapture --test-threads=1
+//!
+//! with `VOCAL_CALCULATOR_ALLOW_LAN_TESTS=1` set in the environment. Do not
+//! run this on a shared/CI machine without understanding that it will emit
+//! real multicast packets and start real mDNS advertisements on whatever
+//! network the host is attached to.
+//!
+//! (The one test that needed no real sockets, `protocol_magic_byte_layout`,
+//! has moved to `src/net/tests.rs` as a plain unit test.)
+
+#![cfg(feature = "real-network-tests")]
 
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use vocal_calculator::net::discovery::DiscoveryService;
 use vocal_calculator::net::protocol::{Capabilities, DiscoveryMessage, PROTOCOL_VERSION};
+
+/// Panics unless `VOCAL_CALCULATOR_ALLOW_LAN_TESTS=1` is set in the
+/// environment. Every test in this file calls this first, so that even a
+/// direct `cargo test --features real-network-tests -- --ignored` run
+/// (bypassing the `#[ignore]` ergonomics) still requires an explicit,
+/// separate opt-in before touching real network sockets.
+fn require_lan_opt_in() {
+    let opted_in = std::env::var("VOCAL_CALCULATOR_ALLOW_LAN_TESTS")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    assert!(
+        opted_in,
+        "this test starts real mDNS daemons and joins a real UDP multicast \
+         group on the LAN; set VOCAL_CALCULATOR_ALLOW_LAN_TESTS=1 to opt in \
+         (this test is not meant to run in normal `cargo test` / CI)"
+    );
+}
 
 /// Helper: build a unique AnnounceV2 message.
 fn make_announce(display_name: &str, tcp_port: u16, session_port: u16) -> DiscoveryMessage {
@@ -87,7 +125,9 @@ async fn recv_announce_from(
 ///
 /// Both instances use different TCP ports so they can coexist.
 #[tokio::test]
+#[ignore = "real LAN traffic — see doc header"]
 async fn discovery_announce_bidirectional() {
+    require_lan_opt_in();
     let id_a = Uuid::new_v4();
     let id_b = Uuid::new_v4();
 
@@ -131,7 +171,9 @@ async fn discovery_announce_bidirectional() {
 
 /// Test: discovery resolves directly to the current session port.
 #[tokio::test]
+#[ignore = "real LAN traffic — see doc header"]
 async fn discovery_endpoint_uses_session_port() {
+    require_lan_opt_in();
     let id_a = Uuid::new_v4();
     let id_b = Uuid::new_v4();
 
@@ -142,8 +184,9 @@ async fn discovery_endpoint_uses_session_port() {
         .await
         .expect("Failed to create DiscoveryService B");
 
+    let announce = svc_b.announce_msg("NodeB");
     let endpoint = svc_a
-        .endpoint_from_announcement(svc_b.announce_msg(), "127.0.0.1:9".parse().unwrap())
+        .endpoint_from_announcement(&announce, "127.0.0.1:9".parse().unwrap())
         .expect("B announcement should resolve to an endpoint");
 
     assert_eq!(endpoint.node_id, id_b);
@@ -154,7 +197,9 @@ async fn discovery_endpoint_uses_session_port() {
 
 /// Test: Discover message round-trips via UDP.
 #[tokio::test]
+#[ignore = "real LAN traffic — see doc header"]
 async fn discovery_discover_roundtrip() {
+    require_lan_opt_in();
     let id_a = Uuid::new_v4();
     let id_b = Uuid::new_v4();
 
@@ -194,20 +239,4 @@ async fn discovery_discover_roundtrip() {
         "B did not receive Discover from A within 5 seconds"
     );
     println!("[OK] Discover round-trip succeeded");
-}
-
-/// Test: PROTOCOL_MAGIC is correctly encoded.
-#[test]
-fn protocol_magic_byte_layout() {
-    use vocal_calculator::net::protocol::PROTOCOL_MAGIC;
-
-    assert_eq!(PROTOCOL_MAGIC.len(), 8, "PROTOCOL_MAGIC should be 8 bytes");
-    assert_eq!(
-        &PROTOCOL_MAGIC[..6],
-        b"VOCALC",
-        "First 6 bytes should be 'VOCALC'"
-    );
-    assert_eq!(PROTOCOL_MAGIC[6], 0x01, "Byte 6 should be version 0x01");
-    assert_eq!(PROTOCOL_MAGIC[7], 0x00, "Byte 7 should be reserved 0x00");
-    println!("[OK] PROTOCOL_MAGIC layout is correct");
 }

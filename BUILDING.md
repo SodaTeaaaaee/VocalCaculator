@@ -3,7 +3,7 @@
 ## Prerequisites
 
 - Windows with Visual Studio / MSVC Build Tools (for `cl` linker)
-- Rust 1.96+ (managed by project-local `.local/rustup/`)
+- Rust 1.92+ (managed by project-local `.local/rustup/`)
 - Java 21 (for Android, managed by `.local/jdk/`)
 - Android SDK/NDK (for Android builds, managed by `.local/android-sdk/`)
 
@@ -30,7 +30,8 @@ builds still require the project-local Android SDK/NDK environment to be active.
 
 ```powershell
 . .\.local\activate.ps1
-cargo build --features mobile --target aarch64-linux-android
+cargo check --target aarch64-linux-android --no-default-features --features mobile
+cargo apk build --lib --target aarch64-linux-android --no-default-features --features mobile
 ```
 
 ## Verification

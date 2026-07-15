@@ -1,17 +1,20 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use dioxus::prelude::*;
+use vocal_calculator::app::config::AppConfig;
+use vocal_calculator::app::network_mode::{self, NetworkMode};
 use vocal_calculator::app::storage::Storage;
 use vocal_calculator::audio::{AudioMode, VocalAudio};
 use vocal_calculator::components::calculator::CalculatorUI;
 use vocal_calculator::components::network_panel::PeerDisplayInfo as PeerDisplayProps;
 use vocal_calculator::ui::bridge::{
     create_router, handle_action, handle_connect_peer, handle_digit, handle_disconnect_peer,
-    handle_operator, handle_route_toggled, handle_save_display_name, handle_scan_peers,
-    handle_toggle_remote_control, init_networking, set_router_user_mute, start_network_event_loop,
-    toggle_theme,
+    handle_operator, handle_route_approval, handle_route_toggled, handle_save_display_name,
+    handle_scan_peers, handle_toggle_remote_control, init_networking, set_router_user_mute,
+    start_network_event_loop, toggle_theme,
 };
 use vocal_calculator::ui::events::create_ui_channel;
 use vocal_calculator::ui::state::{
@@ -32,7 +35,50 @@ const APP_CSS: &str = concat!(
     include_str!("styles/panels.css"),
 );
 
+static VOLUME_SAVE_GENERATION: AtomicU64 = AtomicU64::new(0);
+#[cfg(target_os = "android")]
+const LOG_TAG: &str = "VocalCalculator";
+
 fn main() {
+    init_logging();
+
+    // Resolve the process-wide NetworkMode exactly once, before any
+    // networking or UI initialisation happens. Priority: CLI
+    // `--network-mode` > env `VOCAL_CALCULATOR_NETWORK_MODE` > config
+    // `[network] mode` > legacy `[network] enabled` fallback. An
+    // invalid value at any of those levels is a hard error -- we never
+    // silently fall back to `Lan`.
+    let app_config = AppConfig::load();
+    match network_mode::resolve_from_process(&app_config.network) {
+        Ok(mode) => network_mode::set(mode),
+        Err(e) => {
+            eprintln!("网络模式解析失败：{e}（有效值：lan, offline, loopback-test）");
+            std::process::exit(2);
+        }
+    }
+
+    launch_app();
+}
+
+#[cfg(not(target_os = "android"))]
+fn init_logging() {
+    let _ = env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("vocal_calculator=info,info"),
+    )
+    .try_init();
+}
+
+#[cfg(target_os = "android")]
+fn init_logging() {
+    android_logger::init_once(
+        android_logger::Config::default()
+            .with_tag(LOG_TAG)
+            .with_max_level(log::LevelFilter::Info),
+    );
+}
+
+#[cfg(not(target_os = "android"))]
+fn launch_app() {
     let window = dioxus::desktop::WindowBuilder::new()
         .with_title("VocalCalculator")
         .with_decorations(false)
@@ -45,6 +91,11 @@ fn main() {
         .launch(App);
 }
 
+#[cfg(target_os = "android")]
+fn launch_app() {
+    dioxus::LaunchBuilder::mobile().launch(App);
+}
+
 fn audio_mode_from_config(value: &str) -> AudioMode {
     match value {
         "broken" => AudioMode::Broken,
@@ -52,6 +103,33 @@ fn audio_mode_from_config(value: &str) -> AudioMode {
         "silent" => AudioMode::Silent,
         _ => AudioMode::Normal,
     }
+}
+
+fn audio_mode_to_config(mode: AudioMode) -> &'static str {
+    match mode {
+        AudioMode::Normal => "normal",
+        AudioMode::Broken => "broken",
+        AudioMode::Music => "music",
+        AudioMode::Silent => "silent",
+    }
+}
+
+fn save_config(update: impl FnOnce(&mut AppConfig)) {
+    let mut app_config = AppConfig::load();
+    update(&mut app_config);
+    if let Err(e) = app_config.save() {
+        log::error!("Failed to save config: {}", e);
+    }
+}
+
+fn schedule_volume_save(volume: f64) {
+    let generation = VOLUME_SAVE_GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
+    spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        if VOLUME_SAVE_GENERATION.load(Ordering::Relaxed) == generation {
+            save_config(|cfg| cfg.volume = volume.clamp(0.0, 1.0));
+        }
+    });
 }
 
 fn close_all_panels(ctx: &mut CalcContext) {
@@ -125,23 +203,26 @@ fn App() -> Element {
         let app_config = storage.config().clone();
 
         let configured_mode = audio_mode_from_config(&app_config.audio_mode);
+        let configured_volume = app_config.volume.clamp(0.0, 1.0);
         let mut init_ctx = ctx_hook.clone();
         *init_ctx.audio.mode.write() = configured_mode;
         *init_ctx.audio.mode_indicator.write() = configured_mode.name().to_string();
-        *init_ctx.audio.volume.write() = 0.5;
+        *init_ctx.audio.volume.write() = configured_volume;
+        *init_ctx.audio.muted.write() = app_config.muted;
+        *init_ctx.audio.dark_mode.write() = app_config.dark_mode;
         *init_ctx.settings.display_name.write() = app_config.network.display_name.clone();
         *init_ctx.net.allow_remote_control.write() = app_config.network.allow_remote_control;
-        *init_ctx.net.status.write() = if app_config.network.enabled {
-            "已启用".to_string()
-        } else {
-            String::new()
+        *init_ctx.net.status.write() = match network_mode::current() {
+            NetworkMode::Lan => "已启用".to_string(),
+            NetworkMode::Offline => "离线模式".to_string(),
+            NetworkMode::LoopbackTest => "回环测试模式".to_string(),
         };
 
         let audio_status = {
             let mut audio = audio_ref_hook.borrow_mut();
             if let Some(audio) = audio.as_mut() {
                 audio.set_mode(configured_mode);
-                audio.set_volume(0.5);
+                audio.set_volume(configured_volume);
                 format!("音频正常 ({} 个音效)", audio.sound_count())
             } else {
                 "无音频设备".to_string()
@@ -150,7 +231,15 @@ fn App() -> Element {
         *init_ctx.audio.audio_status.write() = audio_status;
 
         create_router(ctx_hook.clone(), audio_ref_hook.clone());
-        set_router_user_mute(false);
+        set_router_user_mute(app_config.muted);
+        dioxus::document::eval(&format!(
+            r#"document.documentElement.setAttribute("data-theme", "{}")"#,
+            if app_config.dark_mode {
+                "dark"
+            } else {
+                "light"
+            }
+        ));
 
         // Create the typed channel that bridges the async networking
         // runtime with the UI thread.
@@ -196,6 +285,9 @@ fn App() -> Element {
             name: (*peer.name.read()).clone(),
             address: (*peer.address.read()).clone(),
             is_connected: *peer.is_connected.read(),
+            route_active: *peer.route_active.read(),
+            approval_pending: *peer.approval_pending.read(),
+            trust_label: (*peer.trust_label.read()).clone(),
             latency_ms: *peer.latency_ms.read(),
             index: *peer.index.read(),
             node_id_string: (*peer.node_id_string.read()).clone(),
@@ -280,6 +372,7 @@ fn App() -> Element {
                     }
                     *ctx.audio.mode.write() = next;
                     *ctx.audio.mode_indicator.write() = next.name().to_string();
+                    save_config(|cfg| cfg.audio_mode = audio_mode_to_config(next).to_string());
                 }
             },
             on_toggle_mute: {
@@ -289,6 +382,7 @@ fn App() -> Element {
                     let next = !current;
                     *ctx.audio.muted.write() = next;
                     set_router_user_mute(next);
+                    save_config(|cfg| cfg.muted = next);
                 }
             },
             on_volume_changed: {
@@ -299,6 +393,7 @@ fn App() -> Element {
                     if let Some(audio) = audio_ref.borrow_mut().as_mut() {
                         audio.set_volume(v);
                     }
+                    schedule_volume_save(v);
                 }
             },
 
@@ -337,6 +432,8 @@ fn App() -> Element {
             on_close_network_settings: { let mut ctx = ctx.clone(); move |_: ()| { *ctx.net.panel_visible.write() = false; } },
             on_connect_to_peer: { let ctx = ctx.clone(); move |id: String| handle_connect_peer(ctx.clone(), id) },
             on_disconnect_peer: { let ctx = ctx.clone(); move |id: String| handle_disconnect_peer(ctx.clone(), id) },
+            on_approve_route_request: { let ctx = ctx.clone(); move |id: String| handle_route_approval(ctx.clone(), id, true) },
+            on_deny_route_request: { let ctx = ctx.clone(); move |id: String| handle_route_approval(ctx.clone(), id, false) },
             on_scan_peers: { let ctx = ctx.clone(); move |_: ()| handle_scan_peers(ctx.clone()) },
             on_toggle_remote_control: { let ctx = ctx.clone(); move |_: ()| handle_toggle_remote_control(ctx.clone()) },
             on_route_toggled: { let ctx = ctx.clone(); move |(row, col, value): (i32, i32, bool)| handle_route_toggled(ctx.clone(), row, col, value) },

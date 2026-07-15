@@ -13,8 +13,25 @@
 //!   - Does the peer receive the second sender's packet (after draining self-echoes)?
 //!   - Same questions for broadcast.
 //!
-//! Run with:
-//!     cargo test --test test_udp_transport -- --nocapture --test-threads=1
+//! # Real network traffic -- double opt-in required
+//!
+//! Every test in this file opens real UDP multicast (`239.255.42.99`) and
+//! broadcast (`255.255.255.255`) sockets on fixed ports (4242-4245) and
+//! sends real packets on the LAN interface. This file does not compile at
+//! all unless the `real-network-tests` Cargo feature is enabled, and every
+//! test is additionally `#[ignore]`d and panics immediately unless the
+//! `VOCAL_CALCULATOR_ALLOW_LAN_TESTS=1` environment variable is set. Both
+//! gates must be satisfied to actually run these tests:
+//!
+//!     cargo test --test test_udp_transport --features real-network-tests \
+//!         -- --ignored --nocapture --test-threads=1
+//!
+//! with `VOCAL_CALCULATOR_ALLOW_LAN_TESTS=1` set in the environment. Do not
+//! run this on a shared/CI machine without understanding that it will emit
+//! real multicast/broadcast packets on whatever network the host is attached
+//! to.
+
+#![cfg(feature = "real-network-tests")]
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
@@ -40,6 +57,23 @@ const MSG_B_TO_A: &[u8] = b"hello-from-B";
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Panics unless `VOCAL_CALCULATOR_ALLOW_LAN_TESTS=1` is set in the
+/// environment. Every test in this file calls this first, so that even a
+/// direct `cargo test --features real-network-tests -- --ignored` run
+/// (bypassing the `#[ignore]` ergonomics) still requires an explicit,
+/// separate opt-in before touching real network sockets.
+fn require_lan_opt_in() {
+    let opted_in = std::env::var("VOCAL_CALCULATOR_ALLOW_LAN_TESTS")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    assert!(
+        opted_in,
+        "this test opens real UDP multicast/broadcast sockets on the LAN; \
+         set VOCAL_CALCULATOR_ALLOW_LAN_TESTS=1 to opt in \
+         (this test is not meant to run in normal `cargo test` / CI)"
+    );
+}
 
 /// Create a UDP socket bound to `0.0.0.0:<port>` with `SO_REUSEADDR`.
 /// Converts to a non-blocking tokio `UdpSocket`.
@@ -139,7 +173,9 @@ async fn wait_for_packet(
 /// With loopback enabled, the sender also receives its own packet. This test
 /// drains self-echoes before checking the reverse direction.
 #[tokio::test]
+#[ignore = "real LAN traffic — see doc header"]
 async fn multicast_send_recv() {
+    require_lan_opt_in();
     println!("================================================================");
     println!("  MULTICAST TEST (239.255.42.99:{MULTICAST_PORT})");
     println!("================================================================");
@@ -275,7 +311,9 @@ async fn multicast_send_recv() {
 
 /// Broadcast test: two sockets on port 4243 with SO_BROADCAST, exchange messages.
 #[tokio::test]
+#[ignore = "real LAN traffic — see doc header"]
 async fn broadcast_send_recv() {
+    require_lan_opt_in();
     println!("================================================================");
     println!("  BROADCAST TEST (255.255.255.255:{BROADCAST_PORT})");
     println!("================================================================");
@@ -384,7 +422,9 @@ async fn broadcast_send_recv() {
 /// Verifies that a single socket receives its own multicast packet (loopback).
 /// This is the simplest possible multicast sanity check.
 #[tokio::test]
+#[ignore = "real LAN traffic — see doc header"]
 async fn multicast_self_loopback() {
+    require_lan_opt_in();
     println!("================================================================");
     println!("  MULTICAST SELF-LOOPBACK TEST");
     println!("================================================================\n");
@@ -426,7 +466,9 @@ async fn multicast_self_loopback() {
 
 /// Verifies that a single socket receives its own broadcast packet (loopback).
 #[tokio::test]
+#[ignore = "real LAN traffic — see doc header"]
 async fn broadcast_self_loopback() {
+    require_lan_opt_in();
     println!("================================================================");
     println!("  BROADCAST SELF-LOOPBACK TEST");
     println!("================================================================\n");

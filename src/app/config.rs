@@ -23,11 +23,20 @@ fn generate_random_name() -> String {
 
 /// Network-related configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct NetworkConfig {
     pub enabled: bool,
     pub display_name: String,
     pub allow_remote_control: bool,
     pub conflict_policy: String,
+    /// Explicit network mode ("lan" | "offline" | "loopback-test"), as
+    /// parsed by [`crate::app::network_mode`]. `None` when absent from
+    /// an older config file; in that case `enabled` is used as a legacy
+    /// fallback (see `resolve_network_mode`). This field intentionally
+    /// has no default other than `None` so that the legacy migration
+    /// path can be distinguished from an explicit choice.
+    #[serde(default)]
+    pub mode: Option<String>,
 }
 
 impl Default for NetworkConfig {
@@ -37,14 +46,19 @@ impl Default for NetworkConfig {
             display_name: generate_random_name(),
             allow_remote_control: false,
             conflict_policy: "interleaved".to_string(),
+            mode: None,
         }
     }
 }
 
 /// Application configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AppConfig {
     pub audio_mode: String,
+    pub volume: f64,
+    pub muted: bool,
+    pub dark_mode: bool,
     pub music_assets_path: Option<String>,
     pub network: NetworkConfig,
 }
@@ -53,6 +67,9 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             audio_mode: "normal".to_string(),
+            volume: 0.5,
+            muted: false,
+            dark_mode: false,
             music_assets_path: None,
             network: NetworkConfig::default(),
         }
@@ -97,6 +114,9 @@ mod tests {
         let deserialized: AppConfig =
             toml::from_str(&serialized).expect("deserialization should succeed");
         assert_eq!(original.audio_mode, deserialized.audio_mode);
+        assert_eq!(original.volume, deserialized.volume);
+        assert_eq!(original.muted, deserialized.muted);
+        assert_eq!(original.dark_mode, deserialized.dark_mode);
         assert_eq!(original.music_assets_path, deserialized.music_assets_path);
         assert_eq!(original.network.enabled, deserialized.network.enabled);
         assert_eq!(
@@ -135,6 +155,9 @@ mod tests {
     fn app_config_defaults() {
         let cfg = AppConfig::default();
         assert_eq!(cfg.audio_mode, "normal");
+        assert_eq!(cfg.volume, 0.5);
+        assert!(!cfg.muted);
+        assert!(!cfg.dark_mode);
         assert!(cfg.music_assets_path.is_none());
     }
 
@@ -149,6 +172,9 @@ mod tests {
         // Simulate the same fallback behaviour `AppConfig::load` uses.
         let cfg = result.unwrap_or_default();
         assert_eq!(cfg.audio_mode, "normal");
+        assert_eq!(cfg.volume, 0.5);
+        assert!(!cfg.muted);
+        assert!(!cfg.dark_mode);
         assert!(cfg.music_assets_path.is_none());
         assert!(cfg.network.enabled);
         assert_eq!(cfg.network.conflict_policy, "interleaved");
@@ -156,14 +182,11 @@ mod tests {
 
     #[test]
     fn altered_toml_values_parse_correctly() {
-        // Only set audio_mode; everything else should get serde defaults if
-        // serde(default) were used, but since it is not, deserialization
-        // requires all fields.  A fully-valid minimal TOML must include every
-        // field, so test that the full default serialises and round-trips.
-        //
-        // Instead, test a complete but altered TOML:
         let toml_str = r#"
 audio_mode = "silent"
+volume = 0.25
+muted = true
+dark_mode = true
 music_assets_path = "/assets"
 
 [network]
@@ -174,23 +197,82 @@ conflict_policy = "strict"
 "#;
         let cfg: AppConfig = toml::from_str(toml_str).expect("valid TOML should parse");
         assert_eq!(cfg.audio_mode, "silent");
+        assert_eq!(cfg.volume, 0.25);
+        assert!(cfg.muted);
+        assert!(cfg.dark_mode);
         assert_eq!(cfg.music_assets_path.as_deref(), Some("/assets"));
         assert!(!cfg.network.enabled);
         assert_eq!(cfg.network.display_name, "TestHost");
         assert!(!cfg.network.allow_remote_control);
         assert_eq!(cfg.network.conflict_policy, "strict");
+        assert!(cfg.network.mode.is_none());
+    }
+
+    #[test]
+    fn missing_fields_parse_with_defaults() {
+        let toml_str = r#"
+audio_mode = "music"
+
+[network]
+display_name = "Existing"
+"#;
+        let cfg: AppConfig = toml::from_str(toml_str).expect("missing fields should default");
+        assert_eq!(cfg.audio_mode, "music");
+        assert_eq!(cfg.volume, 0.5);
+        assert!(!cfg.muted);
+        assert!(!cfg.dark_mode);
+        assert!(cfg.network.enabled);
+        assert_eq!(cfg.network.display_name, "Existing");
+        assert!(!cfg.network.allow_remote_control);
+        assert_eq!(cfg.network.conflict_policy, "interleaved");
+        assert!(cfg.network.mode.is_none());
+    }
+
+    #[test]
+    fn legacy_toml_without_mode_field_migrates_via_resolve_network_mode() {
+        use crate::app::network_mode::{NetworkMode, resolve_network_mode};
+
+        let toml_str = r#"
+audio_mode = "normal"
+
+[network]
+enabled = false
+display_name = "LegacyHost"
+"#;
+        let cfg: AppConfig = toml::from_str(toml_str).expect("legacy TOML should parse");
+        assert!(cfg.network.mode.is_none());
+        let resolved = resolve_network_mode(&[], None, &cfg.network)
+            .expect("legacy config should resolve without error");
+        assert_eq!(resolved, NetworkMode::Offline);
+
+        let toml_str_enabled = r#"
+audio_mode = "normal"
+
+[network]
+enabled = true
+display_name = "LegacyHost"
+"#;
+        let cfg_enabled: AppConfig =
+            toml::from_str(toml_str_enabled).expect("legacy TOML should parse");
+        let resolved_enabled = resolve_network_mode(&[], None, &cfg_enabled.network)
+            .expect("legacy config should resolve without error");
+        assert_eq!(resolved_enabled, NetworkMode::Lan);
     }
 
     #[test]
     fn roundtrip_with_non_default_values() {
         let cfg = AppConfig {
             audio_mode: "silent".to_string(),
+            volume: 0.75,
+            muted: true,
+            dark_mode: true,
             music_assets_path: Some("/custom/path".to_string()),
             network: NetworkConfig {
                 enabled: false,
                 display_name: "MyDevice".to_string(),
                 allow_remote_control: false,
                 conflict_policy: "strict".to_string(),
+                mode: None,
             },
         };
 
@@ -198,6 +280,9 @@ conflict_policy = "strict"
         let deserialized: AppConfig =
             toml::from_str(&serialized).expect("deserialization should succeed");
         assert_eq!(cfg.audio_mode, deserialized.audio_mode);
+        assert_eq!(cfg.volume, deserialized.volume);
+        assert_eq!(cfg.muted, deserialized.muted);
+        assert_eq!(cfg.dark_mode, deserialized.dark_mode);
         assert_eq!(cfg.music_assets_path, deserialized.music_assets_path);
         assert_eq!(cfg.network.enabled, deserialized.network.enabled);
         assert_eq!(cfg.network.display_name, deserialized.network.display_name);

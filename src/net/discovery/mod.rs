@@ -4,6 +4,8 @@ mod peer_table;
 
 use std::net::SocketAddr;
 
+use sha2::{Digest, Sha256};
+
 use mdns::MdnsDiscovery;
 use multicast::MulticastTransport;
 
@@ -12,6 +14,55 @@ use crate::net::protocol::{
 };
 
 pub use peer_table::PeerTable;
+
+/// Whether mDNS discovery should be attempted on this platform.
+///
+/// mDNS is disabled on Windows by design: the bundled `mdns-sd` daemon has
+/// proven unreliable across Windows Firewall / adapter configurations, and
+/// UDP multicast fallback on the fixed [`crate::net::protocol::LAN_FIXED_PORT`]
+/// covers the same LAN discovery need there. Pure function of the OS name
+/// so it can be unit-tested without platform-specific `cfg`.
+pub(crate) fn should_start_mdns(target_os: &str) -> bool {
+    target_os != "windows"
+}
+
+/// Pure construction of an `AnnounceV2` message from explicit fields.
+///
+/// This is the seam [`DiscoveryService::announce_msg`] delegates to; it
+/// exists separately so the wire-format contract (in particular, that
+/// `session_port` carries whatever port was passed in -- [`crate::net::protocol::SESSION_TCP_PORT`]
+/// in production) can be unit-tested without constructing any socket.
+fn make_announce(
+    node_id: NodeId,
+    display_name: &str,
+    tcp_port: u16,
+    session_port: u16,
+    hostname: &str,
+) -> DiscoveryMessage {
+    DiscoveryMessage::AnnounceV2 {
+        node_id,
+        display_name: display_name.to_string(),
+        tcp_port,
+        capabilities: Capabilities {
+            can_execute: true,
+            can_control: true,
+            protocol_version: PROTOCOL_VERSION,
+        },
+        transport_hint: TransportHint::Multicast,
+        hostname: hostname.to_string(),
+        session_port,
+    }
+}
+
+/// Short hex fingerprint of an Ed25519 public key for discovery advertisements.
+pub fn public_key_fingerprint(public_key: &[u8; 32]) -> String {
+    let digest = Sha256::digest(public_key);
+    digest
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
 
 /// Endpoint information produced by discovery transports.
 #[derive(Debug, Clone)]
@@ -28,12 +79,15 @@ pub struct DiscoveryEndpoint {
 ///
 /// Identity confirmation, authorization, and routing matrix exchange happen on
 /// the session TCP connection after the normal handshake. Discovery no longer
-/// owns a TCP listener, so there is no fixed discovery/session port conflict.
+/// owns a TCP listener; the session endpoint it advertises is the fixed
+/// [`crate::net::protocol::SESSION_TCP_PORT`] in `Lan` mode, not a runtime-assigned ephemeral port.
 pub struct DiscoveryService {
     multicast: Option<MulticastTransport>,
     mdns: Option<MdnsDiscovery>,
-    announce_msg: DiscoveryMessage,
     local_node_id: NodeId,
+    hostname: String,
+    tcp_port: u16,
+    session_port: u16,
 }
 
 impl DiscoveryService {
@@ -56,9 +110,12 @@ impl DiscoveryService {
 
     /// Test hook for supplying a legacy TCP port field.
     ///
-    /// The discovery TCP listener has been removed. Runtime code passes the
-    /// same value for `tcp_port` and `session_port`; legacy AnnounceV2 peers can
-    /// still read `tcp_port`, but it now names the session endpoint.
+    /// The discovery TCP listener has been removed. Production runtime code
+    /// passes [`crate::net::protocol::SESSION_TCP_PORT`] for both `tcp_port` and `session_port`
+    /// (the fixed LAN port); legacy AnnounceV2 peers can still read
+    /// `tcp_port`, but it now names the session endpoint. Tests may pass
+    /// other values to exercise multiple in-process instances without
+    /// binding the same fixed port twice.
     pub async fn new_with_port(
         local_node_id: NodeId,
         display_name: String,
@@ -70,26 +127,17 @@ impl DiscoveryService {
             .map(|h| h.to_string_lossy().to_string())
             .unwrap_or_else(|_| "unknown".to_string());
 
-        let announce_msg = DiscoveryMessage::AnnounceV2 {
-            node_id: local_node_id,
-            display_name: display_name.clone(),
-            tcp_port,
-            capabilities: Capabilities {
-                can_execute: true,
-                can_control: true,
-                protocol_version: PROTOCOL_VERSION,
-            },
-            transport_hint: TransportHint::Multicast,
-            hostname,
-            session_port,
-        };
-
-        let mdns = match MdnsDiscovery::new(local_node_id, display_name, session_port, public_key) {
-            Ok(mdns) => Some(mdns),
-            Err(e) => {
-                log::warn!("mDNS discovery unavailable: {}", e);
-                None
+        let mdns = if should_start_mdns(std::env::consts::OS) {
+            match MdnsDiscovery::new(local_node_id, display_name, session_port, public_key) {
+                Ok(mdns) => Some(mdns),
+                Err(e) => {
+                    log::warn!("mDNS discovery unavailable: {}", e);
+                    None
+                }
             }
+        } else {
+            log::info!("mDNS disabled on this platform by design");
+            None
         };
         let multicast = match MulticastTransport::new().await {
             Ok(multicast) => {
@@ -111,8 +159,10 @@ impl DiscoveryService {
         Ok(Self {
             multicast,
             mdns,
-            announce_msg,
             local_node_id,
+            hostname,
+            tcp_port,
+            session_port,
         })
     }
 
@@ -125,9 +175,23 @@ impl DiscoveryService {
         }
     }
 
-    /// Return a reference to the pre-built announcement message.
-    pub fn announce_msg(&self) -> &DiscoveryMessage {
-        &self.announce_msg
+    /// Build an announcement message using the current display name.
+    pub fn announce_msg(&self, display_name: &str) -> DiscoveryMessage {
+        make_announce(
+            self.local_node_id,
+            display_name,
+            self.tcp_port,
+            self.session_port,
+            &self.hostname,
+        )
+    }
+
+    /// Re-register mDNS metadata with the current display name.
+    pub fn update_display_name(&self, display_name: &str) -> Result<(), anyhow::Error> {
+        if let Some(mdns) = &self.mdns {
+            mdns.update_display_name(display_name)?;
+        }
+        Ok(())
     }
 
     /// Wait for the next UDP multicast announcement.
@@ -202,5 +266,56 @@ impl DiscoveryService {
             transport_hint,
             public_key_fingerprint: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::net::protocol::{
+        DISCOVERY_MULTICAST_ADDR, DISCOVERY_PORT, LAN_FIXED_PORT, SESSION_TCP_PORT,
+    };
+
+    #[test]
+    fn mdns_disabled_on_windows() {
+        assert!(!should_start_mdns("windows"));
+    }
+
+    #[test]
+    fn mdns_enabled_on_non_windows() {
+        assert!(should_start_mdns("linux"));
+        assert!(should_start_mdns("macos"));
+        assert!(should_start_mdns("android"));
+    }
+
+    #[test]
+    fn fixed_port_constants_agree() {
+        assert_eq!(SESSION_TCP_PORT, DISCOVERY_PORT);
+        assert_eq!(DISCOVERY_PORT, LAN_FIXED_PORT);
+        assert_eq!(LAN_FIXED_PORT, 42420);
+        assert_eq!(DISCOVERY_MULTICAST_ADDR, "224.0.0.167");
+    }
+
+    #[test]
+    fn make_announce_carries_fixed_session_port() {
+        let node_id = NodeId::new_v4();
+        let msg = make_announce(
+            node_id,
+            "Test Node",
+            SESSION_TCP_PORT,
+            SESSION_TCP_PORT,
+            "host",
+        );
+        match msg {
+            DiscoveryMessage::AnnounceV2 {
+                session_port,
+                tcp_port,
+                ..
+            } => {
+                assert_eq!(session_port, SESSION_TCP_PORT);
+                assert_eq!(tcp_port, SESSION_TCP_PORT);
+            }
+            other => panic!("expected AnnounceV2, got {other:?}"),
+        }
     }
 }

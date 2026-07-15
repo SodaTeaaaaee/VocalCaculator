@@ -618,11 +618,19 @@
   border-color: color-mix(in srgb, var(--matrix-checked), var(--card-inset-edge) 40%);
 }
 
+.peer-row--route-active {
+  background: color-mix(in srgb, var(--matrix-checked), var(--card-inset-bg) 88%);
+}
+
+.peer-row--pending {
+  border-color: color-mix(in srgb, var(--color-btn-op), var(--card-inset-edge) 38%);
+}
+
 .peer-row__info {
   min-width: 0;
   flex: 1;
   display: grid;
-  grid-template-columns: 18px minmax(72px, 1fr) minmax(80px, 1.2fr) auto;
+  grid-template-columns: 18px minmax(72px, 1fr) minmax(74px, 0.8fr) minmax(80px, 1.1fr) auto;
   align-items: center;
   gap: 6px;
 }
@@ -637,8 +645,30 @@
     grid-template-columns: 18px minmax(0, 1fr) auto;
   }
 
+  .peer-row__status-icon {
+    grid-column: 1 / 2;
+    grid-row: 1;
+  }
+
+  .peer-row__name {
+    grid-column: 2 / 3;
+    grid-row: 1;
+  }
+
   .peer-row__address {
     grid-column: 2 / 4;
+    grid-row: 2;
+  }
+
+  .peer-row__trust {
+    grid-column: 3 / 4;
+    grid-row: 1;
+  }
+
+  .peer-row__latency {
+    grid-column: 2 / 4;
+    grid-row: 3;
+    text-align: left;
   }
 
   .peer-row__actions {
@@ -663,6 +693,12 @@
   color: #ffffff;
 }
 
+.peer-row__status-icon--route {
+  border-color: transparent;
+  background: var(--color-btn-op);
+  color: var(--color-btn-op-fg);
+}
+
 .peer-row__status-icon .vc-icon {
   width: 10px;
   height: 10px;
@@ -670,6 +706,7 @@
 
 .peer-row__name,
 .peer-row__address,
+.peer-row__trust,
 .peer-row__latency {
   min-width: 0;
   overflow: hidden;
@@ -687,6 +724,11 @@
 .peer-row__latency {
   text-align: right;
   color: var(--matrix-empty-fg);
+}
+
+.peer-row__trust {
+  color: var(--matrix-empty-fg);
+  text-align: center;
 }
 
 .peer-row__actions {
@@ -726,6 +768,11 @@
   min-width: 80px;
   border-color: color-mix(in srgb, var(--color-btn-eq), transparent 42%);
   color: var(--color-btn-eq);
+}
+
+.network-action-btn--approve {
+  border-color: color-mix(in srgb, var(--matrix-checked), transparent 35%);
+  color: var(--matrix-checked);
 }
 
 .network-action-btn__icon {

@@ -102,6 +102,11 @@ impl DeviceIdentity {
         self.secret_key.sign(msg)
     }
 
+    /// Return a clone of the signing key for the network handshake.
+    pub(crate) fn signing_key(&self) -> SigningKey {
+        self.secret_key.clone()
+    }
+
     /// Return the 32-byte public key.
     pub fn public_key_bytes(&self) -> [u8; PUBLIC_KEY_LENGTH] {
         self.public_key.to_bytes()
@@ -121,7 +126,7 @@ impl DeviceIdentity {
 /// Derive a deterministic UUID from an Ed25519 public key.
 ///
 /// SHA256(pubkey) -> first 16 bytes -> set UUID v5 version & variant bits.
-fn derive_node_id(public_key: &VerifyingKey) -> Uuid {
+pub(crate) fn derive_node_id(public_key: &VerifyingKey) -> Uuid {
     let hash = Sha256::digest(public_key.to_bytes());
     let mut bytes = [0u8; 16];
     bytes.copy_from_slice(&hash[..16]);

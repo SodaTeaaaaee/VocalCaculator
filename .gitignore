@@ -65,5 +65,8 @@ Thumbs.db
 .agents/
 .claude/
 
+# Agent terminal session captures (machine state, not source code)
+/terminals/
+
 # Rust dependency snapshots are local-only unless we explicitly choose to vendor.
 /vendor/

@@ -43,6 +43,12 @@ impl PeerTable {
                 existing.display_name = peer.display_name;
                 existing.address = peer.address;
                 existing.tcp_port = peer.tcp_port;
+                if peer.public_key != [0u8; 32] {
+                    existing.public_key = peer.public_key;
+                }
+                if peer.public_key_fingerprint.is_some() {
+                    existing.public_key_fingerprint = peer.public_key_fingerprint;
+                }
                 existing.last_seen = now;
             }
             None => {
@@ -131,6 +137,7 @@ mod tests {
             tcp_port: port,
             last_seen: Instant::now(),
             public_key: [0u8; 32],
+            public_key_fingerprint: None,
         }
     }
 

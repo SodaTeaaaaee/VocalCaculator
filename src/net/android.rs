@@ -71,26 +71,39 @@ impl MulticastLockGuard {
                 return Err("getSystemService(wifi) returned null".into());
             }
 
-            // 2. Get WifiManager.mLocks (MulticastLock field)
+            // 2. Create a multicast lock through the public WifiManager API.
+            let lock_tag = env
+                .new_string("vocal-calculator-discovery")
+                .map_err(|e| e.to_string())?;
             let lock_obj = env
-                .get_field(
+                .call_method(
                     &wifi_service,
-                    "mLocks",
-                    "Landroid/net/wifi/WifiManager$MulticastLock;",
+                    "createMulticastLock",
+                    "(Ljava/lang/String;)Landroid/net/wifi/WifiManager$MulticastLock;",
+                    &[JValue::from(&lock_tag)],
                 )
                 .map_err(|e| e.to_string())?
                 .l()
                 .map_err(|e| e.to_string())?;
 
             if lock_obj.is_null() {
-                return Err("WifiManager.mLocks is null".into());
+                return Err("WifiManager.createMulticastLock returned null".into());
             }
 
-            // 3. Acquire the multicast lock
+            // 3. Hold exactly one native guard for this lock object.
+            env.call_method(
+                &lock_obj,
+                "setReferenceCounted",
+                "(Z)V",
+                &[JValue::from(false)],
+            )
+            .map_err(|e| e.to_string())?;
+
+            // 4. Acquire the multicast lock.
             env.call_method(&lock_obj, "acquire", "()V", &[])
                 .map_err(|e| e.to_string())?;
 
-            // 4. Promote to a global reference so it outlives this JNI call.
+            // 5. Promote to a global reference so it outlives this JNI call.
             env.new_global_ref(&lock_obj).map_err(|e| e.to_string())?
             // env (AttachGuard) is dropped here, releasing the borrow on vm.
         };

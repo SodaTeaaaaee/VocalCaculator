@@ -10,8 +10,12 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 
+use crate::app::identity::derive_node_id;
+use crate::app::storage::DeviceTrust;
 use crate::core::action::CalcAction;
 use crate::core::calculator::{CalcResult, Calculator};
 use crate::net::protocol::*;
@@ -20,6 +24,10 @@ use crate::traits::{AudioPlayer, DisplayUpdater};
 // ---------------------------------------------------------------------------
 // Routing types
 // ---------------------------------------------------------------------------
+
+const PAIRING_CODE_DOMAIN: &[u8] = b"vocal-calculator-pairing-code-v1";
+const PAIRING_CONFIRM_DOMAIN: &[u8] = b"vocal-calculator-pairing-confirm-v1";
+const ROUTING_ROW_DOMAIN: &[u8] = b"vocal-calculator-routing-row-v1";
 
 /// Configuration that controls how the router dispatches actions.
 ///
@@ -57,6 +65,49 @@ pub struct RoutingMatrix {
     my_id: NodeId,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PairedDeviceTrust {
+    public_key: [u8; 32],
+    trust_state: DeviceTrust,
+}
+
+#[derive(Debug, Clone)]
+struct SignedRoutingRow {
+    owner: NodeId,
+    version: u64,
+    cells: Vec<(NodeId, NodeId, bool)>,
+    owner_public_key: [u8; 32],
+    signature: Vec<u8>,
+}
+
+impl SignedRoutingRow {
+    fn into_message(self) -> NetworkMessage {
+        NetworkMessage::RoutingRowAnnounce {
+            owner: self.owner,
+            version: self.version,
+            cells: self.cells,
+            owner_public_key: self.owner_public_key,
+            signature: self.signature,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PendingRouteApproval {
+    request_id: u64,
+    controller: NodeId,
+    executor: NodeId,
+}
+
+fn canonicalize_cells(cells: &mut [(NodeId, NodeId, bool)]) {
+    cells.sort_by(|a, b| {
+        a.0.as_bytes()
+            .cmp(b.0.as_bytes())
+            .then_with(|| a.1.as_bytes().cmp(b.1.as_bytes()))
+            .then_with(|| a.2.cmp(&b.2))
+    });
+}
+
 impl RoutingMatrix {
     /// Create an empty routing matrix for the given local node.
     pub fn new(my_id: NodeId) -> Self {
@@ -71,6 +122,23 @@ impl RoutingMatrix {
     pub fn add_peer(&mut self, node_id: NodeId) {
         self.entries.insert((node_id, node_id), true);
         self.row_versions.entry(node_id).or_insert(0);
+    }
+
+    /// Return the current version for a row owner.
+    pub fn row_version(&self, owner: NodeId) -> Option<u64> {
+        self.row_versions.get(&owner).copied()
+    }
+
+    /// Return a sorted snapshot of a single owner's row.
+    pub fn row_cells(&self, owner: NodeId) -> Vec<(NodeId, NodeId, bool)> {
+        let mut cells: Vec<_> = self
+            .entries
+            .iter()
+            .filter(|((controller, _), _)| *controller == owner)
+            .map(|((controller, executor), value)| (*controller, *executor, *value))
+            .collect();
+        canonicalize_cells(&mut cells);
+        cells
     }
 
     /// Remove all matrix entries involving the given peer (both as
@@ -128,6 +196,54 @@ impl RoutingMatrix {
             self.entries.insert((controller, executor), value);
             self.row_versions.insert(controller, version);
         }
+    }
+
+    /// Replace a row after its owner signature has been verified.
+    ///
+    /// Unknown version-0 rows are accepted so a peer can relay another
+    /// owner's initial self-control row. Existing rows only move forward by
+    /// version. The local row is never overwritten by an equal-version
+    /// relayed row.
+    pub fn apply_authorized_row(
+        &mut self,
+        owner: NodeId,
+        version: u64,
+        cells: &[(NodeId, NodeId, bool)],
+    ) -> bool {
+        let current = self.row_versions.get(&owner).copied();
+        let is_newer = match current {
+            Some(current) if owner == self.my_id => version > current,
+            Some(current) => version > current,
+            None => true,
+        };
+        if !is_newer {
+            log::debug!(
+                "RoutingMatrix::apply_authorized_row: ignoring stale row from owner {} (v{} <= {:?})",
+                owner,
+                version,
+                current,
+            );
+            return false;
+        }
+
+        self.entries
+            .retain(|(controller, _), _| *controller != owner);
+        for &(controller, executor, value) in cells {
+            if controller != owner {
+                log::warn!(
+                    "RoutingMatrix::apply_authorized_row: cell ({}, {}) owner mismatch (expected {})",
+                    controller,
+                    executor,
+                    owner,
+                );
+                continue;
+            }
+            self.entries.insert((controller, executor), value);
+        }
+        self.row_versions.insert(owner, version);
+        self.entries.entry((self.my_id, self.my_id)).or_insert(true);
+        self.row_versions.entry(self.my_id).or_insert(0);
+        true
     }
 
     /// Apply a routing snapshot from a remote peer, merging into the local
@@ -293,6 +409,21 @@ struct RouterInner {
     pending_control_request: Option<NodeId>,
     /// Request id for the current pending route request.
     pending_route_request_id: Option<u64>,
+    /// Inbound route requests waiting for explicit user approval.
+    pending_route_approvals: HashMap<NodeId, PendingRouteApproval>,
+    /// Verified remote public keys learned from the TCP handshake.
+    peer_public_keys: HashMap<NodeId, [u8; 32]>,
+    /// Local public key advertised during the TCP handshake.
+    local_public_key: Option<[u8; 32]>,
+    /// Local signing key used for pairing confirmations and signed row announce.
+    local_signing_key: Option<SigningKey>,
+    /// Paired-device trust policy keyed by node id and bound to public key.
+    paired_devices: HashMap<NodeId, PairedDeviceTrust>,
+    /// Inbound pairing requests waiting for the same user approval as a
+    /// RouteRequest.
+    pending_pairings: HashMap<NodeId, [u8; 32]>,
+    /// Latest owner-signed routing rows that can be relayed safely.
+    signed_rows: HashMap<NodeId, SignedRoutingRow>,
     /// When true, local audio playback is suppressed in apply_result().
     /// Set by the UI (user toggle) or automatically when controlling a
     /// remote executor (routing mute).
@@ -305,6 +436,9 @@ struct RouterInner {
     /// when a `ConnectionFailed` message arrives. Cleared by the poll
     /// timer after displaying the error to the user.
     last_connection_error: Option<String>,
+    /// When [`ConflictPolicy::Exclusive`] is active, only this remote
+    /// controller may send inbound actions to this node.
+    exclusive_controller: Option<NodeId>,
 }
 
 impl Clone for Router {
@@ -344,13 +478,54 @@ impl Router {
             runtime_handle: None,
             pending_control_request: None,
             pending_route_request_id: None,
+            pending_route_approvals: HashMap::new(),
+            peer_public_keys: HashMap::new(),
+            local_public_key: None,
+            local_signing_key: None,
+            paired_devices: HashMap::new(),
+            pending_pairings: HashMap::new(),
+            signed_rows: HashMap::new(),
             audio_muted: false,
             last_state_update_seq: 0,
             last_connection_error: None,
+            exclusive_controller: None,
         };
         Self {
             inner: Rc::new(RefCell::new(inner)),
         }
+    }
+
+    fn note_controller_route_enabled(inner: &mut RouterInner, controller: NodeId) {
+        if inner.config.conflict_policy == ConflictPolicy::Exclusive {
+            inner.exclusive_controller = Some(controller);
+        }
+    }
+
+    fn note_controller_route_disabled(inner: &mut RouterInner, controller: NodeId) {
+        if inner.exclusive_controller == Some(controller) {
+            inner.exclusive_controller = None;
+        }
+    }
+
+    fn exclusive_allows_controller(inner: &RouterInner, controller: NodeId) -> bool {
+        if inner.config.conflict_policy != ConflictPolicy::Exclusive {
+            return true;
+        }
+        let my_id = inner.local_node_id;
+        let remote_controllers: Vec<NodeId> = inner
+            .routing_matrix
+            .my_controllers()
+            .into_iter()
+            .filter(|id| *id != my_id)
+            .collect();
+        if remote_controllers.is_empty() {
+            return true;
+        }
+        let allowed = inner
+            .exclusive_controller
+            .filter(|id| remote_controllers.contains(id))
+            .or_else(|| remote_controllers.first().copied());
+        allowed == Some(controller)
     }
 
     // ---- Configuration ---------------------------------------------------
@@ -366,9 +541,142 @@ impl Router {
         self.inner.borrow_mut().outgoing_tx = Some(tx);
     }
 
+    /// Store this device's network identity for pairing and signed row announce.
+    pub fn set_local_identity(&self, public_key: [u8; 32], signing_key: SigningKey) {
+        let mut inner = self.inner.borrow_mut();
+        inner.local_public_key = Some(public_key);
+        inner.local_signing_key = Some(signing_key);
+    }
+
     /// Enable or disable acceptance of remote control actions.
+    ///
+    /// This only allows paired/trusted peers to enter the route authorization
+    /// flow; it does not grant control to arbitrary connected peers.
     pub fn set_allow_remote_control(&self, allow: bool) {
         self.inner.borrow_mut().config.allow_remote_control = allow;
+    }
+
+    /// Replace the paired-device trust table used for route authorization.
+    pub fn set_paired_devices<I>(&self, devices: I)
+    where
+        I: IntoIterator<Item = (NodeId, [u8; 32], DeviceTrust)>,
+    {
+        let mut inner = self.inner.borrow_mut();
+        inner.paired_devices = devices
+            .into_iter()
+            .map(|(node_id, public_key, trust_state)| {
+                (
+                    node_id,
+                    PairedDeviceTrust {
+                        public_key,
+                        trust_state,
+                    },
+                )
+            })
+            .collect();
+    }
+
+    /// Insert or update one paired-device trust record in the router cache.
+    pub fn upsert_paired_device(
+        &self,
+        node_id: NodeId,
+        public_key: [u8; 32],
+        trust_state: DeviceTrust,
+    ) {
+        self.inner.borrow_mut().paired_devices.insert(
+            node_id,
+            PairedDeviceTrust {
+                public_key,
+                trust_state,
+            },
+        );
+    }
+
+    /// Return the trust state currently cached for a peer.
+    pub fn peer_trust_state(&self, node_id: &NodeId) -> Option<DeviceTrust> {
+        self.inner
+            .borrow()
+            .paired_devices
+            .get(node_id)
+            .map(|trust| trust.trust_state)
+    }
+
+    /// Return the verified session public key for a connected peer.
+    pub fn remote_public_key(&self, node_id: &NodeId) -> Option<[u8; 32]> {
+        self.inner.borrow().peer_public_keys.get(node_id).copied()
+    }
+
+    /// Return peers with pending pairing requests.
+    pub fn pending_pairing_devices(&self) -> HashSet<NodeId> {
+        self.inner
+            .borrow()
+            .pending_pairings
+            .keys()
+            .copied()
+            .collect()
+    }
+
+    /// Hash shown by `PairingRequest`; currently binds the two session keys.
+    pub fn pairing_code_hash(
+        requester_public_key: [u8; 32],
+        accepter_public_key: [u8; 32],
+    ) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(PAIRING_CODE_DOMAIN);
+        hasher.update(requester_public_key);
+        hasher.update(accepter_public_key);
+        hasher.finalize().into()
+    }
+
+    /// Canonical payload signed by the pairing accepter.
+    pub fn pairing_confirm_payload(
+        signer_public_key: [u8; 32],
+        peer_public_key: [u8; 32],
+    ) -> Vec<u8> {
+        let mut payload = Vec::with_capacity(
+            PAIRING_CONFIRM_DOMAIN.len() + signer_public_key.len() + peer_public_key.len(),
+        );
+        payload.extend_from_slice(PAIRING_CONFIRM_DOMAIN);
+        payload.extend_from_slice(&signer_public_key);
+        payload.extend_from_slice(&peer_public_key);
+        payload
+    }
+
+    /// Verify a `PairingConfirm` signature from `signer_public_key`.
+    pub fn verify_pairing_confirm_signature(
+        signer_public_key: [u8; 32],
+        peer_public_key: [u8; 32],
+        signature: &[u8],
+    ) -> bool {
+        let Ok(verifying_key) = VerifyingKey::from_bytes(&signer_public_key) else {
+            return false;
+        };
+        let Ok(signature) = Signature::from_slice(signature) else {
+            return false;
+        };
+        let payload = Self::pairing_confirm_payload(signer_public_key, peer_public_key);
+        verifying_key.verify(&payload, &signature).is_ok()
+    }
+
+    /// Canonical payload signed by a routing-row owner.
+    pub fn routing_row_signature_payload(
+        owner: NodeId,
+        version: u64,
+        cells: &[(NodeId, NodeId, bool)],
+    ) -> Vec<u8> {
+        let mut sorted_cells = cells.to_vec();
+        canonicalize_cells(&mut sorted_cells);
+        let mut payload =
+            Vec::with_capacity(ROUTING_ROW_DOMAIN.len() + 16 + 8 + sorted_cells.len() * 33);
+        payload.extend_from_slice(ROUTING_ROW_DOMAIN);
+        payload.extend_from_slice(owner.as_bytes());
+        payload.extend_from_slice(&version.to_le_bytes());
+        for (controller, executor, value) in sorted_cells {
+            payload.extend_from_slice(controller.as_bytes());
+            payload.extend_from_slice(executor.as_bytes());
+            payload.push(u8::from(value));
+        }
+        payload
     }
 
     /// Set the conflict resolution policy for concurrent actions.
@@ -414,6 +722,7 @@ impl Router {
             )
         };
         if has_session {
+            self.send_pairing_request_if_needed(node_id);
             self.send_message_to(
                 node_id,
                 &NetworkMessage::RouteRequest {
@@ -497,6 +806,7 @@ impl Router {
             }
         };
         if let Some((my_id, request_id)) = pending_request {
+            self.send_pairing_request_if_needed(node_id);
             self.send_message_to(
                 node_id,
                 &NetworkMessage::RouteRequest {
@@ -508,11 +818,22 @@ impl Router {
         }
     }
 
+    /// Store the verified public key for a live remote session.
+    pub fn set_remote_public_key(&self, node_id: NodeId, public_key: [u8; 32]) {
+        self.inner
+            .borrow_mut()
+            .peer_public_keys
+            .insert(node_id, public_key);
+    }
+
     /// Remove a remote node from the connected set and purge all its
     /// routing matrix entries.
     pub fn remove_remote_session(&self, node_id: &NodeId) {
         let mut inner = self.inner.borrow_mut();
         inner.connected_peers.remove(node_id);
+        inner.peer_public_keys.remove(node_id);
+        inner.pending_pairings.remove(node_id);
+        inner.signed_rows.remove(node_id);
         inner.routing_matrix.remove_peer(node_id);
         if inner.pending_control_request.as_ref() == Some(node_id) {
             inner.pending_control_request = None;
@@ -563,6 +884,9 @@ impl Router {
         {
             let mut inner = self.inner.borrow_mut();
             inner.connected_peers.remove(node_id);
+            inner.peer_public_keys.remove(node_id);
+            inner.pending_pairings.remove(node_id);
+            inner.signed_rows.remove(node_id);
         }
 
         if was_controlling {
@@ -580,6 +904,7 @@ impl Router {
         // route entries locally).
         let mut inner = self.inner.borrow_mut();
         inner.routing_matrix.remove_peer(node_id);
+        inner.pending_route_approvals.remove(node_id);
         if inner.pending_control_request.as_ref() == Some(node_id) {
             inner.pending_control_request = None;
             inner.pending_route_request_id = None;
@@ -599,6 +924,59 @@ impl Router {
     /// always see an empty set and never send state snapshots.
     pub fn set_connected_peers(&self, peers: HashSet<NodeId>) {
         self.inner.borrow_mut().connected_peers = peers;
+    }
+
+    /// Return controllers whose inbound route requests await user approval.
+    pub fn pending_route_approval_controllers(&self) -> HashSet<NodeId> {
+        self.inner
+            .borrow()
+            .pending_route_approvals
+            .keys()
+            .copied()
+            .collect()
+    }
+
+    /// Approve or deny a pending inbound route request.
+    pub fn respond_to_pending_route_request(&self, controller: NodeId, approve: bool) {
+        let request = self
+            .inner
+            .borrow_mut()
+            .pending_route_approvals
+            .remove(&controller);
+        let Some(request) = request else {
+            log::debug!("No pending route approval for {}", controller);
+            return;
+        };
+
+        if approve {
+            self.grant_route_request(request.request_id, request.controller, request.executor);
+        } else {
+            self.deny_route_request(
+                request.request_id,
+                request.controller,
+                request.executor,
+                "user_denied",
+            );
+        }
+    }
+
+    /// Deny and clear all pending inbound route requests.
+    pub fn deny_all_pending_route_requests(&self, reason: &str) {
+        let requests: Vec<_> = self
+            .inner
+            .borrow_mut()
+            .pending_route_approvals
+            .drain()
+            .map(|(_, request)| request)
+            .collect();
+        for request in requests {
+            self.deny_route_request(
+                request.request_id,
+                request.controller,
+                request.executor,
+                reason,
+            );
+        }
     }
 
     // ---- Dispatch (UI entry point) ---------------------------------------
@@ -692,17 +1070,13 @@ impl Router {
         // -- Conflict policy check ------------------------------------------
         {
             let inner = self.inner.borrow();
-            match inner.config.conflict_policy {
-                ConflictPolicy::Exclusive => {
-                    log::trace!(
-                        "Exclusive policy: accepting action from controller {}",
-                        envelope.source_id,
-                    );
-                }
-                ConflictPolicy::Interleaved => {
-                    // All actions from authorised controllers accepted,
-                    // applied in arrival order.
-                }
+            if !Self::exclusive_allows_controller(&inner, envelope.source_id) {
+                log::warn!(
+                    "Rejected action from {}: exclusive policy grants control to {:?}",
+                    envelope.source_id,
+                    inner.exclusive_controller,
+                );
+                return;
             }
         }
 
@@ -739,9 +1113,38 @@ impl Router {
     pub fn handle_network_message(&self, sender_id: NodeId, msg: NetworkMessage) {
         match msg {
             NetworkMessage::Action(envelope) => {
+                if sender_id != envelope.source_id {
+                    log::warn!(
+                        "Rejected Action: sender {} does not match envelope source {}",
+                        sender_id,
+                        envelope.source_id,
+                    );
+                    return;
+                }
                 self.handle_remote_action(envelope);
             }
             NetworkMessage::StateUpdate(snapshot) => {
+                {
+                    let inner = self.inner.borrow();
+                    let my_id = inner.local_node_id;
+                    let sender_is_active_remote_target = sender_id != my_id
+                        && inner.connected_peers.contains(&sender_id)
+                        && inner
+                            .routing_matrix
+                            .entries
+                            .get(&(my_id, sender_id))
+                            .copied()
+                            .unwrap_or(false)
+                        && inner.pending_control_request != Some(sender_id);
+                    if !sender_is_active_remote_target {
+                        log::warn!(
+                            "Rejected StateUpdate from {}: not an active remote execution target",
+                            sender_id,
+                        );
+                        return;
+                    }
+                }
+
                 // Authoritative state from the executing node -- reset the
                 // local calculator so its internal state matches the remote,
                 // then push the display values to the UI.
@@ -788,6 +1191,18 @@ impl Router {
                 log::trace!("Received Pong in Router (should have been handled by session)");
             }
             NetworkMessage::RouteRevoke { from, to, version } => {
+                let my_id = self.inner.borrow().local_node_id;
+                let allowed = sender_id == from || (from == my_id && sender_id == to);
+                if !allowed {
+                    log::warn!(
+                        "RouteRevoke rejected: sender={} from={} to={} my_id={}",
+                        sender_id,
+                        from,
+                        to,
+                        my_id,
+                    );
+                    return;
+                }
                 self.handle_route_revoke(from, to, version);
             }
             NetworkMessage::RouteRequest {
@@ -839,12 +1254,57 @@ impl Router {
                     version,
                     cells.len(),
                 );
+                let my_id = inner.local_node_id;
                 inner.routing_matrix.apply_delta(owner, version, &cells);
+                for &(controller, executor, value) in &cells {
+                    if executor != my_id {
+                        continue;
+                    }
+                    if value {
+                        Self::note_controller_route_enabled(&mut inner, controller);
+                    } else {
+                        Self::note_controller_route_disabled(&mut inner, controller);
+                    }
+                }
+            }
+            NetworkMessage::RoutingRowRequest { owner } => {
+                self.handle_routing_row_request(sender_id, owner);
+            }
+            NetworkMessage::RoutingRowAnnounce {
+                owner,
+                version,
+                cells,
+                owner_public_key,
+                signature,
+            } => {
+                self.handle_routing_row_announce(
+                    sender_id,
+                    owner,
+                    version,
+                    cells,
+                    owner_public_key,
+                    signature,
+                );
             }
             NetworkMessage::RoutingSync { entries } => {
                 let mut inner = self.inner.borrow_mut();
-                log::debug!("RoutingSync from {} ({} entries)", sender_id, entries.len());
-                inner.routing_matrix.apply_sync(&entries);
+                let filtered_entries: Vec<_> = entries
+                    .into_iter()
+                    .filter(|(controller, _, _, _)| *controller == sender_id)
+                    .collect();
+                if filtered_entries.is_empty() {
+                    log::warn!(
+                        "RoutingSync from {} rejected: no entries owned by sender",
+                        sender_id,
+                    );
+                    return;
+                }
+                log::debug!(
+                    "RoutingSync from {} accepted {} sender-owned entries",
+                    sender_id,
+                    filtered_entries.len()
+                );
+                inner.routing_matrix.apply_sync(&filtered_entries);
             }
             NetworkMessage::ConnectionFailed {
                 addr,
@@ -899,6 +1359,7 @@ impl Router {
                 // don't have stale routing state.
                 if let Some((my_id, peer, version)) = revert_info {
                     self.broadcast_routing_delta(my_id, version, &[(my_id, peer, false)]);
+                    self.broadcast_signed_local_row_announce();
                 }
             }
             NetworkMessage::AuthChallenge { .. } | NetworkMessage::AuthProof { .. } => {
@@ -906,8 +1367,326 @@ impl Router {
                     "Route auth proof message received; session handshake already verified"
                 );
             }
+            NetworkMessage::PairingRequest {
+                public_key,
+                pairing_code_hash,
+            } => {
+                self.handle_pairing_request(sender_id, public_key, pairing_code_hash);
+            }
+            NetworkMessage::PairingConfirm { signature } => {
+                self.handle_pairing_confirm(sender_id, signature);
+            }
+            NetworkMessage::PairingReject => {
+                self.handle_pairing_reject(sender_id);
+            }
             other => {
                 log::debug!("Unhandled network message: {:?}", other);
+            }
+        }
+    }
+
+    // ---- Pairing handlers -----------------------------------------------
+
+    /// Send a pairing confirmation signed by the local identity.
+    pub fn send_pairing_confirm(&self, node_id: NodeId, signature: Vec<u8>) {
+        self.send_message_to(node_id, &NetworkMessage::PairingConfirm { signature });
+        self.inner.borrow_mut().pending_pairings.remove(&node_id);
+    }
+
+    /// Send a pairing rejection to a peer.
+    pub fn send_pairing_reject(&self, node_id: NodeId) {
+        self.send_message_to(node_id, &NetworkMessage::PairingReject);
+        self.inner.borrow_mut().pending_pairings.remove(&node_id);
+    }
+
+    /// Clear an in-memory pending pairing marker.
+    pub fn clear_pending_pairing(&self, node_id: &NodeId) {
+        self.inner.borrow_mut().pending_pairings.remove(node_id);
+    }
+
+    fn send_pairing_request_if_needed(&self, node_id: NodeId) {
+        let msg = {
+            let inner = self.inner.borrow();
+            if inner.paired_devices.contains_key(&node_id) {
+                return;
+            }
+            let Some(local_public_key) = inner.local_public_key else {
+                return;
+            };
+            let Some(remote_public_key) = inner.peer_public_keys.get(&node_id).copied() else {
+                return;
+            };
+            NetworkMessage::PairingRequest {
+                public_key: local_public_key,
+                pairing_code_hash: Self::pairing_code_hash(local_public_key, remote_public_key),
+            }
+        };
+        self.send_message_to(node_id, &msg);
+    }
+
+    fn handle_pairing_request(
+        &self,
+        sender_id: NodeId,
+        public_key: [u8; 32],
+        pairing_code_hash: [u8; 32],
+    ) {
+        let should_reject = {
+            let mut inner = self.inner.borrow_mut();
+            let Some(session_public_key) = inner.peer_public_keys.get(&sender_id).copied() else {
+                log::warn!(
+                    "PairingRequest rejected: missing verified key for {}",
+                    sender_id
+                );
+                return;
+            };
+            if session_public_key != public_key {
+                log::warn!(
+                    "PairingRequest rejected: sender {} public key does not match verified session",
+                    sender_id
+                );
+                true
+            } else if let Some(local_public_key) = inner.local_public_key {
+                let expected = Self::pairing_code_hash(public_key, local_public_key);
+                if expected != pairing_code_hash {
+                    log::warn!(
+                        "PairingRequest rejected: code hash mismatch for {}",
+                        sender_id
+                    );
+                    true
+                } else {
+                    inner.pending_pairings.insert(sender_id, public_key);
+                    false
+                }
+            } else {
+                inner.pending_pairings.insert(sender_id, public_key);
+                false
+            }
+        };
+
+        if should_reject {
+            self.send_pairing_reject(sender_id);
+        }
+    }
+
+    fn handle_pairing_confirm(&self, sender_id: NodeId, signature: Vec<u8>) {
+        let valid = {
+            let inner = self.inner.borrow();
+            let Some(sender_public_key) = inner.peer_public_keys.get(&sender_id).copied() else {
+                log::warn!(
+                    "PairingConfirm rejected: missing verified key for {}",
+                    sender_id
+                );
+                return;
+            };
+            let Some(local_public_key) = inner.local_public_key else {
+                log::warn!("PairingConfirm rejected: missing local public key");
+                return;
+            };
+            Self::verify_pairing_confirm_signature(sender_public_key, local_public_key, &signature)
+        };
+
+        if valid {
+            self.inner.borrow_mut().pending_pairings.remove(&sender_id);
+            log::info!("PairingConfirm accepted from {}", sender_id);
+        } else {
+            self.inner.borrow_mut().last_connection_error =
+                Some("pairing_confirm_invalid".to_string());
+            log::warn!(
+                "PairingConfirm rejected: invalid signature from {}",
+                sender_id
+            );
+        }
+    }
+
+    fn handle_pairing_reject(&self, sender_id: NodeId) {
+        let revert = {
+            let mut inner = self.inner.borrow_mut();
+            inner.pending_pairings.remove(&sender_id);
+            inner.last_connection_error = Some("pairing_rejected".to_string());
+            if inner.pending_control_request == Some(sender_id) {
+                let my_id = inner.local_node_id;
+                inner.pending_control_request = None;
+                inner.pending_route_request_id = None;
+                inner.routing_matrix.set_route(my_id, sender_id, false);
+                let version = inner.routing_matrix.row_version(my_id).unwrap_or(0);
+                Some((my_id, sender_id, version))
+            } else {
+                None
+            }
+        };
+
+        if let Some((my_id, peer, version)) = revert {
+            self.broadcast_routing_delta(my_id, version, &[(my_id, peer, false)]);
+            self.broadcast_signed_local_row_announce();
+        }
+    }
+
+    // ---- Signed routing row handlers -------------------------------------
+
+    /// Send every currently known owner-signed row to a peer.
+    pub fn send_signed_rows_to(&self, node_id: NodeId) {
+        let rows = {
+            let inner = self.inner.borrow();
+            let mut rows: Vec<_> = inner.signed_rows.values().cloned().collect();
+            if let Some(local_row) = Self::build_signed_local_row(&inner) {
+                rows.push(local_row);
+            }
+            rows
+        };
+        for row in rows {
+            self.send_message_to(node_id, &row.into_message());
+        }
+    }
+
+    /// Ask a peer for an owner-signed row.
+    pub fn send_routing_row_request_to(&self, node_id: NodeId, owner: NodeId) {
+        self.send_message_to(node_id, &NetworkMessage::RoutingRowRequest { owner });
+    }
+
+    fn handle_routing_row_request(&self, sender_id: NodeId, owner: NodeId) {
+        let row = {
+            let inner = self.inner.borrow();
+            if owner == inner.local_node_id {
+                Self::build_signed_local_row(&inner)
+            } else {
+                inner.signed_rows.get(&owner).cloned()
+            }
+        };
+        if let Some(row) = row {
+            self.send_message_to(sender_id, &row.into_message());
+        }
+    }
+
+    fn handle_routing_row_announce(
+        &self,
+        sender_id: NodeId,
+        owner: NodeId,
+        version: u64,
+        mut cells: Vec<(NodeId, NodeId, bool)>,
+        owner_public_key: [u8; 32],
+        signature: Vec<u8>,
+    ) {
+        canonicalize_cells(&mut cells);
+        if !Self::verify_routing_row_signature(owner, version, &cells, owner_public_key, &signature)
+        {
+            log::warn!(
+                "RoutingRowAnnounce rejected: invalid owner signature (sender={}, owner={})",
+                sender_id,
+                owner
+            );
+            return;
+        }
+
+        let row = SignedRoutingRow {
+            owner,
+            version,
+            cells: cells.clone(),
+            owner_public_key,
+            signature,
+        };
+
+        let should_forward = {
+            let mut inner = self.inner.borrow_mut();
+            let cached_version = inner.signed_rows.get(&owner).map(|row| row.version);
+            let applied = inner
+                .routing_matrix
+                .apply_authorized_row(owner, version, &cells);
+            let cache_updated =
+                owner != inner.local_node_id && cached_version.map(|v| version > v).unwrap_or(true);
+            if cache_updated {
+                inner.signed_rows.insert(owner, row.clone());
+            }
+            applied || cache_updated
+        };
+
+        if should_forward {
+            self.forward_signed_row(row, Some(sender_id));
+        }
+    }
+
+    /// Verify a signed routing row against the owner's public key.
+    pub fn verify_routing_row_signature(
+        owner: NodeId,
+        version: u64,
+        cells: &[(NodeId, NodeId, bool)],
+        owner_public_key: [u8; 32],
+        signature: &[u8],
+    ) -> bool {
+        if owner_public_key == [0u8; 32]
+            || cells.iter().any(|(controller, _, _)| *controller != owner)
+        {
+            return false;
+        }
+        let Ok(verifying_key) = VerifyingKey::from_bytes(&owner_public_key) else {
+            return false;
+        };
+        if derive_node_id(&verifying_key) != owner {
+            return false;
+        }
+        let Ok(signature) = Signature::from_slice(signature) else {
+            return false;
+        };
+        let payload = Self::routing_row_signature_payload(owner, version, cells);
+        verifying_key.verify(&payload, &signature).is_ok()
+    }
+
+    fn build_signed_local_row(inner: &RouterInner) -> Option<SignedRoutingRow> {
+        let owner = inner.local_node_id;
+        let owner_public_key = inner.local_public_key?;
+        let signing_key = inner.local_signing_key.as_ref()?;
+        let version = inner.routing_matrix.row_version(owner).unwrap_or(0);
+        let cells = inner.routing_matrix.row_cells(owner);
+        let payload = Self::routing_row_signature_payload(owner, version, &cells);
+        let signature = signing_key.sign(&payload).to_bytes().to_vec();
+        Some(SignedRoutingRow {
+            owner,
+            version,
+            cells,
+            owner_public_key,
+            signature,
+        })
+    }
+
+    fn broadcast_signed_local_row_announce(&self) {
+        let (row, peers, tx) = {
+            let inner = self.inner.borrow();
+            (
+                Self::build_signed_local_row(&inner),
+                inner.connected_peers.iter().copied().collect::<Vec<_>>(),
+                inner.outgoing_tx.clone(),
+            )
+        };
+        let (Some(row), Some(tx)) = (row, tx) else {
+            return;
+        };
+        let msg = row.into_message();
+        for peer in peers {
+            if tx.send((peer, msg.clone())).is_err() {
+                break;
+            }
+        }
+    }
+
+    fn forward_signed_row(&self, row: SignedRoutingRow, except: Option<NodeId>) {
+        let (peers, tx) = {
+            let inner = self.inner.borrow();
+            (
+                inner
+                    .connected_peers
+                    .iter()
+                    .copied()
+                    .filter(|peer| Some(*peer) != except)
+                    .collect::<Vec<_>>(),
+                inner.outgoing_tx.clone(),
+            )
+        };
+        let Some(tx) = tx else {
+            return;
+        };
+        let msg = row.into_message();
+        for peer in peers {
+            if tx.send((peer, msg.clone())).is_err() {
+                break;
             }
         }
     }
@@ -934,18 +1713,84 @@ impl Router {
         }
 
         if !self.inner.borrow().config.allow_remote_control {
-            self.send_message_to(
-                controller,
-                &NetworkMessage::RouteDenied {
-                    request_id,
-                    controller,
-                    executor,
-                    reason: "remote_control_disabled".to_string(),
-                },
-            );
+            self.deny_route_request(request_id, controller, executor, "remote_control_disabled");
             return;
         }
 
+        let mut unpaired_session_key = None;
+        let trust_decision = {
+            let inner = self.inner.borrow();
+            let Some(session_pubkey) = inner.peer_public_keys.get(&controller).copied() else {
+                log::warn!(
+                    "RouteRequest rejected: missing verified public key for {}",
+                    controller
+                );
+                self.deny_route_request(request_id, controller, executor, "missing_public_key");
+                return;
+            };
+            match inner.paired_devices.get(&controller).copied() {
+                Some(pairing) if pairing.public_key != session_pubkey => {
+                    log::warn!(
+                        "RouteRequest rejected: paired public key mismatch for {}",
+                        controller
+                    );
+                    self.deny_route_request(
+                        request_id,
+                        controller,
+                        executor,
+                        "paired_key_mismatch",
+                    );
+                    return;
+                }
+                Some(pairing) => pairing.trust_state,
+                None => {
+                    log::info!(
+                        "RouteRequest from unpaired verified device {}; asking user",
+                        controller
+                    );
+                    unpaired_session_key = Some(session_pubkey);
+                    DeviceTrust::AskEachTime
+                }
+            }
+        };
+        if let Some(public_key) = unpaired_session_key {
+            self.inner
+                .borrow_mut()
+                .pending_pairings
+                .insert(controller, public_key);
+        }
+
+        match trust_decision {
+            DeviceTrust::Trusted => {
+                self.grant_route_request(request_id, controller, executor);
+                log::info!(
+                    "RouteRequest auto-granted for trusted device: {} -> {}",
+                    controller,
+                    executor
+                );
+            }
+            DeviceTrust::AskEachTime => {
+                self.inner.borrow_mut().pending_route_approvals.insert(
+                    controller,
+                    PendingRouteApproval {
+                        request_id,
+                        controller,
+                        executor,
+                    },
+                );
+                log::info!(
+                    "RouteRequest pending user approval: {} -> {}",
+                    controller,
+                    executor
+                );
+            }
+            DeviceTrust::Blocked => {
+                self.deny_route_request(request_id, controller, executor, "device_blocked");
+            }
+        }
+    }
+
+    fn grant_route_request(&self, request_id: u64, controller: NodeId, executor: NodeId) {
         {
             let mut inner = self.inner.borrow_mut();
             let version = inner
@@ -958,6 +1803,7 @@ impl Router {
             inner
                 .routing_matrix
                 .apply_delta(controller, version, &[(controller, executor, true)]);
+            Self::note_controller_route_enabled(&mut inner, controller);
         }
 
         self.send_message_to(
@@ -968,7 +1814,24 @@ impl Router {
                 executor,
             },
         );
-        log::info!("RouteRequest granted: {} -> {}", controller, executor);
+    }
+
+    fn deny_route_request(
+        &self,
+        request_id: u64,
+        controller: NodeId,
+        executor: NodeId,
+        reason: &str,
+    ) {
+        self.send_message_to(
+            controller,
+            &NetworkMessage::RouteDenied {
+                request_id,
+                controller,
+                executor,
+                reason: reason.to_string(),
+            },
+        );
     }
 
     fn handle_route_grant(
@@ -991,11 +1854,14 @@ impl Router {
                 );
                 return;
             }
-            let id_matches = inner
-                .pending_route_request_id
-                .map(|id| id == request_id)
-                .unwrap_or(true);
-            if inner.pending_control_request != Some(executor) || !id_matches {
+            let Some(expected_id) = inner.pending_route_request_id else {
+                log::debug!(
+                    "Ignoring RouteGrant from {}: no pending request id",
+                    sender_id
+                );
+                return;
+            };
+            if expected_id != request_id || inner.pending_control_request != Some(executor) {
                 log::debug!("Ignoring stale RouteGrant from {}", sender_id);
                 return;
             }
@@ -1013,6 +1879,7 @@ impl Router {
         };
 
         self.broadcast_routing_delta(grant.0, grant.1, &[(controller, executor, true)]);
+        self.broadcast_signed_local_row_announce();
         log::info!("RouteGrant accepted: {} -> {}", controller, executor);
     }
 
@@ -1037,11 +1904,14 @@ impl Router {
                 );
                 return;
             }
-            let id_matches = inner
-                .pending_route_request_id
-                .map(|id| id == request_id)
-                .unwrap_or(true);
-            if inner.pending_control_request != Some(executor) || !id_matches {
+            let Some(expected_id) = inner.pending_route_request_id else {
+                log::debug!(
+                    "Ignoring RouteDenied from {}: no pending request id",
+                    sender_id
+                );
+                return;
+            };
+            if expected_id != request_id || inner.pending_control_request != Some(executor) {
                 log::debug!("Ignoring stale RouteDenied from {}", sender_id);
                 return;
             }
@@ -1060,6 +1930,7 @@ impl Router {
         };
 
         self.broadcast_routing_delta(revert.0, revert.1, &[(controller, executor, false)]);
+        self.broadcast_signed_local_row_announce();
         log::info!("RouteDenied applied: {} -/-> {}", controller, executor);
     }
 
@@ -1075,6 +1946,10 @@ impl Router {
         }
 
         let my_id = self.inner.borrow().local_node_id;
+        self.inner
+            .borrow_mut()
+            .pending_route_approvals
+            .remove(&controller);
         if controller == my_id {
             self.set_route(controller, executor, false);
             if self.pending_control_request() == Some(executor) {
@@ -1095,6 +1970,9 @@ impl Router {
             inner
                 .routing_matrix
                 .apply_delta(controller, version, &[(controller, executor, false)]);
+            if executor == my_id {
+                Self::note_controller_route_disabled(&mut inner, controller);
+            }
             version
         };
         self.broadcast_routing_delta(controller, version, &[(controller, executor, false)]);
@@ -1289,6 +2167,7 @@ impl Router {
         };
         if ok {
             self.broadcast_routing_delta(controller, version, &[(controller, executor, value)]);
+            self.broadcast_signed_local_row_announce();
         }
         ok
     }
@@ -1340,10 +2219,19 @@ impl Router {
         version: u64,
         cells: &[(NodeId, NodeId, bool)],
     ) {
-        self.inner
-            .borrow_mut()
-            .routing_matrix
-            .apply_delta(owner, version, cells);
+        let mut inner = self.inner.borrow_mut();
+        let my_id = inner.local_node_id;
+        inner.routing_matrix.apply_delta(owner, version, cells);
+        for &(controller, executor, value) in cells {
+            if executor != my_id {
+                continue;
+            }
+            if value {
+                Self::note_controller_route_enabled(&mut inner, controller);
+            } else {
+                Self::note_controller_route_disabled(&mut inner, controller);
+            }
+        }
     }
 
     /// Apply a full routing sync snapshot to the local matrix.
@@ -1473,6 +2361,7 @@ impl Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::identity::DeviceIdentity;
     use crate::audio::AudioMode;
     use crate::core::action::CalcAction;
     use crate::core::token::{BinaryOp, VocalEvent};
@@ -1577,6 +2466,39 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel();
         router.set_outgoing_tx(tx);
         (router, calls, rx)
+    }
+
+    fn allow_state_updates_from(router: &Router, peer: NodeId) {
+        router.add_remote_session(peer);
+        let my_id = router.local_node_id();
+        router.set_route(my_id, peer, true);
+        router.clear_pending_control_request();
+    }
+
+    fn trust_peer(router: &Router, peer: NodeId, public_key: [u8; 32], trust: DeviceTrust) {
+        router.set_remote_public_key(peer, public_key);
+        router.set_paired_devices([(peer, public_key, trust)]);
+    }
+
+    fn set_router_identity(router: &Router, identity: &DeviceIdentity) {
+        router.set_local_node_id(identity.node_id());
+        router.set_local_identity(identity.public_key_bytes(), identity.signing_key());
+    }
+
+    fn signed_row_message(
+        identity: &DeviceIdentity,
+        version: u64,
+        cells: Vec<(NodeId, NodeId, bool)>,
+    ) -> NetworkMessage {
+        let owner = identity.node_id();
+        let payload = Router::routing_row_signature_payload(owner, version, &cells);
+        NetworkMessage::RoutingRowAnnounce {
+            owner,
+            version,
+            cells,
+            owner_public_key: identity.public_key_bytes(),
+            signature: identity.sign(&payload).to_bytes().to_vec(),
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1771,6 +2693,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn network_action_rejects_spoofed_source_id() {
+        let (router, calls) = make_router();
+        router.set_allow_remote_control(true);
+        let controller = NodeId::new_v4();
+        let my_id = router.local_node_id();
+        router.apply_routing_delta(controller, 1, &[(controller, my_id, true)]);
+
+        let envelope = ActionEnvelope {
+            seq: 1,
+            source_id: controller,
+            timestamp_ms: 0,
+            action: CalcAction::Digit(8),
+        };
+        router.handle_network_message(NodeId::new_v4(), NetworkMessage::Action(envelope));
+
+        let c = calls.borrow();
+        assert!(
+            c.displays.is_empty(),
+            "Action with spoofed envelope source should be rejected"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // 4. handle_network_message for StateUpdate
     // -----------------------------------------------------------------------
@@ -1778,6 +2723,8 @@ mod tests {
     #[test]
     fn handle_network_message_state_update() {
         let (router, calls) = make_router();
+        let executor = NodeId::new_v4();
+        allow_state_updates_from(&router, executor);
         let snapshot = StateSnapshot {
             display: "42".to_string(),
             history: "40 +".to_string(),
@@ -1785,7 +2732,7 @@ mod tests {
             is_error: false,
             last_seq_applied: 10,
         };
-        router.handle_network_message(NodeId::new_v4(), NetworkMessage::StateUpdate(snapshot));
+        router.handle_network_message(executor, NetworkMessage::StateUpdate(snapshot));
 
         let c = calls.borrow();
         assert!(
@@ -1812,6 +2759,8 @@ mod tests {
     #[test]
     fn handle_network_message_state_update_with_error() {
         let (router, calls) = make_router();
+        let executor = NodeId::new_v4();
+        allow_state_updates_from(&router, executor);
         let snapshot = StateSnapshot {
             display: "错误".to_string(),
             history: "不能除以零".to_string(),
@@ -1819,7 +2768,7 @@ mod tests {
             is_error: true,
             last_seq_applied: 5,
         };
-        router.handle_network_message(NodeId::new_v4(), NetworkMessage::StateUpdate(snapshot));
+        router.handle_network_message(executor, NetworkMessage::StateUpdate(snapshot));
 
         let c = calls.borrow();
         assert!(c.displays.iter().any(|d| d == "错误"));
@@ -1834,6 +2783,8 @@ mod tests {
         let display = MockDisplayUpdater::new(calls.clone());
         let audio = MockAudioPlayer::new();
         let router = Router::new(calc.clone(), Some(Box::new(audio)), Box::new(display));
+        let executor = NodeId::new_v4();
+        allow_state_updates_from(&router, executor);
 
         // Speculative: 9 + 3 = → local acc = 12
         router.dispatch(CalcAction::Digit(9));
@@ -1850,7 +2801,7 @@ mod tests {
             is_error: false,
             last_seq_applied: 5,
         };
-        router.handle_network_message(NodeId::new_v4(), NetworkMessage::StateUpdate(snapshot));
+        router.handle_network_message(executor, NetworkMessage::StateUpdate(snapshot));
 
         // After reset, calculator acc should be 99, not 12.
         // Dispatch "+ 1 =" → should produce 100 (99+1), not 13 (12+1).
@@ -1874,6 +2825,8 @@ mod tests {
         let display = MockDisplayUpdater::new(calls.clone());
         let audio = MockAudioPlayer::new();
         let router = Router::new(calc.clone(), Some(Box::new(audio)), Box::new(display));
+        let executor = NodeId::new_v4();
+        allow_state_updates_from(&router, executor);
 
         // Cause a divide-by-zero error locally.
         router.dispatch(CalcAction::Digit(5));
@@ -1896,7 +2849,7 @@ mod tests {
             is_error: false,
             last_seq_applied: 6,
         };
-        router.handle_network_message(NodeId::new_v4(), NetworkMessage::StateUpdate(snapshot));
+        router.handle_network_message(executor, NetworkMessage::StateUpdate(snapshot));
 
         // After reset, calculator should NOT be in error state.
         // Dispatch "1 + 2 =" → should produce 3, not stay in error.
@@ -1911,6 +2864,53 @@ mod tests {
             last_display, "3",
             "After StateUpdate reset from error, calculator should work normally. Got: {}",
             last_display
+        );
+    }
+
+    #[test]
+    fn state_update_rejected_from_non_control_target() {
+        let (router, calls) = make_router();
+        let sender = NodeId::new_v4();
+        router.add_remote_session(sender);
+        let snapshot = StateSnapshot {
+            display: "999".to_string(),
+            history: String::new(),
+            memory_indicator: String::new(),
+            is_error: false,
+            last_seq_applied: 10,
+        };
+
+        router.handle_network_message(sender, NetworkMessage::StateUpdate(snapshot));
+
+        let c = calls.borrow();
+        assert!(
+            c.displays.is_empty(),
+            "StateUpdate from non-target should be rejected"
+        );
+    }
+
+    #[test]
+    fn state_update_rejected_while_route_grant_pending() {
+        let (router, calls) = make_router();
+        let sender = NodeId::new_v4();
+        router.add_remote_session(sender);
+        let my_id = router.local_node_id();
+        router.set_route(my_id, sender, true);
+        router.set_pending_control_request(sender);
+        let snapshot = StateSnapshot {
+            display: "123".to_string(),
+            history: String::new(),
+            memory_indicator: String::new(),
+            is_error: false,
+            last_seq_applied: 10,
+        };
+
+        router.handle_network_message(sender, NetworkMessage::StateUpdate(snapshot));
+
+        let c = calls.borrow();
+        assert!(
+            c.displays.is_empty(),
+            "StateUpdate while grant is pending should be rejected"
         );
     }
 
@@ -2414,6 +3414,32 @@ mod tests {
     }
 
     #[test]
+    fn route_revoke_rejects_spoofed_sender() {
+        let (router, _calls, _rx) = make_router_with_channel();
+        let peer = NodeId::new_v4();
+        let attacker = NodeId::new_v4();
+        let my_id = router.local_node_id();
+
+        router.add_remote_session(peer);
+        router.set_route(my_id, peer, true);
+        assert!(router.my_control_targets().contains(&peer));
+
+        router.handle_network_message(
+            attacker,
+            NetworkMessage::RouteRevoke {
+                from: my_id,
+                to: peer,
+                version: 2,
+            },
+        );
+
+        assert!(
+            router.my_control_targets().contains(&peer),
+            "Third-party RouteRevoke should not revoke local route"
+        );
+    }
+
+    #[test]
     fn matrix_is_controlled_by_check() {
         let (router, _calls, _rx) = make_router_with_channel();
         let peer = NodeId::new_v4();
@@ -2565,6 +3591,111 @@ mod tests {
     }
 
     #[test]
+    fn routing_sync_rejects_third_party_rows() {
+        let (router, _calls, _rx) = make_router_with_channel();
+        let sender = NodeId::new_v4();
+        let third_party = NodeId::new_v4();
+        let my_id = router.local_node_id();
+
+        router.handle_network_message(
+            sender,
+            NetworkMessage::RoutingSync {
+                entries: vec![(third_party, my_id, true, 1)],
+            },
+        );
+
+        let matrix = router.get_routing_matrix();
+        assert!(
+            !matrix.get(&(third_party, my_id)).copied().unwrap_or(false),
+            "RoutingSync must not let a peer write third-party rows"
+        );
+    }
+
+    #[test]
+    fn signed_row_announce_converges_across_asymmetric_three_node_topology() {
+        let (router_a, _calls_a, mut rx_a) = make_router_with_channel();
+        let (router_c, _calls_c, _rx_c) = make_router_with_channel();
+        let identity_a = DeviceIdentity::generate();
+        let identity_b = DeviceIdentity::generate();
+        let identity_c = DeviceIdentity::generate();
+        set_router_identity(&router_a, &identity_a);
+        set_router_identity(&router_c, &identity_c);
+
+        let a = identity_a.node_id();
+        let b = identity_b.node_id();
+        let c = identity_c.node_id();
+        router_a.add_remote_session(b);
+        router_a.add_remote_session(c);
+        router_c.add_remote_session(a);
+
+        let b_cells = vec![(b, b, true), (b, c, true)];
+        router_a.handle_network_message(b, signed_row_message(&identity_b, 1, b_cells.clone()));
+
+        assert!(
+            router_a
+                .get_routing_matrix()
+                .get(&(b, c))
+                .copied()
+                .unwrap_or(false),
+            "A should apply B's owner-signed row"
+        );
+
+        let mut forwarded = None;
+        while let Ok((target, msg)) = rx_a.try_recv() {
+            if target == c
+                && matches!(msg, NetworkMessage::RoutingRowAnnounce { owner, .. } if owner == b)
+            {
+                forwarded = Some(msg);
+                break;
+            }
+        }
+        let forwarded = forwarded.expect("A should relay B's signed row to C");
+
+        router_c.handle_network_message(a, forwarded);
+        assert!(
+            router_c
+                .get_routing_matrix()
+                .get(&(b, c))
+                .copied()
+                .unwrap_or(false),
+            "C should accept B's row relayed by A after verifying B's signature"
+        );
+    }
+
+    #[test]
+    fn signed_row_announce_rejects_forged_third_party_owner() {
+        let (router, _calls, _rx) = make_router_with_channel();
+        let attacker_identity = DeviceIdentity::generate();
+        let victim_identity = DeviceIdentity::generate();
+        let attacker = attacker_identity.node_id();
+        let victim = victim_identity.node_id();
+        let my_id = router.local_node_id();
+        let cells = vec![(victim, my_id, true)];
+        let payload = Router::routing_row_signature_payload(victim, 1, &cells);
+        let forged_signature = attacker_identity.sign(&payload).to_bytes().to_vec();
+
+        router.handle_network_message(
+            attacker,
+            NetworkMessage::RoutingRowAnnounce {
+                owner: victim,
+                version: 1,
+                cells,
+                owner_public_key: attacker_identity.public_key_bytes(),
+                signature: forged_signature,
+            },
+        );
+
+        assert!(
+            !router
+                .get_routing_matrix()
+                .get(&(victim, my_id))
+                .copied()
+                .unwrap_or(false),
+            "attacker must not be able to modify a third-party row"
+        );
+    }
+
+    #[test]
     fn send_route_revoke_is_noop_routing_delta_handles_notification() {
         let (router, _calls, mut rx) = make_router_with_channel();
         let peer = NodeId::new_v4();
@@ -2632,6 +3763,7 @@ mod tests {
         let my_id = router.local_node_id();
         router.set_allow_remote_control(true);
         router.add_remote_session(controller);
+        trust_peer(&router, controller, [7u8; 32], DeviceTrust::Trusted);
 
         router.handle_network_message(
             controller,
@@ -2653,6 +3785,216 @@ mod tests {
             } if c == controller && executor == my_id
         ));
         assert!(router.my_controllers().contains(&controller));
+    }
+
+    #[test]
+    fn route_request_from_new_verified_device_waits_for_user_approval() {
+        let (router, _calls, mut rx) = make_router_with_channel();
+        let controller = NodeId::new_v4();
+        let my_id = router.local_node_id();
+        router.set_allow_remote_control(true);
+        router.add_remote_session(controller);
+        router.set_remote_public_key(controller, [9u8; 32]);
+
+        router.handle_network_message(
+            controller,
+            NetworkMessage::RouteRequest {
+                request_id: 8,
+                controller,
+                executor: my_id,
+            },
+        );
+
+        assert!(
+            rx.try_recv().is_err(),
+            "new verified device should wait for user approval"
+        );
+        assert!(
+            router
+                .pending_route_approval_controllers()
+                .contains(&controller)
+        );
+        assert!(router.pending_pairing_devices().contains(&controller));
+        assert!(!router.my_controllers().contains(&controller));
+    }
+
+    #[test]
+    fn route_request_pending_when_device_asks_each_time() {
+        let (router, _calls, mut rx) = make_router_with_channel();
+        let controller = NodeId::new_v4();
+        let my_id = router.local_node_id();
+        router.set_allow_remote_control(true);
+        router.add_remote_session(controller);
+        trust_peer(&router, controller, [10u8; 32], DeviceTrust::AskEachTime);
+
+        router.handle_network_message(
+            controller,
+            NetworkMessage::RouteRequest {
+                request_id: 9,
+                controller,
+                executor: my_id,
+            },
+        );
+
+        assert!(
+            rx.try_recv().is_err(),
+            "AskEachTime should not auto-grant or auto-deny"
+        );
+        assert!(
+            router
+                .pending_route_approval_controllers()
+                .contains(&controller)
+        );
+
+        router.respond_to_pending_route_request(controller, true);
+        let (target, msg) = rx.try_recv().expect("expected RouteGrant after approval");
+        assert_eq!(target, controller);
+        assert!(matches!(
+            msg,
+            NetworkMessage::RouteGrant { request_id: 9, .. }
+        ));
+        assert!(router.my_controllers().contains(&controller));
+    }
+
+    #[test]
+    fn route_request_denied_when_device_blocked() {
+        let (router, _calls, mut rx) = make_router_with_channel();
+        let controller = NodeId::new_v4();
+        let my_id = router.local_node_id();
+        router.set_allow_remote_control(true);
+        router.add_remote_session(controller);
+        trust_peer(&router, controller, [11u8; 32], DeviceTrust::Blocked);
+
+        router.handle_network_message(
+            controller,
+            NetworkMessage::RouteRequest {
+                request_id: 10,
+                controller,
+                executor: my_id,
+            },
+        );
+
+        let (_, msg) = rx.try_recv().expect("expected RouteDenied");
+        assert!(matches!(
+            msg,
+            NetworkMessage::RouteDenied { reason, .. } if reason == "device_blocked"
+        ));
+        assert!(!router.my_controllers().contains(&controller));
+    }
+
+    #[test]
+    fn route_request_denied_when_paired_public_key_mismatches_session() {
+        let (router, _calls, mut rx) = make_router_with_channel();
+        let controller = NodeId::new_v4();
+        let my_id = router.local_node_id();
+        router.set_allow_remote_control(true);
+        router.add_remote_session(controller);
+        router.set_paired_devices([(controller, [12u8; 32], DeviceTrust::Trusted)]);
+        router.set_remote_public_key(controller, [13u8; 32]);
+
+        router.handle_network_message(
+            controller,
+            NetworkMessage::RouteRequest {
+                request_id: 11,
+                controller,
+                executor: my_id,
+            },
+        );
+
+        let (_, msg) = rx.try_recv().expect("expected RouteDenied");
+        assert!(matches!(
+            msg,
+            NetworkMessage::RouteDenied { reason, .. } if reason == "paired_key_mismatch"
+        ));
+        assert!(!router.my_controllers().contains(&controller));
+    }
+
+    #[test]
+    fn pairing_request_records_pending_pairing_for_verified_session_key() {
+        let (router, _calls, mut rx) = make_router_with_channel();
+        let local_identity = DeviceIdentity::generate();
+        let remote_identity = DeviceIdentity::generate();
+        set_router_identity(&router, &local_identity);
+        let remote = remote_identity.node_id();
+        router.add_remote_session(remote);
+        router.set_remote_public_key(remote, remote_identity.public_key_bytes());
+
+        router.handle_network_message(
+            remote,
+            NetworkMessage::PairingRequest {
+                public_key: remote_identity.public_key_bytes(),
+                pairing_code_hash: Router::pairing_code_hash(
+                    remote_identity.public_key_bytes(),
+                    local_identity.public_key_bytes(),
+                ),
+            },
+        );
+
+        assert!(router.pending_pairing_devices().contains(&remote));
+        assert!(
+            rx.try_recv().is_err(),
+            "valid PairingRequest should not be rejected"
+        );
+    }
+
+    #[test]
+    fn pairing_request_rejects_code_hash_mismatch() {
+        let (router, _calls, mut rx) = make_router_with_channel();
+        let local_identity = DeviceIdentity::generate();
+        let remote_identity = DeviceIdentity::generate();
+        set_router_identity(&router, &local_identity);
+        let remote = remote_identity.node_id();
+        router.add_remote_session(remote);
+        router.set_remote_public_key(remote, remote_identity.public_key_bytes());
+
+        router.handle_network_message(
+            remote,
+            NetworkMessage::PairingRequest {
+                public_key: remote_identity.public_key_bytes(),
+                pairing_code_hash: [99u8; 32],
+            },
+        );
+
+        let (target, msg) = rx.try_recv().expect("expected PairingReject");
+        assert_eq!(target, remote);
+        assert!(matches!(msg, NetworkMessage::PairingReject));
+        assert!(!router.pending_pairing_devices().contains(&remote));
+    }
+
+    #[test]
+    fn pairing_confirm_verifies_signature_and_clears_pending_pairing() {
+        let (router, _calls, _rx) = make_router_with_channel();
+        let local_identity = DeviceIdentity::generate();
+        let remote_identity = DeviceIdentity::generate();
+        set_router_identity(&router, &local_identity);
+        let remote = remote_identity.node_id();
+        router.add_remote_session(remote);
+        router.set_remote_public_key(remote, remote_identity.public_key_bytes());
+
+        router.handle_network_message(
+            remote,
+            NetworkMessage::PairingRequest {
+                public_key: remote_identity.public_key_bytes(),
+                pairing_code_hash: Router::pairing_code_hash(
+                    remote_identity.public_key_bytes(),
+                    local_identity.public_key_bytes(),
+                ),
+            },
+        );
+        assert!(router.pending_pairing_devices().contains(&remote));
+
+        let payload = Router::pairing_confirm_payload(
+            remote_identity.public_key_bytes(),
+            local_identity.public_key_bytes(),
+        );
+        router.handle_network_message(
+            remote,
+            NetworkMessage::PairingConfirm {
+                signature: remote_identity.sign(&payload).to_bytes().to_vec(),
+            },
+        );
+
+        assert!(!router.pending_pairing_devices().contains(&remote));
     }
 
     #[test]
@@ -2787,6 +4129,81 @@ mod tests {
         assert!(
             found_action,
             "Expected Action envelope after pending cleared"
+        );
+    }
+
+    #[test]
+    fn exclusive_policy_rejects_non_primary_controller() {
+        let (router, calls) = make_router();
+        router.set_allow_remote_control(true);
+        router.set_conflict_policy(ConflictPolicy::Exclusive);
+        let primary = NodeId::new_v4();
+        let secondary = NodeId::new_v4();
+        let my_id = router.local_node_id();
+        router.add_remote_session(primary);
+        router.add_remote_session(secondary);
+        router.apply_routing_delta(primary, 1, &[(primary, my_id, true)]);
+        router.apply_routing_delta(secondary, 2, &[(secondary, my_id, true)]);
+
+        router.handle_remote_action(ActionEnvelope {
+            seq: 1,
+            source_id: primary,
+            timestamp_ms: 0,
+            action: CalcAction::Digit(1),
+        });
+
+        {
+            let c = calls.borrow();
+            assert!(
+                c.displays.is_empty(),
+                "Exclusive policy should reject non-primary controller, got {:?}",
+                c.displays
+            );
+        }
+
+        router.handle_remote_action(ActionEnvelope {
+            seq: 2,
+            source_id: secondary,
+            timestamp_ms: 0,
+            action: CalcAction::Digit(2),
+        });
+
+        let c = calls.borrow();
+        assert!(
+            c.displays.iter().any(|d| d == "2"),
+            "Exclusive policy should accept the designated controller"
+        );
+    }
+
+    #[test]
+    fn route_grant_ignores_stale_request_id() {
+        let (router, _calls, mut rx) = make_router_with_channel();
+        let peer = NodeId::new_v4();
+        let my_id = router.local_node_id();
+        router.add_remote_session(peer);
+        router.set_route(my_id, peer, true);
+        router.set_pending_control_request(peer);
+
+        let mut request_id = None;
+        while let Ok((_, msg)) = rx.try_recv() {
+            if let NetworkMessage::RouteRequest { request_id: id, .. } = msg {
+                request_id = Some(id);
+            }
+        }
+        let request_id = request_id.expect("RouteRequest should be sent");
+
+        router.handle_network_message(
+            peer,
+            NetworkMessage::RouteGrant {
+                request_id: request_id.wrapping_add(1),
+                controller: my_id,
+                executor: peer,
+            },
+        );
+
+        assert!(
+            router.is_awaiting_grant(),
+            "Stale RouteGrant must not clear the pending grant"
         );
     }
 }

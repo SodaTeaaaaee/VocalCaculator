@@ -1,15 +1,19 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 
 use mdns_sd::{Receiver, ScopedIp, ServiceDaemon, ServiceEvent, ServiceInfo};
-use sha2::{Digest, Sha256};
 
-use crate::net::discovery::DiscoveryEndpoint;
+use crate::net::discovery::{DiscoveryEndpoint, public_key_fingerprint};
 use crate::net::protocol::{MDNS_SERVICE_TYPE, NodeId, PROTOCOL_VERSION, TransportHint};
 
 pub struct MdnsDiscovery {
-    _daemon: ServiceDaemon,
+    daemon: ServiceDaemon,
     receiver: Receiver<ServiceEvent>,
     local_node_id: NodeId,
+    host_name: String,
+    instance_name: String,
+    ip: Ipv4Addr,
+    session_port: u16,
+    public_key: [u8; 32],
 }
 
 impl MdnsDiscovery {
@@ -26,22 +30,14 @@ impl MdnsDiscovery {
         let host_name = format!("vocalcalc-{}.local.", short_node_id(local_node_id));
         let instance_name = format!("vc-{}", short_node_id(local_node_id));
         let fingerprint = public_key_fingerprint(&public_key);
-        let props = vec![
-            ("node_id", local_node_id.to_string()),
-            ("proto", PROTOCOL_VERSION.to_string()),
-            ("name", display_name),
-            ("cap_control", "1".to_string()),
-            ("cap_execute", "1".to_string()),
-            ("pkfp", fingerprint),
-        ];
-
-        let service = ServiceInfo::new(
-            MDNS_SERVICE_TYPE,
-            &instance_name,
-            &host_name,
-            ip.to_string(),
+        let service = build_service_info(
+            local_node_id,
+            &display_name,
             session_port,
-            &props[..],
+            &host_name,
+            &instance_name,
+            ip,
+            fingerprint,
         )?;
         daemon.register(service)?;
         log::info!(
@@ -52,9 +48,14 @@ impl MdnsDiscovery {
         );
 
         Ok(Self {
-            _daemon: daemon,
+            daemon,
             receiver,
             local_node_id,
+            host_name,
+            instance_name,
+            ip,
+            session_port,
+            public_key,
         })
     }
 
@@ -114,6 +115,48 @@ impl MdnsDiscovery {
             }
         }
     }
+
+    pub fn update_display_name(&self, display_name: &str) -> Result<(), anyhow::Error> {
+        let service = build_service_info(
+            self.local_node_id,
+            display_name,
+            self.session_port,
+            &self.host_name,
+            &self.instance_name,
+            self.ip,
+            public_key_fingerprint(&self.public_key),
+        )?;
+        self.daemon.register(service)?;
+        Ok(())
+    }
+}
+
+fn build_service_info(
+    local_node_id: NodeId,
+    display_name: &str,
+    session_port: u16,
+    host_name: &str,
+    instance_name: &str,
+    ip: Ipv4Addr,
+    fingerprint: String,
+) -> Result<ServiceInfo, anyhow::Error> {
+    let props = [
+        ("node_id", local_node_id.to_string()),
+        ("proto", PROTOCOL_VERSION.to_string()),
+        ("name", display_name.to_string()),
+        ("cap_control", "1".to_string()),
+        ("cap_execute", "1".to_string()),
+        ("pkfp", fingerprint),
+    ];
+
+    Ok(ServiceInfo::new(
+        MDNS_SERVICE_TYPE,
+        instance_name,
+        host_name,
+        ip.to_string(),
+        session_port,
+        &props[..],
+    )?)
 }
 
 fn choose_address(addrs: &std::collections::HashSet<ScopedIp>) -> Option<IpAddr> {
@@ -135,13 +178,4 @@ fn local_ipv4() -> Option<Ipv4Addr> {
 
 fn short_node_id(node_id: NodeId) -> String {
     node_id.as_simple().to_string().chars().take(12).collect()
-}
-
-fn public_key_fingerprint(public_key: &[u8; 32]) -> String {
-    let digest = Sha256::digest(public_key);
-    digest
-        .iter()
-        .take(8)
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
 }

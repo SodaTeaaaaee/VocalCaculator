@@ -26,20 +26,15 @@ const PAIRED_DEVICES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("pair
 // ---------------------------------------------------------------------------
 
 /// User-level trust policy for a paired device.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum DeviceTrust {
     /// Route requests from this device may be granted automatically.
     Trusted,
     /// Route requests from this device should ask the user each time.
+    #[default]
     AskEachTime,
     /// Route requests from this device are denied.
     Blocked,
-}
-
-impl Default for DeviceTrust {
-    fn default() -> Self {
-        Self::AskEachTime
-    }
 }
 
 /// Information about a remote device that has been paired with this instance.

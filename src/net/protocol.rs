@@ -84,6 +84,19 @@ pub enum NetworkMessage {
     RoutingSync {
         entries: Vec<(NodeId, NodeId, bool, u64)>,
     },
+    /// Request an owner-signed routing row. The receiver may answer from its
+    /// own row or from a cached owner-signed row.
+    RoutingRowRequest {
+        owner: NodeId,
+    },
+    /// Owner-signed routing row that can be relayed by intermediate peers.
+    RoutingRowAnnounce {
+        owner: NodeId,
+        version: u64,
+        cells: Vec<(NodeId, NodeId, bool)>,
+        owner_public_key: [u8; 32],
+        signature: Vec<u8>,
+    },
     /// Revoke a specific route.
     RouteRevoke {
         from: NodeId,
@@ -196,8 +209,18 @@ pub const PROTOCOL_VERSION: u16 = 4;
 pub const HELLO_VERSION_WITH_KEYS: u16 = 3;
 /// IPv4 multicast address used for LAN peer discovery.
 pub const DISCOVERY_MULTICAST_ADDR: &str = "224.0.0.167";
-/// UDP port for multicast discovery messages.
-pub const DISCOVERY_PORT: u16 = 42420;
+/// The single fixed LAN port used by this application.
+///
+/// This is the one authoritative `42420` literal in `src/`. UDP multicast
+/// discovery and the TCP session listener both bind this port in
+/// [`crate::app::network_mode::NetworkMode::Lan`] -- there is no longer a
+/// separate ephemeral session port, so peers can be reached without
+/// resolving a port out-of-band.
+pub const LAN_FIXED_PORT: u16 = 42420;
+/// UDP port for multicast discovery messages. Alias of [`LAN_FIXED_PORT`].
+pub const DISCOVERY_PORT: u16 = LAN_FIXED_PORT;
+/// TCP port for session connections in `Lan` mode. Alias of [`LAN_FIXED_PORT`].
+pub const SESSION_TCP_PORT: u16 = LAN_FIXED_PORT;
 /// mDNS service type for LAN discovery.
 pub const MDNS_SERVICE_TYPE: &str = "_vocalcalc._tcp.local.";
 /// Interval between heartbeat pings in seconds.

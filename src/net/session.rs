@@ -9,6 +9,8 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
+use ed25519_dalek::SigningKey;
+
 use crate::net::protocol::{
     ConnectionDirection, HEARTBEAT_INTERVAL_SECS, HEARTBEAT_TIMEOUT_SECS, NetworkCommand,
     NetworkMessage, NodeId, PROTOCOL_MAGIC, SessionRegister,
@@ -16,9 +18,6 @@ use crate::net::protocol::{
 use crate::net::state::PeerInfo;
 
 use super::handshake::{client_handshake, server_handshake};
-
-/// All-zeros sentinel: remote did not provide an Ed25519 public key.
-const NO_PUBKEY: [u8; 32] = [0u8; 32];
 
 /// Outgoing-message channel sender: the Router pushes messages here,
 /// and the session task forwards them over the TCP wire.
@@ -39,19 +38,27 @@ pub(crate) async fn run_accepted_session(
     local_node_id: NodeId,
     local_display_name: String,
     local_pubkey: [u8; 32],
+    local_signing_key: SigningKey,
     command_tx: mpsc::UnboundedSender<NetworkCommand>,
 ) {
     let framed = Framed::new(stream, LengthDelimitedCodec::new());
 
     // -- Server-side handshake ------------------------------------------
-    let (remote_node_id, remote_display_name, remote_pubkey, mut framed) =
-        match server_handshake(framed, local_node_id, &local_display_name, local_pubkey).await {
-            Ok(r) => r,
-            Err(e) => {
-                log::warn!("Inbound handshake failed from {}: {}", peer_addr, e);
-                return;
-            }
-        };
+    let (remote_node_id, remote_display_name, remote_pubkey, mut framed) = match server_handshake(
+        framed,
+        local_node_id,
+        &local_display_name,
+        local_pubkey,
+        &local_signing_key,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            log::warn!("Inbound handshake failed from {}: {}", peer_addr, e);
+            return;
+        }
+    };
 
     log::info!(
         "Inbound session established: {} ({}) from {}",
@@ -60,12 +67,10 @@ pub(crate) async fn run_accepted_session(
         peer_addr,
     );
 
-    if remote_pubkey != NO_PUBKEY {
-        log::debug!(
-            "Remote {} provided ed25519 public key; pairing check deferred to caller",
-            remote_node_id,
-        );
-    }
+    log::debug!(
+        "Remote {} provided verified ed25519 public key; trust check deferred to route authorization",
+        remote_node_id,
+    );
 
     // Wait for Subscribe before entering steady-state.
     match recv_msg(&mut framed).await {
@@ -93,6 +98,7 @@ pub(crate) async fn run_accepted_session(
         tcp_port: peer_addr.port(),
         last_seen: std::time::Instant::now(),
         public_key: remote_pubkey,
+        public_key_fingerprint: None,
     };
 
     run_session_loop(
@@ -115,6 +121,7 @@ pub(crate) async fn run_connecting_session(
     local_node_id: NodeId,
     local_display_name: String,
     local_pubkey: [u8; 32],
+    local_signing_key: SigningKey,
     command_tx: mpsc::UnboundedSender<NetworkCommand>,
 ) -> Result<(), String> {
     let framed = Framed::new(stream, LengthDelimitedCodec::new());
@@ -123,7 +130,13 @@ pub(crate) async fn run_connecting_session(
     let (remote_node_id, remote_display_name, remote_pubkey, mut framed) =
         match tokio::time::timeout(
             std::time::Duration::from_secs(8),
-            client_handshake(framed, local_node_id, &local_display_name, local_pubkey),
+            client_handshake(
+                framed,
+                local_node_id,
+                &local_display_name,
+                local_pubkey,
+                &local_signing_key,
+            ),
         )
         .await
         {
@@ -145,12 +158,10 @@ pub(crate) async fn run_connecting_session(
         peer_addr,
     );
 
-    if remote_pubkey != NO_PUBKEY {
-        log::debug!(
-            "Remote {} provided ed25519 public key; pairing check deferred to caller",
-            remote_node_id,
-        );
-    }
+    log::debug!(
+        "Remote {} provided verified ed25519 public key; trust check deferred to route authorization",
+        remote_node_id,
+    );
 
     // Send Subscribe to start receiving state updates.
     if let Err(e) = send_msg(&mut framed, &NetworkMessage::Subscribe).await {
@@ -165,6 +176,7 @@ pub(crate) async fn run_connecting_session(
         tcp_port: peer_addr.port(),
         last_seen: std::time::Instant::now(),
         public_key: remote_pubkey,
+        public_key_fingerprint: None,
     };
 
     run_session_loop(

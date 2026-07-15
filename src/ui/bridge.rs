@@ -30,7 +30,8 @@ use std::sync::{Arc, Mutex};
 use dioxus::prelude::*;
 
 use crate::app::config;
-use crate::app::storage::Storage;
+use crate::app::network_mode::{self, NetworkMode};
+use crate::app::storage::{DeviceTrust, PairedDevice, Storage};
 use crate::audio::VocalAudio;
 use crate::core::action::CalcAction;
 use crate::core::calculator::Calculator;
@@ -60,6 +61,182 @@ fn get_router() -> Option<Router> {
 /// Returns `None` if networking has not been initialised.
 fn with_nm<R>(f: impl FnOnce(&mut NetworkManager) -> R) -> Option<R> {
     NET_MANAGER.with(|cell| cell.borrow_mut().as_mut().map(f))
+}
+
+fn with_storage<R>(f: impl FnOnce(&Arc<Storage>) -> R) -> Option<R> {
+    NET_CONTEXT.with(|cell| cell.borrow().as_ref().map(|ctx| f(&ctx.storage)))
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn refresh_router_paired_devices(storage: &Storage, router: &Router) {
+    match storage.paired_devices() {
+        Ok(devices) => {
+            router.set_paired_devices(
+                devices
+                    .into_iter()
+                    .map(|device| (device.node_id, device.public_key, device.trust_state)),
+            );
+        }
+        Err(e) => {
+            log::warn!("Failed to refresh paired-device trust table: {}", e);
+        }
+    }
+}
+
+fn existing_paired_device(storage: &Storage, node_id: NodeId) -> Option<PairedDevice> {
+    storage
+        .paired_devices()
+        .ok()
+        .and_then(|devices| devices.into_iter().find(|device| device.node_id == node_id))
+}
+
+fn peer_info_for_pairing(node_id: NodeId, router: &Router) -> Option<(String, String, [u8; 32])> {
+    NET_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let net_ctx = borrow.as_ref()?;
+        let state = net_ctx.net_state.lock().unwrap_or_else(|e| e.into_inner());
+        let peer = state.peers.get_peer(&node_id)?;
+        let public_key = if peer.public_key != [0u8; 32] {
+            peer.public_key
+        } else {
+            router.remote_public_key(&node_id)?
+        };
+        Some((
+            peer.display_name.clone(),
+            format!("{}:{}", peer.address.ip(), peer.tcp_port),
+            public_key,
+        ))
+    })
+}
+
+fn store_paired_peer(
+    storage: &Storage,
+    router: &Router,
+    node_id: NodeId,
+    default_trust: DeviceTrust,
+) -> Result<(), anyhow::Error> {
+    let (display_name, address, public_key) = peer_info_for_pairing(node_id, router)
+        .ok_or_else(|| anyhow::anyhow!("peer info missing for pairing"))?;
+    let now = now_ms();
+    let existing = existing_paired_device(storage, node_id);
+    let trust_state = existing
+        .as_ref()
+        .map(|device| device.trust_state)
+        .unwrap_or(default_trust);
+    let first_seen = existing
+        .as_ref()
+        .map(|device| device.first_seen)
+        .unwrap_or(now);
+    let paired_at = existing
+        .as_ref()
+        .map(|device| device.paired_at)
+        .unwrap_or(now);
+    let device = PairedDevice {
+        node_id,
+        display_name,
+        address,
+        public_key,
+        is_trusted: matches!(trust_state, DeviceTrust::Trusted),
+        first_seen,
+        last_seen: now,
+        paired_at,
+        trust_state,
+    };
+    storage.add_paired_device(&device)?;
+    router.upsert_paired_device(node_id, public_key, trust_state);
+    refresh_router_paired_devices(storage, router);
+    Ok(())
+}
+
+fn send_pairing_confirm_for_peer(
+    storage: &Storage,
+    router: &Router,
+    node_id: NodeId,
+) -> Result<(), anyhow::Error> {
+    let local_public_key = storage.identity().public_key_bytes();
+    let remote_public_key = router
+        .remote_public_key(&node_id)
+        .ok_or_else(|| anyhow::anyhow!("missing verified remote key"))?;
+    let payload = Router::pairing_confirm_payload(local_public_key, remote_public_key);
+    let signature = storage.identity().sign(&payload).to_bytes().to_vec();
+    router.send_pairing_confirm(node_id, signature);
+    Ok(())
+}
+
+fn trust_label(
+    trust: Option<DeviceTrust>,
+    pairing_pending: bool,
+    approval_pending: bool,
+) -> String {
+    match trust {
+        Some(DeviceTrust::Trusted) => "信任".to_string(),
+        Some(DeviceTrust::AskEachTime) => "每次询问".to_string(),
+        Some(DeviceTrust::Blocked) => "阻止".to_string(),
+        None if pairing_pending || approval_pending => "未配对 · 待授权".to_string(),
+        None => "未配对".to_string(),
+    }
+}
+
+fn handle_pairing_side_effects(ctx: &mut CalcContext, sender_id: NodeId, msg: &NetworkMessage) {
+    let Some(router) = get_router() else {
+        return;
+    };
+    let Some(storage) = with_storage(Arc::clone) else {
+        return;
+    };
+
+    match msg {
+        NetworkMessage::PairingRequest {
+            public_key,
+            pairing_code_hash,
+        } => {
+            let local_public_key = storage.identity().public_key_bytes();
+            if Router::pairing_code_hash(*public_key, local_public_key) != *pairing_code_hash {
+                return;
+            }
+            if let Some(existing) = existing_paired_device(&storage, sender_id)
+                && existing.public_key == *public_key
+                && let Err(e) = send_pairing_confirm_for_peer(&storage, &router, sender_id)
+            {
+                log::warn!("Failed to send pairing confirmation: {}", e);
+            }
+        }
+        NetworkMessage::PairingConfirm { signature } => {
+            let Some(sender_public_key) = router.remote_public_key(&sender_id) else {
+                log::warn!("Cannot persist PairingConfirm: missing verified sender key");
+                return;
+            };
+            let local_public_key = storage.identity().public_key_bytes();
+            if !Router::verify_pairing_confirm_signature(
+                sender_public_key,
+                local_public_key,
+                signature,
+            ) {
+                *ctx.net.status.write() = "配对签名无效".to_string();
+                return;
+            }
+            match store_paired_peer(&storage, &router, sender_id, DeviceTrust::AskEachTime) {
+                Ok(()) => {
+                    router.clear_pending_pairing(&sender_id);
+                    *ctx.net.status.write() = "配对已完成".to_string();
+                }
+                Err(e) => {
+                    log::warn!("Failed to persist paired device: {}", e);
+                    *ctx.net.status.write() = "配对保存失败".to_string();
+                }
+            }
+        }
+        NetworkMessage::PairingReject => {
+            *ctx.net.status.write() = "配对被拒绝".to_string();
+        }
+        _ => {}
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -180,6 +357,11 @@ pub fn toggle_theme(mut ctx: CalcContext) {
         r#"document.documentElement.setAttribute("data-theme", "{}")"#,
         theme
     ));
+    let mut app_config = config::AppConfig::load();
+    app_config.dark_mode = next;
+    if let Err(e) = app_config.save() {
+        log::error!("Failed to save theme config: {}", e);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -247,6 +429,7 @@ pub fn set_router_user_mute(user_muted: bool) {
 pub struct NetworkContext {
     pub net_state: Arc<Mutex<NetworkState>>,
     pub matrix_node_ids: Rc<RefCell<Vec<NodeId>>>,
+    pub storage: Arc<Storage>,
 }
 
 thread_local! {
@@ -273,8 +456,15 @@ pub fn init_networking(
 ) -> bool {
     let app_config = storage.config();
 
-    if !app_config.network.enabled {
-        log::info!("Networking disabled in config");
+    // The resolved NetworkMode already folds in the legacy
+    // `network.enabled` flag (see `network_mode::resolve_network_mode`),
+    // so this replaces the old `!app_config.network.enabled` check.
+    // `mode` is threaded into `NetworkManager::start` below, which passes
+    // it into the runtime: `Lan` binds the fixed session port and starts
+    // discovery, `LoopbackTest` binds loopback-only and skips discovery.
+    let mode = network_mode::current();
+    if mode == NetworkMode::Offline {
+        log::info!("Networking disabled (NetworkMode::Offline)");
         return false;
     }
 
@@ -290,13 +480,27 @@ pub fn init_networking(
     let conflict_policy = app_config.network.conflict_policy.clone();
     let allow_remote_control = app_config.network.allow_remote_control;
     let display_name = app_config.network.display_name.clone();
+    let paired_devices = match storage.paired_devices() {
+        Ok(devices) => devices
+            .into_iter()
+            .map(|device| (device.node_id, device.public_key, device.trust_state))
+            .collect::<Vec<_>>(),
+        Err(e) => {
+            log::warn!("Failed to load paired-device trust table: {}", e);
+            Vec::<(NodeId, [u8; 32], DeviceTrust)>::new()
+        }
+    };
 
-    let mut nm = NetworkManager::new(storage, ui_event_tx);
+    let mut nm = NetworkManager::new(storage.clone(), ui_event_tx);
 
     // Synchronise Router and NetworkManager NodeIds so that routing
     // matrix owner IDs match session sender IDs.
     router.set_local_node_id(nm.local_node_id());
-    let handle = nm.start();
+    router.set_local_identity(
+        storage.identity().public_key_bytes(),
+        storage.identity().signing_key(),
+    );
+    let handle = nm.start(mode);
     router.set_runtime_handle(handle.runtime_handle().clone());
     router.set_outgoing_tx(handle.outgoing_sender());
 
@@ -308,6 +512,7 @@ pub fn init_networking(
     }
 
     router.set_allow_remote_control(allow_remote_control);
+    router.set_paired_devices(paired_devices);
 
     log::info!(
         "Network enabled (name={}, id={})",
@@ -318,6 +523,7 @@ pub fn init_networking(
     let ctx = NetworkContext {
         net_state,
         matrix_node_ids: Rc::new(RefCell::new(Vec::new())),
+        storage,
     };
 
     NET_MANAGER.with(|cell| *cell.borrow_mut() = Some(nm));
@@ -376,14 +582,6 @@ pub fn start_network_event_loop(
                 sync_network_state(ctx.clone());
             }
 
-            // Drain any pending incoming messages from the network
-            // runtime that were not delivered as individual
-            // UiEvent::NetworkMessage events.  This is a non-blocking
-            // try_recv loop and ensures backward compatibility with
-            // the current networking runtime which still enqueues
-            // messages into the NetworkManager incoming channel.
-            drain_incoming_messages(&ctx);
-
             // Spawn a timeout task for any pending control request
             // that does not already have one running.
             maybe_spawn_pending_timeout(&ctx, &timeout_active, &tracked_pending_peer);
@@ -409,6 +607,9 @@ fn dispatch_event(ctx: &mut CalcContext, event: UiEvent) -> bool {
                 name: Signal::new(payload.name),
                 address: Signal::new(payload.address),
                 is_connected: Signal::new(payload.is_connected),
+                route_active: Signal::new(false),
+                approval_pending: Signal::new(false),
+                trust_label: Signal::new("未配对".to_string()),
                 latency_ms: Signal::new(payload.latency_ms),
                 index: Signal::new(payload.index),
                 node_id_string: Signal::new(payload.node_id_string),
@@ -437,8 +638,18 @@ fn dispatch_event(ctx: &mut CalcContext, event: UiEvent) -> bool {
             if let Ok(node_id) = uuid.parse::<uuid::Uuid>()
                 && let Some(router) = get_router()
             {
+                NET_CONTEXT.with(|cell| {
+                    if let Some(ref net_ctx) = *cell.borrow() {
+                        let state = net_ctx.net_state.lock().unwrap_or_else(|e| e.into_inner());
+                        if let Some(peer) = state.peers.get_peer(&node_id) {
+                            router.set_remote_public_key(node_id, peer.public_key);
+                        }
+                    }
+                });
                 router.add_remote_session(node_id);
                 router.send_routing_sync_to(node_id);
+                router.send_signed_rows_to(node_id);
+                router.send_routing_row_request_to(node_id, node_id);
                 // Keep the Router's broadcast peer set in sync.
                 if let Some(()) = with_nm(|nm| {
                     router.set_connected_peers(nm.active_session_ids());
@@ -478,6 +689,7 @@ fn dispatch_event(ctx: &mut CalcContext, event: UiEvent) -> bool {
                                 }
                             });
                         }
+                        handle_pairing_side_effects(ctx, sender_id, &msg);
                         if let Some(router) = get_router() {
                             router.handle_network_message(sender_id, msg);
                         }
@@ -501,6 +713,7 @@ fn dispatch_event(ctx: &mut CalcContext, event: UiEvent) -> bool {
                 "network_unreachable" => "网络不可达".to_string(),
                 "permission_denied" => "访问被拒绝".to_string(),
                 "remote_control_disabled" => "对方未开启远程控制".to_string(),
+                "fingerprint_mismatch" => "发现信息与连接密钥不一致".to_string(),
                 other => format!("连接失败: {}", other),
             };
             let mut needs_sync = false;
@@ -581,23 +794,6 @@ fn dispatch_event(ctx: &mut CalcContext, event: UiEvent) -> bool {
             true
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// drain_incoming_messages -- backward-compat bridge for NetworkManager
-// ---------------------------------------------------------------------------
-
-/// Drain pending incoming messages from the [`NetworkManager`] internal
-/// channel and forward them to the [`Router`].
-///
-/// With the event-driven architecture the networking runtime sends
-/// [`UiEvent::NetworkMessage`] events through the UiEvent channel
-/// rather than buffering them internally.  This function is now a
-/// no-op retained for backward compatibility with the event loop
-/// call site.
-fn drain_incoming_messages(_ctx: &CalcContext) {
-    // No-op: messages arrive as UiEvent::NetworkMessage through the
-    // event channel and are dispatched by dispatch_event().
 }
 
 // ---------------------------------------------------------------------------
@@ -696,6 +892,9 @@ pub fn sync_network_state(mut ctx: CalcContext) {
     let my_id = router.local_node_id();
     let targets = router.my_control_targets();
     let remote_targets: Vec<NodeId> = targets.into_iter().filter(|id| *id != my_id).collect();
+    let active_sessions = with_nm(|nm| nm.active_session_ids()).unwrap_or_default();
+    let pending_approvals = router.pending_route_approval_controllers();
+    let pending_pairings = router.pending_pairing_devices();
     let is_muted = router.is_muted();
     let user_muted = *ctx.audio.muted.read();
     router.set_audio_muted(user_muted || is_muted);
@@ -717,15 +916,23 @@ pub fn sync_network_state(mut ctx: CalcContext) {
 
         for (i, (node_id, peer)) in state.peers.iter().enumerate() {
             let nid_str: String = node_id.to_string();
-            let is_conn = remote_targets.contains(node_id);
-            if is_conn {
+            let route_active = remote_targets.contains(node_id);
+            let is_connected = active_sessions.contains(node_id);
+            if route_active {
                 connected_idx = i as i32;
                 remote_peer_name = Some(peer.display_name.clone());
             }
             new_peers.push(PeerDisplayInfo {
                 name: Signal::new(peer.display_name.clone()),
                 address: Signal::new(format!("{}:{}", peer.address.ip(), peer.tcp_port)),
-                is_connected: Signal::new(is_conn),
+                is_connected: Signal::new(is_connected),
+                route_active: Signal::new(route_active),
+                approval_pending: Signal::new(pending_approvals.contains(node_id)),
+                trust_label: Signal::new(trust_label(
+                    router.peer_trust_state(node_id),
+                    pending_pairings.contains(node_id),
+                    pending_approvals.contains(node_id),
+                )),
                 latency_ms: Signal::new(state.latency_ms.map(|v| v as i32).unwrap_or(-1)),
                 index: Signal::new(i as i32),
                 node_id_string: Signal::new(nid_str),
@@ -736,8 +943,7 @@ pub fn sync_network_state(mut ctx: CalcContext) {
 
         // Clean up stale remote targets (in our matrix but absent from
         // active sessions).
-        if let Some(stale_targets) = with_nm(|nm| {
-            let active_sessions = nm.active_session_ids();
+        let stale_targets = {
             let pending = router.pending_control_request();
             remote_targets
                 .iter()
@@ -745,17 +951,19 @@ pub fn sync_network_state(mut ctx: CalcContext) {
                 .filter(|t| pending.as_ref() != Some(*t))
                 .copied()
                 .collect::<Vec<NodeId>>()
-        }) {
-            for target in &stale_targets {
-                router.cleanup_peer_disconnect(target);
-            }
+        };
+        for target in &stale_targets {
+            router.cleanup_peer_disconnect(target);
         }
 
         *ctx.net.peers.write() = new_peers;
         *ctx.net.connected_peer_index.write() = connected_idx;
 
         // Update network-status display based on routing matrix.
-        if is_muted {
+        if !pending_approvals.is_empty() {
+            *ctx.net.status.write() = "有远控请求待授权".to_string();
+            *ctx.net.executing_remotely.write() = false;
+        } else if is_muted {
             if router.is_awaiting_grant() {
                 *ctx.net.status.write() = "等待授权...".to_string();
                 *ctx.net.executing_remotely.write() = false;
@@ -936,6 +1144,50 @@ pub fn handle_disconnect_peer(ctx: CalcContext, node_id_str: String) {
     sync_network_state(ctx);
 }
 
+/// Approve or deny an inbound remote-control request from a peer.
+pub fn handle_route_approval(mut ctx: CalcContext, node_id_str: String, approve: bool) {
+    let controller = match node_id_str.parse::<uuid::Uuid>() {
+        Ok(uuid) => uuid,
+        Err(e) => {
+            log::warn!("Invalid node ID '{}': {}", node_id_str, e);
+            return;
+        }
+    };
+
+    let Some(router) = get_router() else {
+        return;
+    };
+
+    let was_unpaired = router.peer_trust_state(&controller).is_none();
+    if approve && was_unpaired {
+        let Some(storage) = with_storage(Arc::clone) else {
+            router.respond_to_pending_route_request(controller, false);
+            *ctx.net.status.write() = "配对保存失败".to_string();
+            sync_network_state(ctx);
+            return;
+        };
+        if let Err(e) = store_paired_peer(&storage, &router, controller, DeviceTrust::AskEachTime)
+            .and_then(|_| send_pairing_confirm_for_peer(&storage, &router, controller))
+        {
+            log::warn!("Failed to complete pairing for {}: {}", controller, e);
+            router.respond_to_pending_route_request(controller, false);
+            *ctx.net.status.write() = "配对保存失败".to_string();
+            sync_network_state(ctx);
+            return;
+        }
+    } else if !approve && was_unpaired {
+        router.send_pairing_reject(controller);
+    }
+
+    router.respond_to_pending_route_request(controller, approve);
+    *ctx.net.status.write() = if approve {
+        "已授权远控".to_string()
+    } else {
+        "已拒绝远控".to_string()
+    };
+    sync_network_state(ctx);
+}
+
 /// Trigger a LAN peer discovery scan.
 ///
 /// Broadcasts Discover + Announce messages on the local network.
@@ -960,18 +1212,24 @@ pub fn handle_scan_peers(mut ctx: CalcContext) {
     });
 }
 
-/// Toggle whether this node accepts remote control from other peers.
+/// Toggle whether this node accepts paired-device remote-control requests.
 ///
-/// When enabled, other peers can route actions to this node's calculator.
-/// When disabled, incoming remote actions are rejected.
+/// When enabled, paired and trusted peers may enter the route authorization
+/// flow. This does not grant control to arbitrary connected peers.
 pub fn handle_toggle_remote_control(mut ctx: CalcContext) {
     let current = *ctx.net.allow_remote_control.read();
     let next = !current;
     *ctx.net.allow_remote_control.write() = next;
+    let mut app_config = config::AppConfig::load();
+    app_config.network.allow_remote_control = next;
+    if let Err(e) = app_config.save() {
+        log::error!("Failed to save remote-control config: {}", e);
+    }
 
     if let Some(router) = get_router() {
         router.set_allow_remote_control(next);
         if !next {
+            router.deny_all_pending_route_requests("remote_control_disabled");
             let my_id = router.local_node_id();
             let controllers: Vec<_> = router
                 .my_controllers()
