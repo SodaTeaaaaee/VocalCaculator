@@ -3,16 +3,19 @@ pub mod android;
 pub mod discovery;
 mod handle;
 mod handshake;
+pub mod limits;
 pub mod protocol;
 pub mod router;
 mod runtime;
 pub mod session;
+mod session_registry;
 pub mod state;
+pub mod view;
 
 #[cfg(test)]
 mod tests;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
@@ -21,17 +24,17 @@ use crate::app::network_mode::NetworkMode;
 use crate::app::storage::Storage;
 use crate::ui::events::UiEvent;
 use ed25519_dalek::SigningKey;
+use limits::{
+    NETWORK_THREAD_SHUTDOWN_TIMEOUT, NETWORK_THREAD_START_TIMEOUT, RUNTIME_COMMAND_CAPACITY,
+};
 use protocol::{
     ExpectedPeerIdentity, NetworkCommand, NetworkMessage, NodeId, OutboundConnectRequest,
     valid_display_name,
 };
-use session::ActiveSession;
+use session_registry::SessionRegistry;
 use tokio::sync::{mpsc, watch};
 
-const RUNTIME_COMMAND_CAPACITY: usize = 256;
-pub(crate) const OUTGOING_MESSAGE_CAPACITY: usize = 256;
-const NETWORK_THREAD_START_TIMEOUT: Duration = Duration::from_secs(5);
-const NETWORK_THREAD_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) use limits::OUTGOING_MESSAGE_CAPACITY;
 type OutgoingMessage = (NodeId, NetworkMessage);
 
 fn runtime_command_channel() -> (mpsc::Sender<NetworkCommand>, mpsc::Receiver<NetworkCommand>) {
@@ -50,6 +53,10 @@ fn outgoing_message_channel() -> (
 pub use handle::NetworkHandle;
 pub use router::{Router, RoutingConfig};
 pub use state::{NetworkState, PeerInfo};
+pub use view::{
+    BindStatus, ConnectErrorKind, LocalDeviceView, NetworkStatusKind, PeerPresence, PeerRole,
+    PeerViewModel, RoutingView, ScanState,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NetworkStartError {
@@ -105,7 +112,7 @@ pub struct NetworkManager {
     command_tx: mpsc::Sender<NetworkCommand>,
 
     /// Active sessions (managed by the runtime; the manager holds a clone).
-    sessions: Arc<Mutex<HashMap<NodeId, ActiveSession>>>,
+    sessions: SessionRegistry,
 
     /// Effective mode of the currently running network runtime. Defaults to
     /// Offline so calls made before `start()` fail closed.
@@ -158,7 +165,7 @@ impl NetworkManager {
             outgoing_tx,
             ui_event_tx,
             command_tx,
-            sessions: Arc::new(Mutex::new(HashMap::new())),
+            sessions: SessionRegistry::new(),
             network_mode: NetworkMode::Offline,
             runtime_handle: None,
             thread_handle: None,
@@ -324,10 +331,7 @@ impl NetworkManager {
         log::info!("Network shutdown requested");
         self.runtime_handle.take();
         if self.runtime_shutdown_unconfirmed && self.thread_handle.is_none() {
-            self.sessions
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clear();
+            self.sessions.clear();
             self.network_mode = NetworkMode::Offline;
             return false;
         }
@@ -345,10 +349,7 @@ impl NetworkManager {
         if !stopped {
             self.runtime_shutdown_unconfirmed = true;
         }
-        self.sessions
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear();
+        self.sessions.clear();
         self.network_mode = NetworkMode::Offline;
         stopped
     }
@@ -364,9 +365,10 @@ impl NetworkManager {
                 addr,
                 self.network_mode,
             );
-            let _ = self.ui_event_tx.try_send(UiEvent::ConnectionError(
-                "loopback_address_required".to_string(),
-            ));
+            let _ = self.ui_event_tx.try_send(UiEvent::ConnectionError {
+                target: target_node_id,
+                kind: ConnectErrorKind::LoopbackAddressRequired,
+            });
             return false;
         }
         if target_node_id.is_some_and(|node_id| {
@@ -401,9 +403,10 @@ impl NetworkManager {
             Ok(()) => true,
             Err(error) => {
                 log::warn!("Network command queue rejected connect request: {error}");
-                let _ = self
-                    .ui_event_tx
-                    .try_send(UiEvent::ConnectionError("command_overloaded".to_string()));
+                let _ = self.ui_event_tx.try_send(UiEvent::ConnectionError {
+                    target: target_node_id,
+                    kind: ConnectErrorKind::from_reason_code("command_overloaded"),
+                });
                 false
             }
         }
@@ -443,12 +446,7 @@ impl NetworkManager {
     /// live TCP sessions appear here — discovered-but-not-connected peers
     /// are excluded.
     pub fn active_session_ids(&self) -> HashSet<NodeId> {
-        self.sessions
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .keys()
-            .copied()
-            .collect()
+        self.sessions.ids()
     }
 }
 

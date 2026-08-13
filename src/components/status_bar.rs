@@ -19,6 +19,8 @@ pub struct StatusBarProps {
     pub remote_controlled: bool,
     #[props(default)]
     pub executing_remotely: bool,
+    #[props(default)]
+    pub on_show_network: EventHandler<()>,
 }
 
 #[component]
@@ -53,11 +55,22 @@ pub fn StatusBar(props: StatusBarProps) -> Element {
                     class: "status-chip status-chip--remote",
                     "远控"
                 }
-            } else if network_ready {
-                span {
-                    class: "status-chip status-chip--network",
-                    "网络"
-                }
+            }
+
+            button {
+                class: if props.executing_remotely {
+                    "status-chip status-chip--network status-chip--executing"
+                } else if props.remote_controlled {
+                    "status-chip status-chip--network status-chip--remote"
+                } else if network_ready {
+                    "status-chip status-chip--network"
+                } else {
+                    "status-chip status-chip--network"
+                },
+                r#type: "button",
+                title: "附近设备 (F3)",
+                onclick: move |_| props.on_show_network.call(()),
+                "附近"
             }
 
             div {

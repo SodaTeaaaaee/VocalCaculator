@@ -125,6 +125,7 @@
 
 .mobile-quick-actions {
   grid-row: 3;
+  align-self: start;
   min-width: 0;
   display: none;
   align-items: center;

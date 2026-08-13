@@ -1,38 +1,58 @@
-# Rust build outputs
+# Rust / Dioxus build outputs
 /target/
 /dist/
 /.dioxus/
+/out/
 
-# Rust tool leftovers
+# Rust tool leftovers and crash dumps
 **/*.rs.bk
 *.pdb
+*.ilk
+*.exp
+rustc-ice-*.txt
 **/mutants.out*/
 *.profraw
 *.profdata
 /coverage/
+/htmlcov/
+/llvm-cov/
 /tarpaulin-report.html
+/cobertura.xml
 /lcov.info
+/nextest/
 
 # Editor / OS cruft
 .idea/
 .vscode/
+.cursor/
 .fleet/
 .zed/
 *.iml
+*.swp
+*.swo
+*~
 .DS_Store
 Thumbs.db
+ehthumbs.db
+desktop.ini
 
-# Temporary files
+# Temporary files and local secrets
 *.log
 *.tmp
 *.temp
 *.bak
 *.orig
+*.stackdump
 .env
 .env.*
 !.env.example
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
 
-# Android / release artifacts
+# Android / desktop release artifacts
 *.apk
 *.aab
 *.apks
@@ -41,32 +61,33 @@ Thumbs.db
 *.dmg
 *.deb
 *.rpm
-*.jks
-*.keystore
-.gradle/
+/.gradle/
 **/local.properties
 
-# Project-local toolchains, SDKs, downloads, and machine state
+# Project-local toolchains, SDKs, downloads, and machine state.
+# Keep the checked-in helper scripts under .local/.
 /.local/*
 !/.local/*.cmd
 !/.local/*.ps1
-.local/android-home/
-.local/android-sdk/
-.local/cargo/
-.local/downloads/
-.local/jdk/
-.local/logs/
-.local/rustup/
 
 # Cloned reference repos used during development
 .local/AR7778-digitized-MIDI/
 
-# Agent planning / sync documents (not source code)
+# Agent / AI tooling (machine state, not source)
 .agents/
 .claude/
-
-# Agent terminal session captures (machine state, not source code)
+.omp/
+.codex/
+.gemini/
+.continue/
+.aider*
 /terminals/
+
+# Local language-tool leftovers (eval / notebooks / web extras)
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+/node_modules/
 
 # Rust dependency snapshots are local-only unless we explicitly choose to vendor.
 /vendor/

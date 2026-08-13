@@ -536,7 +536,12 @@ async fn handle_incoming_message(
                     .unwrap_or_default()
                     .as_millis() as u64;
                 let rtt = now.saturating_sub(ping_sent) as u32;
-                let _ = command_tx.send(NetworkCommand::UpdateLatency(rtt)).await;
+                let _ = command_tx
+                    .send(NetworkCommand::UpdateLatency {
+                        node_id: remote_id,
+                        ms: rtt,
+                    })
+                    .await;
             }
         }
         NetworkMessage::Hello { .. } | NetworkMessage::HelloAck { .. } => {

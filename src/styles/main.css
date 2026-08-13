@@ -55,22 +55,22 @@
   --vc-net-executing: #2a9d55;
   --vc-net-remote: #4f72d9;
 
-  --vc-panel-bg: #f7f9fb;
-  --vc-panel-border: #d0d8e1;
+  --vc-panel-bg: #f6f8fb;
+  --vc-panel-border: #d7dee6;
   --vc-panel-input-bg: #eef2f5;
   --vc-panel-input-border: #c6d0da;
-  --vc-overlay-backdrop: rgba(15, 23, 42, 0.38);
-
-  --vc-matrix-bg: #edf2f6;
-  --vc-matrix-cell-bg: #f7f9fb;
-  --vc-matrix-cell-border: #cbd5df;
-  --vc-matrix-header-bg: #dde5ee;
-  --vc-matrix-self-fg: #187a3a;
-  --vc-matrix-peer-fg: #263341;
-  --vc-matrix-empty-fg: #778493;
-  --vc-matrix-check-bg: #23874a;
-  --vc-matrix-check-unchecked: #dfe6ed;
-  --vc-matrix-check-border: #aab7c5;
+  --vc-overlay-backdrop: rgba(15, 23, 42, 0.32);
+  --vc-card-bg: #ffffff;
+  --vc-card-border: #e4ebf2;
+  --vc-chip-bg: #eef2f6;
+  --vc-muted-fg: #6b7785;
+  --vc-accent: #2f7fc7;
+  --vc-pip-nearby: #2a9d55;
+  --vc-pip-connecting: #d97706;
+  --vc-pip-connected: #2f7fc7;
+  --vc-pip-unreachable: #c24141;
+  --vc-pip-stale: #8a94a0;
+  --vc-pip-mismatch: #c45c2c;
 
   --vc-toggle-on-bg: #24864b;
   --vc-toggle-on-hover: #2c9d59;
@@ -92,6 +92,7 @@
   --status-h: clamp(30px, 5.8cqh, 44px);
   --volume-h: clamp(30px, 5.4cqh, 42px);
   --mobile-actions-h: 0px;
+  --presence-h: 0px;
   --history-h: clamp(16px, 2.8cqh, 22px);
   --lcd-h: clamp(58px, 11cqh, 92px);
   --layout-gap: clamp(4px, 0.75cqh, 7px);
@@ -149,14 +150,6 @@
   --toggle-on-hover: var(--vc-toggle-on-hover);
   --toggle-knob: var(--vc-toggle-knob-bg);
   --toggle-knob-border: var(--vc-toggle-knob-border);
-  --matrix-bg: var(--vc-matrix-bg);
-  --matrix-cell-bg: var(--vc-matrix-cell-bg);
-  --matrix-header-bg: var(--vc-matrix-header-bg);
-  --matrix-empty-fg: var(--vc-matrix-empty-fg);
-  --matrix-self-label: var(--vc-matrix-self-fg);
-  --matrix-checked: var(--vc-matrix-check-bg);
-  --matrix-unchecked-bg: var(--vc-matrix-check-unchecked);
-  --matrix-unchecked-edge: var(--vc-matrix-check-border);
   --btn-eq: var(--vc-btn-eq-bg);
   --btn-memory: var(--vc-btn-memory-bg);
 }
@@ -200,15 +193,17 @@
   --vc-panel-border: #343d48;
   --vc-panel-input-bg: #252c35;
   --vc-panel-input-border: #3a4552;
-
-  --vc-matrix-bg: #1b2027;
-  --vc-matrix-cell-bg: #222933;
-  --vc-matrix-header-bg: #2b333e;
-  --vc-matrix-empty-fg: #7f8b98;
-  --vc-matrix-self-fg: #74d58f;
-  --vc-matrix-check-bg: #3fb469;
-  --vc-matrix-check-unchecked: #2d3540;
-  --vc-matrix-check-border: #4b5664;
+  --vc-card-bg: #232a33;
+  --vc-card-border: #3a4552;
+  --vc-chip-bg: #2a323c;
+  --vc-muted-fg: #8b97a4;
+  --vc-accent: #4f9adf;
+  --vc-pip-nearby: #3fb469;
+  --vc-pip-connecting: #e0a04a;
+  --vc-pip-connected: #4f9adf;
+  --vc-pip-unreachable: #e06a6a;
+  --vc-pip-stale: #7f8b98;
+  --vc-pip-mismatch: #e08a5a;
 
   --vc-toggle-on-bg: #2f8f55;
   --vc-toggle-on-hover: #39a764;
@@ -259,14 +254,17 @@
     --vc-panel-border: #343d48;
     --vc-panel-input-bg: #252c35;
     --vc-panel-input-border: #3a4552;
-    --vc-matrix-bg: #1b2027;
-    --vc-matrix-cell-bg: #222933;
-    --vc-matrix-header-bg: #2b333e;
-    --vc-matrix-empty-fg: #7f8b98;
-    --vc-matrix-self-fg: #74d58f;
-    --vc-matrix-check-bg: #3fb469;
-    --vc-matrix-check-unchecked: #2d3540;
-    --vc-matrix-check-border: #4b5664;
+    --vc-card-bg: #232a33;
+    --vc-card-border: #3a4552;
+    --vc-chip-bg: #2a323c;
+    --vc-muted-fg: #8b97a4;
+    --vc-accent: #4f9adf;
+    --vc-pip-nearby: #3fb469;
+    --vc-pip-connecting: #e0a04a;
+    --vc-pip-connected: #4f9adf;
+    --vc-pip-unreachable: #e06a6a;
+    --vc-pip-stale: #7f8b98;
+    --vc-pip-mismatch: #e08a5a;
     --vc-toggle-on-bg: #2f8f55;
     --vc-toggle-on-hover: #39a764;
     --vc-toggle-off-bg: #633030;
@@ -345,7 +343,9 @@ button {
 .panel-action,
 .toggle-switch,
 .toggle-switch__knob,
-.matrix-cell {
+.device-card,
+.this-device,
+.presence-banner {
   transition:
     background-color 0.2s ease,
     border-color 0.2s ease,

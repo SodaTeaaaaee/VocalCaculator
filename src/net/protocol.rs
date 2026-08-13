@@ -323,10 +323,12 @@ pub(crate) enum NetworkCommand {
     IncomingMessage(NodeId, NetworkMessage),
     /// Initiate an outbound TCP connection to a peer.
     ConnectToPeer(OutboundConnectRequest),
-    /// Update the measured round-trip latency (in milliseconds).
-    UpdateLatency(u32),
+    /// Update the measured round-trip latency for one authenticated peer.
+    UpdateLatency { node_id: NodeId, ms: u32 },
     /// Trigger a LAN peer discovery scan.
     Scan,
+    /// The in-flight scan burst finished.
+    ScanFinished,
 }
 
 #[cfg(test)]

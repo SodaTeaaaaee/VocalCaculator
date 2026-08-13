@@ -1,7 +1,25 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
+use crate::ui::command::WorkbenchTab;
 use crate::ui::state::CalcContext;
+
+/// Whether the wide-desktop workbench is the interaction surface.
+#[derive(Clone, Copy)]
+pub struct WorkbenchSurface(pub Signal<bool>);
+
+const WORKBENCH_SURFACE_SCRIPT: &str = r#"
+(() => {
+    const send = () => {
+        const width = window.innerWidth;
+        const height = window.innerHeight;
+        dioxus.send(width >= 941 && height > 0 && (width / height) > 0.8);
+    };
+    send();
+    window.addEventListener("resize", send);
+    await new Promise(() => {});
+})();
+"#;
 
 const KEYBOARD_LISTENER_SCRIPT: &str = r#"
 (() => {
@@ -126,32 +144,106 @@ const KEYBOARD_LISTENER_SCRIPT: &str = r#"
 await new Promise(() => {});
 "#;
 
+/// Track whether F2/F3 should change a workbench tab instead of an overlay.
+pub fn use_workbench_surface() -> Signal<bool> {
+    #[cfg(target_os = "android")]
+    {
+        use_signal(|| false)
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let mut wide = use_signal(|| true);
+        use_future(move || async move {
+            let mut eval = document::eval(WORKBENCH_SURFACE_SCRIPT);
+            loop {
+                match eval.recv::<bool>().await {
+                    Ok(is_wide) => wide.set(is_wide),
+                    Err(_) => break,
+                }
+            }
+        });
+        wide
+    }
+}
+
+pub fn close_overlays(ctx: &CalcContext) {
+    let mut about = ctx.audio.about_visible;
+    let mut settings = ctx.settings.panel_visible;
+    let mut nearby = ctx.net.panel_visible;
+    about.set(false);
+    settings.set(false);
+    nearby.set(false);
+}
+
+pub fn activate_settings(ctx: &CalcContext, workbench_surface: bool) {
+    if workbench_surface {
+        close_overlays(ctx);
+        let mut tab = ctx.net.workbench_tab;
+        tab.set(WorkbenchTab::Settings);
+        return;
+    }
+    if *ctx.settings.panel_visible.read() {
+        let mut settings = ctx.settings.panel_visible;
+        settings.set(false);
+        return;
+    }
+    close_overlays(ctx);
+    let mut settings = ctx.settings.panel_visible;
+    settings.set(true);
+}
+
+pub fn activate_nearby(ctx: &CalcContext, workbench_surface: bool) {
+    if workbench_surface {
+        close_overlays(ctx);
+        let mut tab = ctx.net.workbench_tab;
+        tab.set(WorkbenchTab::Nearby);
+        return;
+    }
+    if *ctx.net.panel_visible.read() {
+        let mut nearby = ctx.net.panel_visible;
+        nearby.set(false);
+        return;
+    }
+    close_overlays(ctx);
+    let mut nearby = ctx.net.panel_visible;
+    nearby.set(true);
+}
+
+fn reveal_nearby(ctx: &CalcContext, workbench_surface: bool) {
+    if workbench_surface {
+        close_overlays(ctx);
+        let mut tab = ctx.net.workbench_tab;
+        tab.set(WorkbenchTab::Nearby);
+        return;
+    }
+    if *ctx.net.panel_visible.read() {
+        return;
+    }
+    close_overlays(ctx);
+    let mut nearby = ctx.net.panel_visible;
+    nearby.set(true);
+}
+
+fn activate_about(ctx: &CalcContext) {
+    let already_open = *ctx.audio.about_visible.read();
+    close_overlays(ctx);
+    if !already_open {
+        let mut about = ctx.audio.about_visible;
+        about.set(true);
+    }
+}
+
 /// Props for the [`KeyboardHandler`] component.
 #[derive(Props, Clone, PartialEq)]
 pub struct KeyboardHandlerProps {
-    /// When `true`, most keys are rejected (network panel has focus).
-    pub network_panel_visible: bool,
-    /// When `true`, most keys are rejected (settings panel has focus).
-    pub settings_panel_visible: bool,
-    /// When `true`, only Escape is accepted (closes the about dialog).
-    pub about_visible: bool,
-
     /// Fired with an action string (e.g. `"digit:5"`, `"add"`, `"equals"`)
     /// when a calculator-relevant key is pressed.
     pub on_keyboard_action: EventHandler<String>,
-    /// Fired when Escape is pressed while the about dialog is visible.
-    pub on_close_about: EventHandler<()>,
-    /// Fired when Escape closes the settings panel.
-    pub on_close_settings: EventHandler<()>,
-    /// Fired when Escape closes the network panel.
-    pub on_close_network_settings: EventHandler<()>,
     /// Fired by global keyboard shortcuts for app controls.
     pub on_switch_audio_mode: EventHandler<()>,
     pub on_toggle_mute: EventHandler<()>,
     pub on_toggle_theme: EventHandler<()>,
-    pub on_show_about: EventHandler<()>,
-    pub on_show_settings: EventHandler<()>,
-    pub on_show_network_settings: EventHandler<()>,
     pub on_scan_peers: EventHandler<()>,
     /// Fired with `true` on key-down (accepted key), `false` on key-up.
     pub on_keyboard_pressed: EventHandler<bool>,
@@ -181,7 +273,7 @@ enum KeyboardShortcut {
     ToggleMute,
     ShowAbout,
     ShowSettings,
-    ShowNetworkSettings,
+    ShowNearby,
     ScanPeers,
 }
 
@@ -255,7 +347,7 @@ fn shortcut_from_message(message: &KeyboardMessage) -> Option<KeyboardShortcut> 
         "NumpadEnter" => return Some(KeyboardShortcut::Calculator("equals")),
         "F1" => return Some(KeyboardShortcut::ShowAbout),
         "F2" => return Some(KeyboardShortcut::ShowSettings),
-        "F3" => return Some(KeyboardShortcut::ShowNetworkSettings),
+        "F3" => return Some(KeyboardShortcut::ShowNearby),
         "F5" => return Some(KeyboardShortcut::ScanPeers),
         "F9" => return Some(KeyboardShortcut::Calculator("plus-minus")),
         _ => {}
@@ -277,7 +369,7 @@ fn shortcut_from_message(message: &KeyboardMessage) -> Option<KeyboardShortcut> 
             "b" => Some(KeyboardShortcut::Calculator("memory-subtract")),
             "c" => Some(KeyboardShortcut::Calculator("clear")),
             "m" => Some(KeyboardShortcut::Calculator("memory-recall")),
-            "n" => Some(KeyboardShortcut::Calculator("plus-minus")),
+            "n" => Some(KeyboardShortcut::ShowNearby),
             "o" => Some(KeyboardShortcut::SwitchAudioMode),
             "p" => Some(KeyboardShortcut::Calculator("percent")),
             "r" | "s" => Some(KeyboardShortcut::Calculator("sqrt")),
@@ -296,15 +388,18 @@ fn overlay_is_open(ctx: &CalcContext) -> bool {
         || *ctx.net.panel_visible.read()
 }
 
-fn close_top_overlay(props: &KeyboardHandlerProps, ctx: &CalcContext) -> bool {
+fn close_top_overlay(ctx: &CalcContext) -> bool {
     if *ctx.audio.about_visible.read() {
-        props.on_close_about.call(());
+        let mut about = ctx.audio.about_visible;
+        about.set(false);
         true
     } else if *ctx.settings.panel_visible.read() {
-        props.on_close_settings.call(());
+        let mut settings = ctx.settings.panel_visible;
+        settings.set(false);
         true
     } else if *ctx.net.panel_visible.read() {
-        props.on_close_network_settings.call(());
+        let mut nearby = ctx.net.panel_visible;
+        nearby.set(false);
         true
     } else {
         false
@@ -320,13 +415,14 @@ fn emit_calculator_action(props: &KeyboardHandlerProps, action: &'static str) {
 fn dispatch_shortcut(
     props: &KeyboardHandlerProps,
     ctx: &CalcContext,
+    workbench_surface: bool,
     shortcut: KeyboardShortcut,
     from_editable: bool,
     repeat: bool,
 ) {
     if from_editable {
         if shortcut == KeyboardShortcut::Escape {
-            close_top_overlay(props, ctx);
+            close_top_overlay(ctx);
         }
         return;
     }
@@ -342,38 +438,18 @@ fn dispatch_shortcut(
             }
         }
         KeyboardShortcut::Escape => {
-            if !close_top_overlay(props, ctx) {
+            if !close_top_overlay(ctx) {
                 emit_calculator_action(props, "all-clear");
             }
         }
         KeyboardShortcut::ToggleTheme => props.on_toggle_theme.call(()),
         KeyboardShortcut::SwitchAudioMode => props.on_switch_audio_mode.call(()),
         KeyboardShortcut::ToggleMute => props.on_toggle_mute.call(()),
-        KeyboardShortcut::ShowAbout => {
-            if *ctx.audio.about_visible.read() {
-                props.on_close_about.call(());
-            } else {
-                props.on_show_about.call(());
-            }
-        }
-        KeyboardShortcut::ShowSettings => {
-            if *ctx.settings.panel_visible.read() {
-                props.on_close_settings.call(());
-            } else {
-                props.on_show_settings.call(());
-            }
-        }
-        KeyboardShortcut::ShowNetworkSettings => {
-            if *ctx.net.panel_visible.read() {
-                props.on_close_network_settings.call(());
-            } else {
-                props.on_show_network_settings.call(());
-            }
-        }
+        KeyboardShortcut::ShowAbout => activate_about(ctx),
+        KeyboardShortcut::ShowSettings => activate_settings(ctx, workbench_surface),
+        KeyboardShortcut::ShowNearby => activate_nearby(ctx, workbench_surface),
         KeyboardShortcut::ScanPeers => {
-            if !*ctx.net.panel_visible.read() {
-                props.on_show_network_settings.call(());
-            }
+            reveal_nearby(ctx, workbench_surface);
             props.on_scan_peers.call(());
         }
     }
@@ -382,6 +458,7 @@ fn dispatch_shortcut(
 fn dispatch_keyboard_message(
     props: &KeyboardHandlerProps,
     ctx: &CalcContext,
+    workbench_surface: bool,
     message: KeyboardMessage,
 ) {
     if message.is_key_up() {
@@ -394,7 +471,14 @@ fn dispatch_keyboard_message(
     }
 
     if let Some(shortcut) = shortcut_from_message(&message) {
-        dispatch_shortcut(props, ctx, shortcut, message.from_editable, message.repeat);
+        dispatch_shortcut(
+            props,
+            ctx,
+            workbench_surface,
+            shortcut,
+            message.from_editable,
+            message.repeat,
+        );
     }
 }
 
@@ -402,6 +486,7 @@ fn dispatch_keyboard_message(
 #[component]
 pub fn KeyboardHandler(props: KeyboardHandlerProps) -> Element {
     let ctx = use_context::<CalcContext>();
+    let WorkbenchSurface(workbench_surface) = use_context::<WorkbenchSurface>();
 
     use_future(move || {
         let props = props.clone();
@@ -412,7 +497,9 @@ pub fn KeyboardHandler(props: KeyboardHandlerProps) -> Element {
 
             loop {
                 match eval.recv::<KeyboardMessage>().await {
-                    Ok(message) => dispatch_keyboard_message(&props, &ctx, message),
+                    Ok(message) => {
+                        dispatch_keyboard_message(&props, &ctx, workbench_surface(), message)
+                    }
                     Err(err) => {
                         log::warn!("Keyboard listener stopped: {}", err);
                         break;
@@ -481,7 +568,6 @@ mod tests {
         assert_eq!(action_for("r", "KeyR"), Some("sqrt"));
         assert_eq!(action_for("s", "KeyS"), Some("sqrt"));
         assert_eq!(action_for("u", "KeyU"), Some("mu"));
-        assert_eq!(action_for("n", "KeyN"), Some("plus-minus"));
         assert_eq!(action_for("F9", "F9"), Some("plus-minus"));
         assert_eq!(action_for("m", "KeyM"), Some("memory-recall"));
         assert_eq!(action_for("a", "KeyA"), Some("memory-add"));
@@ -501,7 +587,11 @@ mod tests {
         );
         assert_eq!(
             shortcut_from_message(&msg("F3", "F3")),
-            Some(KeyboardShortcut::ShowNetworkSettings)
+            Some(KeyboardShortcut::ShowNearby)
+        );
+        assert_eq!(
+            shortcut_from_message(&msg("n", "KeyN")),
+            Some(KeyboardShortcut::ShowNearby)
         );
         assert_eq!(
             shortcut_from_message(&msg("F5", "F5")),

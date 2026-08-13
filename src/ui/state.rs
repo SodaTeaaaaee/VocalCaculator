@@ -7,7 +7,10 @@ use dioxus::prelude::Signal;
 use dioxus::prelude::WritableExt;
 
 use crate::audio::AudioMode;
+use crate::net::protocol::NodeId;
+use crate::net::view::{BindStatus, PeerViewModel};
 use crate::traits::DisplayUpdater;
+use crate::ui::command::WorkbenchTab;
 
 // ---------------------------------------------------------------------------
 // CalcDisplay
@@ -39,25 +42,6 @@ pub struct AudioUiState {
 }
 
 // ---------------------------------------------------------------------------
-// PeerDisplayInfo
-// ---------------------------------------------------------------------------
-
-/// Display-friendly snapshot of a single peer, kept in a Vec inside
-/// `NetUiState`.
-#[derive(Clone, Debug, PartialEq)]
-pub struct PeerDisplayInfo {
-    pub name: Signal<String>,
-    pub address: Signal<String>,
-    /// Active TCP session with this peer.
-    pub is_connected: Signal<bool>,
-    /// This peer is the single selected remote calculator executor.
-    pub route_active: Signal<bool>,
-    pub latency_ms: Signal<i32>,
-    pub index: Signal<i32>,
-    pub node_id_string: Signal<String>,
-}
-
-// ---------------------------------------------------------------------------
 // NetUiState
 // ---------------------------------------------------------------------------
 
@@ -67,11 +51,16 @@ pub struct NetUiState {
     pub panel_visible: Signal<bool>,
     pub scanning: Signal<bool>,
     pub status: Signal<String>,
-    pub connected_peer_index: Signal<i32>,
-    pub peers: Signal<Vec<PeerDisplayInfo>>,
+    pub peers: Signal<Vec<PeerViewModel>>,
     pub remote_controlled: Signal<bool>,
     pub executing_remotely: Signal<bool>,
     pub allow_remote_control: Signal<bool>,
+    pub bind: Signal<BindStatus>,
+    pub local_node_id: Signal<Option<NodeId>>,
+    pub local_fingerprint: Signal<String>,
+    pub controllers: Signal<Vec<NodeId>>,
+    pub selected_executor: Signal<Option<NodeId>>,
+    pub workbench_tab: Signal<WorkbenchTab>,
 }
 
 // ---------------------------------------------------------------------------

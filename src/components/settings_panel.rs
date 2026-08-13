@@ -5,7 +5,7 @@ use super::overlay::{Overlay, OverlayVariant};
 use super::panel_controls::{AudioControlGroup, ControlRow, PanelSection};
 
 // ---------------------------------------------------------------------------
-// SettingsPanel — device name configuration overlay
+// SettingsPanel — audio, theme, about (optional device name)
 // ---------------------------------------------------------------------------
 
 #[derive(Props, Clone, PartialEq)]

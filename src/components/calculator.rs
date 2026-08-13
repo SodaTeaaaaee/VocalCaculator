@@ -1,7 +1,7 @@
 //! CalculatorUI -- root Dioxus component for the skeuomorphic calculator.
 //!
 //! Owns the 7-row button layout table and renders the full calculator
-//! body including all sub-components: BrandLabel, StatusBar,
+//! body including all sub-components: BrandLabel, PresenceBanner, StatusBar,
 //! HistoryText, LcdDisplay, ButtonGrid.
 
 use dioxus::prelude::*;
@@ -13,10 +13,18 @@ use super::display::LcdDisplay;
 use super::history_text::HistoryText;
 #[cfg(not(target_os = "android"))]
 use super::icon::{Icon, IconName};
-use super::keyboard::KeyboardHandler;
-use super::network_panel::{NetworkPanel, NetworkPanelContent, PeerDisplayInfo};
-use super::settings_panel::{SettingsContent, SettingsPanel};
+use super::keyboard::{
+    KeyboardHandler, WorkbenchSurface, activate_nearby, activate_settings, use_workbench_surface,
+};
+use super::network_panel::NetworkPanel;
+use super::presence_banner::PresenceBanner;
+use super::settings_panel::SettingsPanel;
 use super::status_bar::{MobileQuickActions, StatusBar};
+use crate::app::network_mode::{self, NetworkMode};
+use crate::components::workbench::Workbench;
+use crate::net::protocol::{LAN_FIXED_PORT, NodeId};
+use crate::net::view::{BindStatus, PeerViewModel};
+use crate::ui::state::CalcContext;
 
 // ---------------------------------------------------------------------------
 // ButtonDef -- static descriptor for a single calculator button
@@ -133,47 +141,10 @@ pub const BUTTON_ROWS: [&[ButtonDef]; 7] = [
 // CalculatorUI -- root component
 // ---------------------------------------------------------------------------
 
-/// Props for the CalculatorUI root component.
-///
-/// All display state is passed in as simple `String` / `bool` props.
-/// Signal bridging (Phase 4) will replace these with reactive signals.
+/// Event handlers for the calculator chrome. Display / net / audio / settings
+/// are read from [`CalcContext`].
 #[derive(Props, Clone, PartialEq)]
 pub struct CalculatorUIProps {
-    // -- Display data --
-    pub display_text: String,
-    pub history_text: String,
-    pub memory_indicator: String,
-    pub mode_indicator: String,
-    pub error_state: bool,
-    pub audio_status: String,
-    pub audio_muted: bool,
-    pub audio_volume: f64,
-    pub dark_mode: bool,
-
-    // -- Network status --
-    pub network_status: String,
-    pub remote_controlled: bool,
-    pub executing_remotely: bool,
-
-    // -- Overlay visibility --
-    pub about_visible: bool,
-    pub settings_panel_visible: bool,
-    pub network_panel_visible: bool,
-    pub scanning: bool,
-    pub allow_remote_control: bool,
-
-    // -- Remote calculator peers --
-    pub peers: Vec<PeerDisplayInfo>,
-    pub connected_peer_index: i32,
-
-    // -- App metadata --
-    pub app_version: String,
-
-    // -- Settings --
-    pub settings_display_name: String,
-    pub settings_save_status: String,
-
-    // -- Calculator event handlers --
     pub on_digit_pressed: EventHandler<u8>,
     pub on_decimal_point: EventHandler<()>,
     pub on_operator_pressed: EventHandler<String>,
@@ -189,35 +160,15 @@ pub struct CalculatorUIProps {
     pub on_memory_add: EventHandler<()>,
     pub on_memory_subtract: EventHandler<()>,
     pub on_memory_clear: EventHandler<()>,
-
-    // -- Audio callbacks --
     pub on_switch_audio_mode: EventHandler<()>,
     pub on_toggle_mute: EventHandler<()>,
     pub on_volume_changed: EventHandler<f64>,
-
-    // -- Theme --
     pub on_toggle_theme: EventHandler<()>,
-
-    // -- About dialog --
-    pub on_show_about: EventHandler<()>,
-    pub on_close_about: EventHandler<()>,
-
-    // -- Settings panel --
-    pub on_show_settings: EventHandler<()>,
-    pub on_close_settings: EventHandler<()>,
     pub on_save_display_name: EventHandler<String>,
-
-    // -- Network panel --
-    pub on_show_network_settings: EventHandler<()>,
-    pub on_close_network_settings: EventHandler<()>,
-    pub on_connect_to_peer: EventHandler<String>,
-    pub on_disconnect_peer: EventHandler<String>,
+    pub on_use_executor: EventHandler<NodeId>,
+    pub on_stop_executor: EventHandler<NodeId>,
     pub on_scan_peers: EventHandler<()>,
     pub on_toggle_remote_control: EventHandler<()>,
-
-    // -- Keyboard --
-    pub keyboard_pressed: bool,
-    pub last_keyboard_action: String,
     pub on_keyboard_action: EventHandler<String>,
     pub on_keyboard_pressed: EventHandler<bool>,
     pub on_last_action: EventHandler<String>,
@@ -229,17 +180,55 @@ pub struct CalculatorUIProps {
 /// layout.  Delegates each visual section to a dedicated sub-component.
 #[component]
 pub fn CalculatorUI(props: CalculatorUIProps) -> Element {
+    let ctx = use_context::<CalcContext>();
+    let workbench_surface = use_workbench_surface();
+    use_context_provider(|| WorkbenchSurface(workbench_surface));
+
     let mut split_left_px = use_signal(|| None::<i32>);
     let mut split_dragging = use_signal(|| false);
-    let mut workbench_tab = use_signal(|| WorkbenchTab::Overview);
     let split_style = split_left_px()
         .map(|value| format!("--split-left: {value}px;"))
         .unwrap_or_else(|| "--split-left: 40vw;".to_string());
 
-    // Remote-controlled glow state (applied via CSS class)
-    let body_class = if props.executing_remotely {
+    let display_text = (*ctx.display.text.read()).clone();
+    let history_text = (*ctx.display.history.read()).clone();
+    let memory_indicator = (*ctx.display.memory_indicator.read()).clone();
+    let error_state = *ctx.display.is_error.read();
+    let mode_indicator = (*ctx.audio.mode_indicator.read()).clone();
+    let audio_status = (*ctx.audio.audio_status.read()).clone();
+    let audio_muted = *ctx.audio.muted.read();
+    let audio_volume = *ctx.audio.volume.read();
+    let dark_mode = *ctx.audio.dark_mode.read();
+    let about_visible = *ctx.audio.about_visible.read();
+    let network_status = (*ctx.net.status.read()).clone();
+    let remote_controlled = *ctx.net.remote_controlled.read();
+    let executing_remotely = *ctx.net.executing_remotely.read();
+    let scanning = *ctx.net.scanning.read();
+    let allow_remote_control = *ctx.net.allow_remote_control.read();
+    let bind = (*ctx.net.bind.read()).clone();
+    let fingerprint = (*ctx.net.local_fingerprint.read()).clone();
+    let peers = (*ctx.net.peers.read()).clone();
+    let controllers = (*ctx.net.controllers.read()).clone();
+    let selected_executor = *ctx.net.selected_executor.read();
+    let workbench_tab = *ctx.net.workbench_tab.read();
+    let network_panel_visible = *ctx.net.panel_visible.read();
+    let settings_panel_visible = *ctx.settings.panel_visible.read();
+    let display_name = (*ctx.settings.display_name.read()).clone();
+    let save_status = (*ctx.settings.save_status.read()).clone();
+    let app_version = (*ctx.app_version.read()).clone();
+    let keyboard_pressed = *ctx.keyboard_pressed.read();
+    let last_keyboard_action = (*ctx.last_keyboard_action.read()).clone();
+
+    let controller_names = controllers
+        .iter()
+        .map(|id| peer_display_name(&peers, *id))
+        .collect::<Vec<_>>();
+    let selected_executor_name = selected_executor.map(|id| peer_display_name(&peers, id));
+    let port = listener_port(&bind);
+    let network_mode_label = network_mode_label();
+    let body_class = if executing_remotely {
         "calculator-body executing-remotely"
-    } else if props.remote_controlled {
+    } else if remote_controlled {
         "calculator-body remote-controlled"
     } else {
         "calculator-body"
@@ -267,50 +256,78 @@ pub fn CalculatorUI(props: CalculatorUIProps) -> Element {
 
                     div { class: "calculator-body-inner",
 
-                        // [0] Brand and active mode
                         BrandLabel {
-                            dark_mode: props.dark_mode,
-                            mode_indicator: props.mode_indicator.clone(),
+                            dark_mode: dark_mode,
+                            mode_indicator: mode_indicator.clone(),
                         }
 
-                        // [1] Status bar
-                        StatusBar {
-                            memory_indicator: props.memory_indicator.clone(),
-                            audio_status: props.audio_status.clone(),
-                            mode_indicator: props.mode_indicator.clone(),
-                            network_status: props.network_status.clone(),
-                            error_state: props.error_state,
-                            remote_controlled: props.remote_controlled,
-                            executing_remotely: props.executing_remotely,
+                        div { class: "calculator-status-stack",
+                            PresenceBanner {
+                                bind: bind.clone(),
+                                network_mode_label: network_mode_label.clone(),
+                                status_text: network_status.clone(),
+                                remote_controlled: remote_controlled,
+                                executing_remotely: executing_remotely,
+                                controller_names: controller_names.clone(),
+                                selected_executor_name: selected_executor_name.clone(),
+                                port: port,
+                            }
+
+                            StatusBar {
+                            memory_indicator: memory_indicator.clone(),
+                            audio_status: audio_status.clone(),
+                            mode_indicator: mode_indicator.clone(),
+                            network_status: network_status.clone(),
+                            error_state: error_state,
+                            remote_controlled: remote_controlled,
+                            executing_remotely: executing_remotely,
+                            on_show_network: {
+                                let ctx = ctx.clone();
+                                move |_| activate_nearby(&ctx, workbench_surface())
+                            },
+                            }
                         }
 
-                        // [2] Mobile-only quick actions
                         MobileQuickActions {
-                            dark_mode: props.dark_mode,
-                            network_status: props.network_status.clone(),
-                            remote_controlled: props.remote_controlled,
-                            executing_remotely: props.executing_remotely,
+                            dark_mode: dark_mode,
+                            network_status: network_status.clone(),
+                            remote_controlled: remote_controlled,
+                            executing_remotely: executing_remotely,
                             on_toggle_theme: props.on_toggle_theme,
                             on_switch_audio_mode: props.on_switch_audio_mode,
-                            on_show_about: props.on_show_about,
-                            on_show_network_settings: props.on_show_network_settings,
-                            on_show_settings: props.on_show_settings,
+                            on_show_about: {
+                                let mut ctx = ctx.clone();
+                                move |_| {
+                                    let already_open = *ctx.audio.about_visible.read();
+                                    *ctx.audio.about_visible.write() = false;
+                                    *ctx.settings.panel_visible.write() = false;
+                                    *ctx.net.panel_visible.write() = false;
+                                    if !already_open {
+                                        *ctx.audio.about_visible.write() = true;
+                                    }
+                                }
+                            },
+                            on_show_network_settings: {
+                                let ctx = ctx.clone();
+                                move |_| activate_nearby(&ctx, workbench_surface())
+                            },
+                            on_show_settings: {
+                                let ctx = ctx.clone();
+                                move |_| activate_settings(&ctx, workbench_surface())
+                            },
                         }
 
-                        // [3] History text
                         HistoryText {
-                            history_text: props.history_text.clone(),
-                            dark_mode: props.dark_mode,
+                            history_text: history_text.clone(),
+                            dark_mode: dark_mode,
                         }
 
-                        // [4] LCD display
                         LcdDisplay {
-                            display_text: props.display_text.clone(),
-                            error_state: props.error_state,
-                            dark_mode: props.dark_mode,
+                            display_text: display_text.clone(),
+                            error_state: error_state,
+                            dark_mode: dark_mode,
                         }
 
-                        // [5] Button grid (7 rows)
                         ButtonGrid {
                             on_digit_pressed: props.on_digit_pressed,
                             on_decimal_point: props.on_decimal_point,
@@ -327,8 +344,8 @@ pub fn CalculatorUI(props: CalculatorUIProps) -> Element {
                             on_memory_add: props.on_memory_add,
                             on_memory_subtract: props.on_memory_subtract,
                             on_memory_clear: props.on_memory_clear,
-                            keyboard_pressed: props.keyboard_pressed,
-                            last_keyboard_action: props.last_keyboard_action.clone(),
+                            keyboard_pressed: keyboard_pressed,
+                            last_keyboard_action: last_keyboard_action.clone(),
                         }
                     }
                 }
@@ -363,96 +380,116 @@ pub fn CalculatorUI(props: CalculatorUIProps) -> Element {
             }
 
             Workbench {
-                active_tab: workbench_tab(),
-                audio_status: props.audio_status.clone(),
-                audio_muted: props.audio_muted,
-                audio_volume: props.audio_volume,
-                mode_indicator: props.mode_indicator.clone(),
-                dark_mode: props.dark_mode,
-                network_status: props.network_status.clone(),
-                remote_controlled: props.remote_controlled,
-                executing_remotely: props.executing_remotely,
-                scanning: props.scanning,
-                allow_remote_control: props.allow_remote_control,
-                settings_display_name: props.settings_display_name.clone(),
-                settings_save_status: props.settings_save_status.clone(),
-                app_version: props.app_version.clone(),
-                peers: props.peers.clone(),
-                connected_peer_index: props.connected_peer_index,
-                on_tab_change: move |tab| workbench_tab.set(tab),
+                active_tab: workbench_tab,
+                on_tab_change: {
+                    let mut ctx = ctx.clone();
+                    move |tab| *ctx.net.workbench_tab.write() = tab
+                },
+                display_name: display_name.clone(),
+                save_status: save_status.clone(),
+                fingerprint: fingerprint.clone(),
+                network_mode_label: network_mode_label.clone(),
+                bind: bind.clone(),
+                allow_remote_control: allow_remote_control,
+                controller_names: controller_names.clone(),
+                selected_executor_name: selected_executor_name.clone(),
+                on_save_name: props.on_save_display_name,
+                on_toggle_remote_control: move |_| props.on_toggle_remote_control.call(()),
+                scanning: scanning,
+                peers: peers.clone(),
+                on_scan: move |_| props.on_scan_peers.call(()),
+                on_use_executor: props.on_use_executor,
+                on_stop_executor: props.on_stop_executor,
+                audio_status: audio_status.clone(),
+                audio_muted: audio_muted,
+                audio_volume: audio_volume,
+                mode_indicator: mode_indicator.clone(),
+                dark_mode: dark_mode,
+                app_version: app_version.clone(),
                 on_switch_audio_mode: props.on_switch_audio_mode,
                 on_toggle_mute: props.on_toggle_mute,
                 on_volume_changed: props.on_volume_changed,
                 on_toggle_theme: props.on_toggle_theme,
-                on_show_about: props.on_show_about,
-                on_save_display_name: props.on_save_display_name,
-                on_connect_to_peer: props.on_connect_to_peer,
-                on_disconnect_peer: props.on_disconnect_peer,
-                on_scan_peers: props.on_scan_peers,
-                on_toggle_remote_control: props.on_toggle_remote_control,
+                on_show_about: {
+                    let mut ctx = ctx.clone();
+                    move |_| {
+                        *ctx.settings.panel_visible.write() = false;
+                        *ctx.net.panel_visible.write() = false;
+                        *ctx.audio.about_visible.write() = true;
+                    }
+                },
             }
 
-            if props.network_panel_visible {
+            if network_panel_visible {
                 NetworkPanel {
                     visible: true,
-                    network_status: props.network_status.clone(),
-                    remote_controlled: props.remote_controlled,
-                    executing_remotely: props.executing_remotely,
-                    scanning: props.scanning,
-                    allow_remote_control: props.allow_remote_control,
-                    audio_muted: props.audio_muted,
-                    peers: props.peers.clone(),
-                    connected_peer_index: props.connected_peer_index,
-                    onclose: move |_| props.on_close_network_settings.call(()),
-                    onconnect: move |id| props.on_connect_to_peer.call(id),
-                    ondisconnect: move |id| props.on_disconnect_peer.call(id),
-                    onscan: move |_| props.on_scan_peers.call(()),
+                    display_name: display_name.clone(),
+                    save_status: save_status.clone(),
+                    fingerprint: fingerprint.clone(),
+                    network_mode_label: network_mode_label.clone(),
+                    bind: bind.clone(),
+                    allow_remote_control: allow_remote_control,
+                    controller_names: controller_names.clone(),
+                    selected_executor_name: selected_executor_name.clone(),
+                    scanning: scanning,
+                    peers: peers.clone(),
+                    onclose: {
+                        let mut ctx = ctx.clone();
+                        move |_| *ctx.net.panel_visible.write() = false
+                    },
+                    on_save_name: props.on_save_display_name,
                     ontoggle_remote_control: move |_| props.on_toggle_remote_control.call(()),
-                    ontoggle_mute: move |_| props.on_toggle_mute.call(()),
+                    onscan: move |_| props.on_scan_peers.call(()),
+                    onconnect: props.on_use_executor,
+                    ondisconnect: props.on_stop_executor,
                 }
             }
 
-            if props.settings_panel_visible {
+            if settings_panel_visible {
                 SettingsPanel {
-                    display_name: props.settings_display_name.clone(),
-                    save_status: props.settings_save_status.clone(),
-                    audio_status: props.audio_status.clone(),
-                    audio_muted: props.audio_muted,
-                    audio_volume: props.audio_volume,
-                    mode_indicator: props.mode_indicator.clone(),
-                    dark_mode: props.dark_mode,
-                    app_version: props.app_version.clone(),
-                    onclose: move |_| props.on_close_settings.call(()),
+                    display_name: display_name.clone(),
+                    save_status: save_status.clone(),
+                    audio_status: audio_status.clone(),
+                    audio_muted: audio_muted,
+                    audio_volume: audio_volume,
+                    mode_indicator: mode_indicator.clone(),
+                    dark_mode: dark_mode,
+                    app_version: app_version.clone(),
+                    onclose: {
+                        let mut ctx = ctx.clone();
+                        move |_| *ctx.settings.panel_visible.write() = false
+                    },
                     on_save_name: move |name| props.on_save_display_name.call(name),
                     on_switch_audio_mode: props.on_switch_audio_mode,
                     on_toggle_mute: props.on_toggle_mute,
                     on_volume_changed: props.on_volume_changed,
                     on_toggle_theme: props.on_toggle_theme,
-                    on_show_about: props.on_show_about,
+                    on_show_about: {
+                        let mut ctx = ctx.clone();
+                        move |_| {
+                            *ctx.settings.panel_visible.write() = false;
+                            *ctx.net.panel_visible.write() = false;
+                            *ctx.audio.about_visible.write() = true;
+                        }
+                    },
                 }
             }
 
-            if props.about_visible {
+            if about_visible {
                 AboutDialog {
-                    app_version: props.app_version.clone(),
-                    onclose: move |_| props.on_close_about.call(()),
+                    app_version: app_version.clone(),
+                    onclose: {
+                        let mut ctx = ctx.clone();
+                        move |_| *ctx.audio.about_visible.write() = false
+                    },
                 }
             }
 
             KeyboardHandler {
-                network_panel_visible: props.network_panel_visible,
-                settings_panel_visible: props.settings_panel_visible,
-                about_visible: props.about_visible,
                 on_keyboard_action: props.on_keyboard_action,
-                on_close_about: props.on_close_about,
-                on_close_settings: props.on_close_settings,
-                on_close_network_settings: props.on_close_network_settings,
                 on_switch_audio_mode: props.on_switch_audio_mode,
                 on_toggle_mute: props.on_toggle_mute,
                 on_toggle_theme: props.on_toggle_theme,
-                on_show_about: props.on_show_about,
-                on_show_settings: props.on_show_settings,
-                on_show_network_settings: props.on_show_network_settings,
                 on_scan_peers: props.on_scan_peers,
                 on_keyboard_pressed: props.on_keyboard_pressed,
                 on_last_action: props.on_last_action,
@@ -494,229 +531,27 @@ fn AppChrome() -> Element {
     rsx! {}
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum WorkbenchTab {
-    Overview,
-    Settings,
-    Network,
-}
-
-#[derive(Props, Clone, PartialEq)]
-struct WorkbenchProps {
-    active_tab: WorkbenchTab,
-    audio_status: String,
-    audio_muted: bool,
-    audio_volume: f64,
-    mode_indicator: String,
-    dark_mode: bool,
-    network_status: String,
-    remote_controlled: bool,
-    executing_remotely: bool,
-    scanning: bool,
-    allow_remote_control: bool,
-    settings_display_name: String,
-    settings_save_status: String,
-    app_version: String,
-    peers: Vec<PeerDisplayInfo>,
-    connected_peer_index: i32,
-    on_tab_change: EventHandler<WorkbenchTab>,
-    on_switch_audio_mode: EventHandler<()>,
-    on_toggle_mute: EventHandler<()>,
-    on_volume_changed: EventHandler<f64>,
-    on_toggle_theme: EventHandler<()>,
-    on_show_about: EventHandler<()>,
-    on_save_display_name: EventHandler<String>,
-    on_connect_to_peer: EventHandler<String>,
-    on_disconnect_peer: EventHandler<String>,
-    on_scan_peers: EventHandler<()>,
-    on_toggle_remote_control: EventHandler<()>,
-}
-
-#[component]
-fn Workbench(props: WorkbenchProps) -> Element {
-    let current_tab = props.active_tab;
-
-    let overview_tab_class = if current_tab == WorkbenchTab::Overview {
-        "workbench-tab is-active"
-    } else {
-        "workbench-tab"
-    };
-    let settings_tab_class = if current_tab == WorkbenchTab::Settings {
-        "workbench-tab is-active"
-    } else {
-        "workbench-tab"
-    };
-    let network_tab_class = if current_tab == WorkbenchTab::Network {
-        "workbench-tab is-active"
-    } else {
-        "workbench-tab"
-    };
-
-    let net_state = if props.executing_remotely {
-        "正在远程执行".to_string()
-    } else if props.remote_controlled {
-        "受远程控制".to_string()
-    } else if props.network_status.is_empty() {
-        "未连接".to_string()
-    } else {
-        props.network_status.clone()
-    };
-    let status_class = if props.executing_remotely {
-        "workbench-status workbench-status--executing"
-    } else if props.remote_controlled {
-        "workbench-status workbench-status--remote"
-    } else {
-        "workbench-status"
-    };
-    let mute_text = if props.audio_muted {
-        "取消静音"
-    } else {
-        "静音"
-    };
-    let mute_state_text = if props.audio_muted {
-        "已静音"
-    } else {
-        "播放中"
-    };
-    let remote_state_text = if props.allow_remote_control {
-        "允许请求"
-    } else {
-        "禁止"
-    };
-    let peer_count = props.peers.len();
-    let connected_count = props.peers.iter().filter(|peer| peer.is_connected).count();
-    let volume_percent = (props.audio_volume * 100.0).round() as i32;
-
-    rsx! {
-        aside { class: "workbench", aria_label: "状态工作区",
-            div { class: "workbench-tabs", role: "tablist", aria_label: "工作区标签",
-                button {
-                    class: overview_tab_class,
-                    role: "tab",
-                    aria_selected: if current_tab == WorkbenchTab::Overview { "true" } else { "false" },
-                    onclick: move |_| props.on_tab_change.call(WorkbenchTab::Overview),
-                    "概览"
-                }
-                button {
-                    class: settings_tab_class,
-                    role: "tab",
-                    aria_selected: if current_tab == WorkbenchTab::Settings { "true" } else { "false" },
-                    onclick: move |_| props.on_tab_change.call(WorkbenchTab::Settings),
-                    "设置"
-                }
-                button {
-                    class: network_tab_class,
-                    role: "tab",
-                    aria_selected: if current_tab == WorkbenchTab::Network { "true" } else { "false" },
-                    onclick: move |_| props.on_tab_change.call(WorkbenchTab::Network),
-                    "网络"
-                }
-            }
-
-            div { class: "workbench-content",
-                {
-                    match current_tab {
-                        WorkbenchTab::Overview => rsx! {
-                            div { class: "workbench-panel",
-                                div { class: "workbench-metric-grid",
-                                    div { class: "workbench-metric",
-                                        span { class: "workbench-metric__label", "音频" }
-                                        strong { class: "workbench-metric__value", "{props.mode_indicator}" }
-                                        span { class: "workbench-metric__detail", "{mute_state_text}" }
-                                    }
-                                    div { class: "workbench-metric",
-                                        span { class: "workbench-metric__label", "音量" }
-                                        strong { class: "workbench-metric__value", "{volume_percent}%" }
-                                        span { class: "workbench-metric__detail", "{props.audio_status}" }
-                                    }
-                                    div { class: "workbench-metric",
-                                        span { class: "workbench-metric__label", "网络" }
-                                        strong { class: "workbench-metric__value", "{connected_count}/{peer_count}" }
-                                        span { class: "workbench-metric__detail", "{net_state}" }
-                                    }
-                                    div { class: "workbench-metric",
-                                        span { class: "workbench-metric__label", "远控" }
-                                        strong { class: "workbench-metric__value", "{remote_state_text}" }
-                                        span { class: "workbench-metric__detail", "{props.settings_display_name}" }
-                                    }
-                                }
-
-                                section { class: "workbench-section workbench-section--dense",
-                                    div { class: "workbench-section__title", "快速控制" }
-                                    div { class: "workbench-actions",
-                                        button {
-                                            class: "panel-action",
-                                            onclick: move |_| props.on_switch_audio_mode.call(()),
-                                            "切换音频"
-                                        }
-                                        button {
-                                            class: "panel-action panel-action--secondary",
-                                            onclick: move |_| props.on_toggle_mute.call(()),
-                                            "{mute_text}"
-                                        }
-                                        button {
-                                            class: "panel-action panel-action--secondary",
-                                            onclick: move |_| {
-                                                props.on_tab_change.call(WorkbenchTab::Network);
-                                                props.on_scan_peers.call(());
-                                            },
-                                            if props.scanning { "扫描中..." } else { "扫描网络" }
-                                        }
-                                    }
-                                }
-
-                                section { class: "workbench-section workbench-section--dense",
-                                    div { class: "workbench-section__title", "当前状态" }
-                                    div { class: status_class, "{net_state}" }
-                                    div { class: "workbench-row",
-                                        span { class: "workbench-row__label", "可用设备" }
-                                        span { class: "workbench-row__value", "{props.peers.len()}" }
-                                    }
-                                }
-                            }
-                        },
-                        WorkbenchTab::Settings => rsx! {
-                            div { class: "workbench-panel workbench-panel--settings",
-                                SettingsContent {
-                                    display_name: props.settings_display_name.clone(),
-                                    save_status: props.settings_save_status.clone(),
-                                    audio_status: props.audio_status.clone(),
-                                    audio_muted: props.audio_muted,
-                                    audio_volume: props.audio_volume,
-                                    mode_indicator: props.mode_indicator.clone(),
-                                    dark_mode: props.dark_mode,
-                                    app_version: props.app_version.clone(),
-                                    on_save_name: props.on_save_display_name,
-                                    on_switch_audio_mode: props.on_switch_audio_mode,
-                                    on_toggle_mute: props.on_toggle_mute,
-                                    on_volume_changed: props.on_volume_changed,
-                                    on_toggle_theme: props.on_toggle_theme,
-                                    on_show_about: props.on_show_about,
-                                }
-                            }
-                        },
-                        WorkbenchTab::Network => rsx! {
-                            div { class: "workbench-panel workbench-panel--network",
-                                NetworkPanelContent {
-                                    network_status: props.network_status.clone(),
-                                    remote_controlled: props.remote_controlled,
-                                    executing_remotely: props.executing_remotely,
-                                    scanning: props.scanning,
-                                    allow_remote_control: props.allow_remote_control,
-                                    audio_muted: props.audio_muted,
-                                    peers: props.peers.clone(),
-                                    connected_peer_index: props.connected_peer_index,
-                                    onconnect: move |id| props.on_connect_to_peer.call(id),
-                                    ondisconnect: move |id| props.on_disconnect_peer.call(id),
-                                    onscan: move |_| props.on_scan_peers.call(()),
-                                    ontoggle_remote_control: move |_| props.on_toggle_remote_control.call(()),
-                                    ontoggle_mute: move |_| props.on_toggle_mute.call(()),
-                                }
-                            }
-                        },
-                    }
-                }
-            }
-        }
+fn network_mode_label() -> String {
+    match network_mode::current() {
+        NetworkMode::Lan => "局域网".to_string(),
+        NetworkMode::Offline => "离线".to_string(),
+        NetworkMode::LoopbackTest => "回环测试".to_string(),
     }
+}
+
+fn listener_port(bind: &BindStatus) -> u16 {
+    match bind {
+        BindStatus::Bound { addr } => addr.port(),
+        BindStatus::BindFailed { port } => *port,
+        BindStatus::Offline | BindStatus::Unavailable => LAN_FIXED_PORT,
+    }
+}
+
+fn peer_display_name(peers: &[PeerViewModel], id: NodeId) -> String {
+    peers
+        .iter()
+        .find(|peer| peer.node_id == id)
+        .map(|peer| peer.display_name.clone())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| id.to_string())
 }

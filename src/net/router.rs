@@ -18,21 +18,13 @@ use tokio::sync::mpsc;
 
 use crate::core::action::CalcAction;
 use crate::core::calculator::{CalcResult, Calculator};
+use crate::net::limits::{
+    MAX_ACTION_AGE, MAX_ACTION_FUTURE_SKEW, MAX_DISPLAY_BYTES, MAX_HISTORY_BYTES,
+    MAX_MEMORY_INDICATOR_BYTES, MAX_REMOTE_ACTIONS_PER_SECOND, MAX_TRACKED_REMOTE_PEERS,
+};
 use crate::net::protocol::{ActionEnvelope, NetworkMessage, NodeId, StateSnapshot};
+use crate::net::view::RoutingView;
 use crate::traits::{AudioPlayer, DisplayUpdater};
-
-/// Maximum number of authenticated peers represented in product-level state.
-/// The transport applies its own limits as well; this is a second boundary so
-/// discovery/session churn cannot grow Router maps without bound.
-const MAX_TRACKED_REMOTE_PEERS: usize = 64;
-/// Calculator buttons are tiny discrete actions. This permits bursts far above
-/// normal human input while bounding a compromised peer's work amplification.
-const MAX_REMOTE_ACTIONS_PER_SECOND: u32 = 120;
-const MAX_ACTION_AGE: Duration = Duration::from_secs(5 * 60);
-const MAX_ACTION_FUTURE_SKEW: Duration = Duration::from_secs(30);
-const MAX_DISPLAY_BYTES: usize = 64;
-const MAX_HISTORY_BYTES: usize = 256;
-const MAX_MEMORY_INDICATOR_BYTES: usize = 8;
 
 #[derive(Debug, Clone, Copy)]
 struct RateWindow {
@@ -260,6 +252,16 @@ impl Router {
             .iter()
             .copied()
             .collect()
+    }
+
+    /// Snapshot consumed by the UI event loop. Does not emit wire messages.
+    pub fn view(&self) -> RoutingView {
+        let inner = self.inner.borrow();
+        RoutingView {
+            active_executor: inner.active_executor,
+            active_controllers: inner.active_controllers.iter().copied().collect(),
+            allow_remote_control: inner.config.allow_remote_control,
+        }
     }
 
     pub fn set_audio_muted(&self, muted: bool) {

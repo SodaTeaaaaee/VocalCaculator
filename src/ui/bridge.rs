@@ -33,11 +33,17 @@ use crate::audio::VocalAudio;
 use crate::core::action::CalcAction;
 use crate::core::calculator::Calculator;
 use crate::core::token::BinaryOp;
-use crate::net::protocol::{NetworkMessage, valid_display_name};
+use crate::net::discovery::public_key_fingerprint;
+use crate::net::protocol::{LAN_FIXED_PORT, NetworkMessage, NodeId, valid_display_name};
 use crate::net::state::NetworkState;
+use crate::net::view::{
+    BindStatus, ConnectErrorKind, NetworkStatusKind, PeerPresence, PeerRole, PeerViewModel,
+    ScanState,
+};
 use crate::net::{NetworkManager, Router};
+use crate::ui::command::AppCommand;
 use crate::ui::events::UiEvent;
-use crate::ui::state::{CalcContext, PeerDisplayInfo};
+use crate::ui::state::CalcContext;
 
 // ---------------------------------------------------------------------------
 // Thread-local Router + NetworkManager storage
@@ -249,6 +255,8 @@ pub fn set_router_user_mute(user_muted: bool) {
 /// Shared network state used by the Dioxus event bridge.
 pub struct NetworkContext {
     pub net_state: Arc<Mutex<NetworkState>>,
+    pub local_node_id: NodeId,
+    pub local_fingerprint: String,
 }
 
 thread_local! {
@@ -299,6 +307,7 @@ pub fn init_networking(
     let display_name = app_config.network.display_name.clone();
 
     let startup_event_tx = ui_event_tx.clone();
+    let local_fingerprint = public_key_fingerprint(&storage.identity().public_key_bytes());
     let mut nm = NetworkManager::new(storage, ui_event_tx);
 
     // Synchronise Router and NetworkManager identity. The session handshake
@@ -310,9 +319,10 @@ pub fn init_networking(
         Ok(handle) => handle,
         Err(error) => {
             log::error!("Networking failed to start: {}", error);
-            let _ = startup_event_tx.try_send(UiEvent::NetworkStatusUpdate(
-                "网络启动失败，本机计算器仍可正常使用".to_string(),
-            ));
+            let _ = startup_event_tx.try_send(UiEvent::NetworkStatus {
+                kind: NetworkStatusKind::Error,
+                text: "网络启动失败，本机计算器仍可正常使用".to_string(),
+            });
             return false;
         }
     };
@@ -327,7 +337,12 @@ pub fn init_networking(
         nm.local_node_id(),
     );
 
-    let ctx = NetworkContext { net_state };
+    let local_node_id = nm.local_node_id();
+    let ctx = NetworkContext {
+        net_state,
+        local_node_id,
+        local_fingerprint,
+    };
 
     NET_MANAGER.with(|cell| *cell.borrow_mut() = Some(nm));
     NET_CONTEXT.with(|cell| *cell.borrow_mut() = Some(ctx));
@@ -353,6 +368,8 @@ pub fn start_network_event_loop(
     mut ctx: CalcContext,
     mut rx: tokio::sync::mpsc::Receiver<UiEvent>,
 ) {
+    populate_local_identity(&mut ctx);
+
     spawn(async move {
         loop {
             let event = match rx.recv().await {
@@ -386,41 +403,21 @@ pub fn start_network_event_loop(
 /// function reads from the [`NetworkManager`] / [`Router`]).
 fn dispatch_event(ctx: &mut CalcContext, event: UiEvent) -> bool {
     match event {
-        // ---- Peer discovery ----
-        UiEvent::PeerDiscovered(payload) => {
-            let info = PeerDisplayInfo {
-                name: Signal::new(payload.name),
-                address: Signal::new(payload.address),
-                is_connected: Signal::new(payload.is_connected),
-                route_active: Signal::new(false),
-                latency_ms: Signal::new(payload.latency_ms),
-                index: Signal::new(payload.index),
-                node_id_string: Signal::new(payload.node_id_string),
-            };
+        UiEvent::PeerUpsert(model) => {
+            upsert_peer(ctx, with_routing_role(model));
+            false
+        }
+        UiEvent::PeerLost { node_id } => {
             let mut peers = (*ctx.net.peers.read()).clone();
-            if let Some(existing) = peers
-                .iter_mut()
-                .find(|p| *p.node_id_string.read() == *info.node_id_string.read())
-            {
-                *existing = info;
-            } else {
-                peers.push(info);
-            }
+            peers.retain(|peer| peer.node_id != node_id);
             *ctx.net.peers.write() = peers;
             false
         }
-        UiEvent::PeerLost(uuid) => {
-            let mut peers = (*ctx.net.peers.read()).clone();
-            peers.retain(|p| *p.node_id_string.read() != uuid);
-            *ctx.net.peers.write() = peers;
-            false
-        }
-
-        // ---- TCP sessions ----
-        UiEvent::SessionEstablished(uuid) => {
-            if let Ok(node_id) = uuid.parse::<uuid::Uuid>()
-                && let Some(router) = get_router()
-            {
+        UiEvent::SessionEstablished {
+            node_id,
+            session_id,
+        } => {
+            if let Some(router) = get_router() {
                 router.add_remote_session(node_id);
                 NET_CONTEXT.with(|cell| {
                     if let Some(ref net_ctx) = *cell.borrow() {
@@ -430,118 +427,235 @@ fn dispatch_event(ctx: &mut CalcContext, event: UiEvent) -> bool {
                         }
                     }
                 });
-                // Keep the Router's broadcast peer set in sync.
                 if let Some(()) = with_nm(|nm| {
                     router.set_connected_peers(nm.active_session_ids());
                 }) {}
             }
+            mark_peer_session(ctx, node_id, Some(session_id), PeerPresence::Connected);
             true
         }
-        UiEvent::SessionLost(uuid) => {
-            if let Ok(node_id) = uuid.parse::<uuid::Uuid>()
-                && let Some(router) = get_router()
-            {
+        UiEvent::SessionLost {
+            node_id,
+            session_id: _,
+        } => {
+            if let Some(router) = get_router() {
                 router.cleanup_peer_disconnect(&node_id);
                 if let Some(()) = with_nm(|nm| {
                     router.set_connected_peers(nm.active_session_ids());
                 }) {}
             }
+            mark_peer_session(ctx, node_id, None, PeerPresence::Nearby);
             true
         }
-
-        // ---- Messages ----
-        UiEvent::NetworkMessage(sender_uuid, bytes) => {
-            match bincode::serde::decode_from_slice::<NetworkMessage, _>(
-                &bytes,
-                bincode::config::standard().with_limit::<4096>(),
-            ) {
-                Ok((msg, consumed)) if consumed == bytes.len() => {
-                    if let Ok(sender_id) = sender_uuid.parse::<uuid::Uuid>() {
-                        // Intercept PeerNameUpdate: update the peer's
-                        // display name in NetworkState so the UI picks
-                        // it up on the next sync.
-                        if let NetworkMessage::PeerNameUpdate { ref display_name } = msg {
-                            if valid_display_name(display_name) {
-                                NET_CONTEXT.with(|cell| {
-                                    if let Some(ref net_ctx) = *cell.borrow() {
-                                        let mut state = net_ctx
-                                            .net_state
-                                            .lock()
-                                            .unwrap_or_else(|e| e.into_inner());
-                                        state.peers.update_name(&sender_id, display_name);
-                                    }
-                                });
-                            } else {
-                                log::warn!("Rejected invalid peer display name from {sender_id}");
-                            }
+        UiEvent::InboundMessage { sender, message } => {
+            if let NetworkMessage::PeerNameUpdate { ref display_name } = message {
+                if valid_display_name(display_name) {
+                    NET_CONTEXT.with(|cell| {
+                        if let Some(ref net_ctx) = *cell.borrow() {
+                            let mut state =
+                                net_ctx.net_state.lock().unwrap_or_else(|e| e.into_inner());
+                            state.peers.update_name(&sender, display_name);
                         }
-                        if let Some(router) = get_router() {
-                            router.handle_network_message(sender_id, msg);
-                        }
-                    }
-                }
-                Ok((_msg, consumed)) => {
-                    log::warn!(
-                        "Rejected network message with trailing bytes: consumed {}, frame {}",
-                        consumed,
-                        bytes.len()
-                    );
-                }
-                Err(e) => {
-                    log::warn!("Failed to deserialize UiEvent::NetworkMessage: {}", e);
+                    });
+                    update_peer(ctx, sender, |peer| {
+                        peer.display_name = display_name.clone();
+                    });
+                } else {
+                    log::warn!("Rejected invalid peer display name from {sender}");
                 }
             }
-            true
-        }
-
-        // ---- Errors ----
-        UiEvent::ConnectionError(reason) => {
-            let error_msg = match reason.as_str() {
-                "timeout" | "handshake_timeout" => "连接超时".to_string(),
-                "bind_failed" => "网络端口无法监听".to_string(),
-                "connection_refused" => "连接被拒绝".to_string(),
-                "connection_reset" => "连接中断".to_string(),
-                "host_unreachable" => "设备不可达".to_string(),
-                "network_unreachable" => "网络不可达".to_string(),
-                "permission_denied" => "访问被拒绝".to_string(),
-                "remote_control_disabled" => "对方未开启远程控制".to_string(),
-                "fingerprint_mismatch" => "发现信息与连接密钥不一致".to_string(),
-                other => format!("连接失败: {}", other),
-            };
             if let Some(router) = get_router() {
-                router.clear_remote_executor();
+                router.handle_network_message(sender, message);
             }
-            *ctx.net.status.write() = error_msg;
-            *ctx.net.executing_remotely.write() = false;
             true
         }
-
-        // ---- Latency ----
-        UiEvent::LatencyUpdate(peer_uuid, latency_ms) => {
-            let mut peers = (*ctx.net.peers.read()).clone();
-            for peer in &mut peers {
-                if *peer.node_id_string.read() == peer_uuid {
-                    *peer.latency_ms.write() = latency_ms;
-                    break;
+        UiEvent::ConnectionError { target, kind } => {
+            *ctx.net.status.write() = kind.to_zh().to_string();
+            if let Some(node_id) = target {
+                let selected = get_router()
+                    .and_then(|router| router.active_remote_executor())
+                    .or_else(|| *ctx.net.selected_executor.read());
+                if selected == Some(node_id) {
+                    if let Some(router) = get_router() {
+                        router.clear_remote_executor_if(node_id);
+                    }
+                    *ctx.net.selected_executor.write() = None;
+                    *ctx.net.executing_remotely.write() = false;
                 }
+                let presence = if kind == ConnectErrorKind::FingerprintMismatch {
+                    PeerPresence::FingerprintMismatch
+                } else {
+                    PeerPresence::Unreachable
+                };
+                update_peer(ctx, node_id, |peer| {
+                    peer.presence = presence;
+                    if presence != PeerPresence::Connected {
+                        peer.session_id = None;
+                    }
+                });
             }
-            *ctx.net.peers.write() = peers;
+            if let Some(router) = get_router() {
+                let view = router.view();
+                apply_routing_roles(ctx, &view.active_controllers, view.active_executor);
+            }
             false
         }
-
-        // ---- Remote control status ----
-        UiEvent::RemoteControlStatus(remote_controlled, executing_remotely) => {
-            *ctx.net.remote_controlled.write() = remote_controlled;
-            *ctx.net.executing_remotely.write() = executing_remotely;
+        UiEvent::LatencyUpdate {
+            node_id,
+            latency_ms,
+        } => {
+            update_peer(ctx, node_id, |peer| {
+                peer.latency_ms = latency_ms;
+            });
             false
         }
-
-        // ---- Status text ----
-        UiEvent::NetworkStatusUpdate(status) => {
-            *ctx.net.status.write() = status;
+        UiEvent::RemoteControl {
+            controllers,
+            executor,
+        } => {
+            *ctx.net.controllers.write() = controllers.clone();
+            *ctx.net.selected_executor.write() = executor;
+            *ctx.net.remote_controlled.write() = !controllers.is_empty();
+            let executing = get_router()
+                .map(|router| router.is_executing_remotely())
+                .unwrap_or(executor.is_some());
+            *ctx.net.executing_remotely.write() = executing;
+            apply_routing_roles(ctx, &controllers, executor);
+            false
+        }
+        UiEvent::NetworkStatus { kind, text } => {
+            *ctx.net.status.write() = text;
+            if kind == NetworkStatusKind::ListenerUnavailable {
+                *ctx.net.bind.write() = BindStatus::BindFailed {
+                    port: LAN_FIXED_PORT,
+                };
+            }
+            false
+        }
+        UiEvent::ScanState(state) => {
+            *ctx.net.scanning.write() = matches!(state, ScanState::InFlight);
+            false
+        }
+        UiEvent::ListenerBound { addr } => {
+            *ctx.net.bind.write() = BindStatus::Bound { addr };
+            false
+        }
+        UiEvent::ListenerFailed { port } => {
+            *ctx.net.bind.write() = BindStatus::BindFailed { port };
+            false
+        }
+        UiEvent::BindStatus(status) => {
+            *ctx.net.bind.write() = status;
             false
         }
     }
+}
+
+fn populate_local_identity(ctx: &mut CalcContext) {
+    NET_CONTEXT.with(|cell| {
+        if let Some(ref net_ctx) = *cell.borrow() {
+            *ctx.net.local_node_id.write() = Some(net_ctx.local_node_id);
+            *ctx.net.local_fingerprint.write() = net_ctx.local_fingerprint.clone();
+        }
+    });
+    if ctx.net.local_node_id.read().is_none()
+        && let Some(id) = with_nm(|nm| nm.local_node_id())
+    {
+        *ctx.net.local_node_id.write() = Some(id);
+    }
+}
+
+fn with_routing_role(mut model: PeerViewModel) -> PeerViewModel {
+    if let Some(router) = get_router() {
+        let view = router.view();
+        if view.active_executor == Some(model.node_id) {
+            model.role = PeerRole::SelectedExecutor;
+        } else if view.active_controllers.contains(&model.node_id) {
+            model.role = PeerRole::ControllingUs;
+        }
+    }
+    model
+}
+
+fn upsert_peer(ctx: &mut CalcContext, model: PeerViewModel) {
+    let mut peers = (*ctx.net.peers.read()).clone();
+    if let Some(existing) = peers.iter_mut().find(|peer| peer.node_id == model.node_id) {
+        *existing = model;
+    } else {
+        peers.push(model);
+    }
+    *ctx.net.peers.write() = peers;
+}
+
+fn update_peer(ctx: &mut CalcContext, node_id: NodeId, update: impl FnOnce(&mut PeerViewModel)) {
+    let mut peers = (*ctx.net.peers.read()).clone();
+    if let Some(peer) = peers.iter_mut().find(|peer| peer.node_id == node_id) {
+        update(peer);
+        *ctx.net.peers.write() = peers;
+    }
+}
+
+fn mark_peer_session(
+    ctx: &mut CalcContext,
+    node_id: NodeId,
+    session_id: Option<NodeId>,
+    presence: PeerPresence,
+) {
+    let mut peers = (*ctx.net.peers.read()).clone();
+    if let Some(peer) = peers.iter_mut().find(|peer| peer.node_id == node_id) {
+        peer.presence = presence;
+        peer.session_id = session_id;
+    } else if presence == PeerPresence::Connected {
+        let (display_name, endpoint, fingerprint) = lookup_peer_identity(node_id);
+        peers.push(PeerViewModel {
+            node_id,
+            display_name,
+            endpoint,
+            fingerprint,
+            presence,
+            role: PeerRole::Idle,
+            latency_ms: None,
+            session_id,
+        });
+    }
+    *ctx.net.peers.write() = peers;
+}
+
+fn lookup_peer_identity(node_id: NodeId) -> (String, Option<std::net::SocketAddr>, Option<String>) {
+    NET_CONTEXT
+        .with(|cell| {
+            cell.borrow().as_ref().and_then(|net_ctx| {
+                let state = net_ctx.net_state.lock().unwrap_or_else(|e| e.into_inner());
+                state.peers.get_peer(&node_id).map(|peer| {
+                    (
+                        peer.display_name.clone(),
+                        peer.display_endpoint(),
+                        peer.public_key_fingerprint.clone(),
+                    )
+                })
+            })
+        })
+        .unwrap_or_else(|| (node_id.to_string(), None, None))
+}
+
+fn apply_routing_roles(ctx: &mut CalcContext, controllers: &[NodeId], executor: Option<NodeId>) {
+    let mut peers = (*ctx.net.peers.read()).clone();
+    for peer in &mut peers {
+        if executor == Some(peer.node_id) {
+            peer.role = PeerRole::SelectedExecutor;
+        } else if controllers.contains(&peer.node_id) {
+            peer.role = PeerRole::ControllingUs;
+        } else {
+            peer.role = PeerRole::Idle;
+        }
+    }
+    *ctx.net.peers.write() = peers;
+}
+
+fn close_overlays(ctx: &mut CalcContext) {
+    *ctx.audio.about_visible.write() = false;
+    *ctx.settings.panel_visible.write() = false;
+    *ctx.net.panel_visible.write() = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -554,76 +668,60 @@ fn dispatch_event(ctx: &mut CalcContext, event: UiEvent) -> bool {
 /// Called after session and message events in the event loop, and
 /// on-demand by handler functions after state-changing operations.
 ///
-/// This mirrors the "Sync peer list" and "Routing matrix UI sync"
-/// sections of `src/app/bridge::start_poll_timer`.
+/// Residual sync refreshes product roles from [`Router::view`] and
+/// active sessions. Presence is owned by [`UiEvent`]s.
 pub fn sync_network_state(mut ctx: CalcContext) {
+    populate_local_identity(&mut ctx);
+
     let router = match get_router() {
         Some(r) => r,
         None => return,
     };
 
-    let active_target = router.active_remote_executor();
+    let view = router.view();
     let active_sessions = with_nm(|nm| nm.active_session_ids()).unwrap_or_default();
     let user_muted = *ctx.audio.muted.read();
     router.set_audio_muted(user_muted || router.is_executing_remotely());
 
-    NET_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let net_ctx = match borrow.as_ref() {
-            Some(c) => c.net_state.clone(),
-            None => return,
-        };
-        let state = net_ctx
-            .lock()
-            .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
+    *ctx.net.controllers.write() = view.active_controllers.clone();
+    *ctx.net.selected_executor.write() = view.active_executor;
+    *ctx.net.remote_controlled.write() = !view.active_controllers.is_empty();
+    *ctx.net.executing_remotely.write() = router.is_executing_remotely();
 
-        let mut active_peer_name: Option<String> = None;
-        let mut connected_idx: i32 = -1;
-        let mut new_peers = Vec::new();
-
-        for (i, (node_id, peer)) in state.peers.iter().enumerate() {
-            let nid_str: String = node_id.to_string();
-            let route_active = active_target == Some(*node_id);
-            let is_connected = active_sessions.contains(node_id);
-            if route_active {
-                connected_idx = i as i32;
-                active_peer_name = Some(peer.display_name.clone());
-            }
-            new_peers.push(PeerDisplayInfo {
-                name: Signal::new(peer.display_name.clone()),
-                address: Signal::new(
-                    peer.display_endpoint()
-                        .map(|address| address.to_string())
-                        .unwrap_or_default(),
-                ),
-                is_connected: Signal::new(is_connected),
-                route_active: Signal::new(route_active),
-                latency_ms: Signal::new(state.latency_ms.map(|v| v as i32).unwrap_or(-1)),
-                index: Signal::new(i as i32),
-                node_id_string: Signal::new(nid_str),
-            });
-        }
-
-        *ctx.net.peers.write() = new_peers;
-        *ctx.net.connected_peer_index.write() = connected_idx;
-
-        let executing_remotely = router.is_executing_remotely();
-        let active_controllers = router.active_remote_controllers();
-        if executing_remotely {
-            let name = active_peer_name.as_deref().unwrap_or("远程设备");
-            *ctx.net.status.write() = format!("正在使用 {} 远程计算", name);
-        } else if active_target.is_some() {
-            *ctx.net.status.write() = "正在连接设备...".to_string();
-        } else if !active_controllers.is_empty() {
-            *ctx.net.status.write() = "正在接受远程控制".to_string();
-        } else if state.is_connected {
-            *ctx.net.status.write() = "已连接".to_string();
+    let mut peers = (*ctx.net.peers.read()).clone();
+    for peer in &mut peers {
+        if view.active_executor == Some(peer.node_id) {
+            peer.role = PeerRole::SelectedExecutor;
+        } else if view.active_controllers.contains(&peer.node_id) {
+            peer.role = PeerRole::ControllingUs;
         } else {
-            *ctx.net.status.write() = "已启用".to_string();
+            peer.role = PeerRole::Idle;
         }
-        *ctx.net.executing_remotely.write() = executing_remotely;
-        *ctx.net.remote_controlled.write() = !active_controllers.is_empty();
-    });
+        if active_sessions.contains(&peer.node_id) {
+            if peer.presence != PeerPresence::FingerprintMismatch {
+                peer.presence = PeerPresence::Connected;
+            }
+        }
+    }
+    *ctx.net.peers.write() = peers;
+
+    let executing_remotely = router.is_executing_remotely();
+    if executing_remotely {
+        let name = view
+            .active_executor
+            .and_then(|id| {
+                (*ctx.net.peers.read())
+                    .iter()
+                    .find(|peer| peer.node_id == id)
+                    .map(|peer| peer.display_name.clone())
+            })
+            .unwrap_or_else(|| "远程设备".to_string());
+        *ctx.net.status.write() = format!("正在使用 {name} 远程计算");
+    } else if view.active_executor.is_some() {
+        *ctx.net.status.write() = "正在连接设备...".to_string();
+    } else if !view.active_controllers.is_empty() {
+        *ctx.net.status.write() = "正在接受远程控制".to_string();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -635,7 +733,7 @@ pub fn sync_network_state(mut ctx: CalcContext) {
 /// The peer must have been discovered via LAN scan. Exactly one peer can be
 /// selected as the remote calculator executor at a time.
 pub fn handle_connect_peer(mut ctx: CalcContext, node_id_str: String) {
-    let target = match node_id_str.parse::<uuid::Uuid>() {
+    let target = match node_id_str.parse::<NodeId>() {
         Ok(uuid) => uuid,
         Err(e) => {
             log::warn!("Invalid node ID '{}': {}", node_id_str, e);
@@ -643,7 +741,11 @@ pub fn handle_connect_peer(mut ctx: CalcContext, node_id_str: String) {
             return;
         }
     };
+    handle_use_as_executor(ctx, target);
+}
 
+/// Select `target` as the single remote executor and connect if needed.
+pub fn handle_use_as_executor(mut ctx: CalcContext, target: NodeId) {
     let router = match get_router() {
         Some(r) => r,
         None => return,
@@ -654,30 +756,34 @@ pub fn handle_connect_peer(mut ctx: CalcContext, node_id_str: String) {
     }
 
     if router.active_remote_executor() == Some(target) {
+        *ctx.net.selected_executor.write() = Some(target);
         sync_network_state(ctx);
         return;
     }
 
     router.select_remote_executor(target);
+    *ctx.net.selected_executor.write() = Some(target);
+
     let has_session = with_nm(|nm| nm.active_session_ids().contains(&target)).unwrap_or(false);
     if has_session {
         *ctx.net.status.write() = "已选择远程计算设备".to_string();
         *ctx.net.executing_remotely.write() = true;
-        log::trace!(
-            "Using existing session for peer {}; no TCP reconnect",
-            target
-        );
+        update_peer(&mut ctx, target, |peer| {
+            peer.role = PeerRole::SelectedExecutor;
+            peer.presence = PeerPresence::Connected;
+        });
+        log::trace!("Using existing session for peer {target}; no TCP reconnect");
+        sync_network_state(ctx);
         return;
     }
 
-    // Look up the stable service endpoint from NetworkState and connect via TCP.
     let peer_addr = NET_CONTEXT.with(|cell| {
         cell.borrow().as_ref().and_then(|net_ctx| {
             let state = net_ctx.net_state.lock().unwrap_or_else(|e| e.into_inner());
             state
                 .peers
                 .get_peer(&target)
-                .and_then(|p| p.service_endpoint)
+                .and_then(|peer| peer.service_endpoint)
         })
     });
 
@@ -686,18 +792,28 @@ pub fn handle_connect_peer(mut ctx: CalcContext, node_id_str: String) {
             log::info!("Connecting to peer {} at {}", target, addr);
             *ctx.net.status.write() = "正在连接设备...".to_string();
             *ctx.net.executing_remotely.write() = false;
+            update_peer(&mut ctx, target, |peer| {
+                peer.role = PeerRole::SelectedExecutor;
+                peer.presence = PeerPresence::Connecting;
+            });
 
             if with_nm(|nm| nm.connect_to_peer(addr, Some(target))).unwrap_or(false) {
-                log::trace!("Connect command sent for {}", target);
+                log::trace!("Connect command sent for {target}");
             } else {
                 router.clear_remote_executor_if(target);
+                *ctx.net.selected_executor.write() = None;
                 *ctx.net.status.write() = "无法启动连接".to_string();
             }
         }
         None => {
             router.clear_remote_executor_if(target);
-            log::warn!("Peer {} not found in discovery table", target);
+            *ctx.net.selected_executor.write() = None;
+            log::warn!("Peer {target} not found in discovery table");
             *ctx.net.status.write() = "未找到设备".to_string();
+            update_peer(&mut ctx, target, |peer| {
+                peer.presence = PeerPresence::Unreachable;
+                peer.role = PeerRole::Idle;
+            });
         }
     }
 }
@@ -707,7 +823,7 @@ pub fn handle_connect_peer(mut ctx: CalcContext, node_id_str: String) {
 /// Stops sending calculator actions to this peer. The authenticated TCP
 /// session may remain available for later reuse.
 pub fn handle_disconnect_peer(mut ctx: CalcContext, node_id_str: String) {
-    let target = match node_id_str.parse::<uuid::Uuid>() {
+    let target = match node_id_str.parse::<NodeId>() {
         Ok(uuid) => uuid,
         Err(e) => {
             log::warn!("Invalid node ID '{}': {}", node_id_str, e);
@@ -726,16 +842,29 @@ pub fn handle_disconnect_peer(mut ctx: CalcContext, node_id_str: String) {
 
     router.clear_remote_executor_if(target);
     *ctx.net.executing_remotely.write() = false;
+    if *ctx.net.selected_executor.read() == Some(target) {
+        *ctx.net.selected_executor.write() = None;
+    }
     *ctx.net.status.write() = "已停止远程执行".to_string();
-    log::info!("Stopped remote execution on peer {}", target);
+    log::info!("Stopped remote execution on peer {target}");
+    sync_network_state(ctx);
+}
+
+/// Clear the selected remote executor without tearing down TCP sessions.
+pub fn handle_stop_remote_execution(mut ctx: CalcContext) {
+    if let Some(router) = get_router() {
+        router.clear_remote_executor();
+    }
+    *ctx.net.selected_executor.write() = None;
+    *ctx.net.executing_remotely.write() = false;
+    *ctx.net.status.write() = "已停止远程执行".to_string();
     sync_network_state(ctx);
 }
 
 /// Trigger a LAN peer discovery scan.
 ///
 /// Broadcasts Discover + Announce messages on the local network.
-/// The scan is fire-and-forget; discovered peers will appear as
-/// [`UiEvent::PeerDiscovered`] events.
+/// Scan progress is owned by [`UiEvent::ScanState`]; this does not sleep.
 pub fn handle_scan_peers(mut ctx: CalcContext) {
     *ctx.net.scanning.write() = true;
 
@@ -745,36 +874,35 @@ pub fn handle_scan_peers(mut ctx: CalcContext) {
         log::info!("LAN scan triggered");
     } else {
         log::warn!("Cannot scan: networking not initialised");
+        *ctx.net.scanning.write() = false;
     }
-
-    // Reset scanning indicator after a short delay.
-    let mut scanning = ctx.net.scanning;
-    spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        *scanning.write() = false;
-    });
 }
 
 /// Toggle the sole inbound remote-control permission boundary.
 ///
 /// Authenticated sessions may submit valid calculator actions only while this
 /// persisted switch is enabled. Turning it off takes effect immediately.
-pub fn handle_toggle_remote_control(mut ctx: CalcContext) {
+pub fn handle_toggle_remote_control(ctx: CalcContext) {
     let current = *ctx.net.allow_remote_control.read();
     let next = !current;
-    *ctx.net.allow_remote_control.write() = next;
+    handle_set_allow_remote_control(ctx, next);
+}
+
+/// Persist and apply the inbound remote-control switch.
+pub fn handle_set_allow_remote_control(mut ctx: CalcContext, allow: bool) {
+    *ctx.net.allow_remote_control.write() = allow;
     let mut app_config = config::AppConfig::load();
-    app_config.network.allow_remote_control = next;
+    app_config.network.allow_remote_control = allow;
     if let Err(e) = app_config.save() {
-        log::error!("Failed to save remote-control config: {}", e);
+        log::error!("Failed to save remote-control config: {e}");
     }
 
     if let Some(router) = get_router() {
-        router.set_allow_remote_control(next);
+        router.set_allow_remote_control(allow);
     }
 
     sync_network_state(ctx.clone());
-    *ctx.net.status.write() = if next {
+    *ctx.net.status.write() = if allow {
         "远程控制已开启".to_string()
     } else {
         "远程控制已关闭".to_string()
@@ -782,7 +910,7 @@ pub fn handle_toggle_remote_control(mut ctx: CalcContext) {
 
     log::info!(
         "Remote control {}",
-        if next { "enabled" } else { "disabled" }
+        if allow { "enabled" } else { "disabled" }
     );
 }
 
@@ -799,12 +927,10 @@ pub fn handle_save_display_name(mut ctx: CalcContext, name: String) {
 
     *ctx.settings.display_name.write() = trimmed.clone();
 
-    // Update NetworkManager and broadcast to peers.
     if let Some(()) = with_nm(|nm| {
         nm.update_display_name(trimmed.clone());
     }) {}
 
-    // Persist to config file.
     let mut app_config = config::AppConfig::load();
     app_config.network.display_name = trimmed;
     match app_config.save() {
@@ -814,7 +940,54 @@ pub fn handle_save_display_name(mut ctx: CalcContext, name: String) {
         }
         Err(e) => {
             *ctx.settings.save_status.write() = "保存失败".to_string();
-            log::error!("Failed to save config: {}", e);
+            log::error!("Failed to save config: {e}");
+        }
+    }
+}
+
+/// Route chrome / network intents. Calculator buttons stay [`CalcAction`] 1:1.
+pub fn dispatch_command(mut ctx: CalcContext, command: AppCommand) {
+    match command {
+        AppCommand::Calc(action) => {
+            if let Some(router) = get_router() {
+                router.dispatch(action);
+            }
+        }
+        AppCommand::SetDisplayName(name) => handle_save_display_name(ctx, name),
+        AppCommand::SetAllowRemoteControl(allow) => handle_set_allow_remote_control(ctx, allow),
+        AppCommand::ScanNearby => handle_scan_peers(ctx),
+        AppCommand::UseAsExecutor(node_id) => handle_use_as_executor(ctx, node_id),
+        AppCommand::StopRemoteExecution => handle_stop_remote_execution(ctx),
+        AppCommand::CloseOverlays => close_overlays(&mut ctx),
+        AppCommand::ShowNearbyOverlay => {
+            close_overlays(&mut ctx);
+            *ctx.net.panel_visible.write() = true;
+        }
+        AppCommand::ShowSettingsOverlay => {
+            close_overlays(&mut ctx);
+            *ctx.settings.panel_visible.write() = true;
+        }
+        AppCommand::ToggleTheme => toggle_theme(ctx),
+        AppCommand::SetWorkbenchTab(tab) => {
+            *ctx.net.workbench_tab.write() = tab;
+        }
+        AppCommand::ShowAbout => {
+            close_overlays(&mut ctx);
+            *ctx.audio.about_visible.write() = true;
+        }
+        AppCommand::CycleAudioMode => {
+            let next = ctx.audio.mode.read().next();
+            *ctx.audio.mode.write() = next;
+            *ctx.audio.mode_indicator.write() = next.name().to_string();
+        }
+        AppCommand::ToggleMute => {
+            let current = *ctx.audio.muted.read();
+            let next = !current;
+            *ctx.audio.muted.write() = next;
+            set_router_user_mute(next);
+        }
+        AppCommand::SetVolume(volume) => {
+            *ctx.audio.volume.write() = volume;
         }
     }
 }

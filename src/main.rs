@@ -9,12 +9,14 @@ use vocal_calculator::app::network_mode::{self, NetworkMode};
 use vocal_calculator::app::storage::Storage;
 use vocal_calculator::audio::{AudioMode, VocalAudio};
 use vocal_calculator::components::calculator::CalculatorUI;
-use vocal_calculator::components::network_panel::PeerDisplayInfo as PeerDisplayProps;
+use vocal_calculator::net::protocol::NodeId;
+use vocal_calculator::net::view::BindStatus;
 use vocal_calculator::ui::bridge::{
     create_router, handle_action, handle_connect_peer, handle_digit, handle_disconnect_peer,
     handle_operator, handle_save_display_name, handle_scan_peers, handle_toggle_remote_control,
     init_networking, set_router_user_mute, start_network_event_loop, toggle_theme,
 };
+use vocal_calculator::ui::command::WorkbenchTab;
 use vocal_calculator::ui::events::create_ui_channel;
 use vocal_calculator::ui::state::{
     AudioUiState, CalcContext, CalcDisplay, NetUiState, SettingsState,
@@ -32,6 +34,29 @@ const APP_CSS: &str = concat!(
     include_str!("styles/status_bar.css"),
     "\n",
     include_str!("styles/panels.css"),
+    "\n",
+    include_str!("styles/workbench.css"),
+    "\n",
+    r#"
+.calculator-status-stack {
+  grid-row: 2;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+}
+.calculator-status-stack .status-bar,
+.calculator-status-stack .presence-banner {
+  grid-row: auto;
+  align-self: stretch;
+}
+button.status-chip {
+  cursor: pointer;
+  font: inherit;
+}
+"#,
 );
 
 static VOLUME_SAVE_GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -131,12 +156,6 @@ fn schedule_volume_save(volume: f64) {
     });
 }
 
-fn close_all_panels(ctx: &mut CalcContext) {
-    *ctx.audio.about_visible.write() = false;
-    *ctx.settings.panel_visible.write() = false;
-    *ctx.net.panel_visible.write() = false;
-}
-
 #[component]
 fn App() -> Element {
     let audio_ref = use_hook(|| Rc::new(RefCell::new(VocalAudio::new())));
@@ -163,11 +182,16 @@ fn App() -> Element {
             panel_visible: Signal::new(false),
             scanning: Signal::new(false),
             status: Signal::new(String::new()),
-            connected_peer_index: Signal::new(-1),
             peers: Signal::new(vec![]),
             remote_controlled: Signal::new(false),
             executing_remotely: Signal::new(false),
             allow_remote_control: Signal::new(false),
+            bind: Signal::new(BindStatus::Offline),
+            local_node_id: Signal::new(None),
+            local_fingerprint: Signal::new(String::new()),
+            controllers: Signal::new(vec![]),
+            selected_executor: Signal::new(None),
+            workbench_tab: Signal::new(WorkbenchTab::ThisDevice),
         },
         settings: SettingsState {
             panel_visible: Signal::new(false),
@@ -265,84 +289,10 @@ fn App() -> Element {
         start_network_event_loop(ctx_hook, rx);
     });
 
-    // Snapshot display values from context signals so that the
-    // GenerationalRef temporaries are dropped before the move closures
-    // below.  This avoids E0505 "cannot move out of `ctx` because it is
-    // borrowed".
-    let display_text = (*ctx.display.text.read()).clone();
-    let history_text = (*ctx.display.history.read()).clone();
-    let memory_indicator = (*ctx.display.memory_indicator.read()).clone();
-    let mode_indicator = (*ctx.audio.mode_indicator.read()).clone();
-    let error_state = *ctx.display.is_error.read();
-    let audio_status = (*ctx.audio.audio_status.read()).clone();
-    let audio_muted = *ctx.audio.muted.read();
-    let audio_volume = *ctx.audio.volume.read();
-    let dark_mode = *ctx.audio.dark_mode.read();
-    let network_status = (*ctx.net.status.read()).clone();
-    let remote_controlled = *ctx.net.remote_controlled.read();
-    let executing_remotely = *ctx.net.executing_remotely.read();
-    let about_visible = *ctx.audio.about_visible.read();
-    let settings_panel_visible = *ctx.settings.panel_visible.read();
-    let network_panel_visible = *ctx.net.panel_visible.read();
-    let scanning = *ctx.net.scanning.read();
-    let allow_remote_control = *ctx.net.allow_remote_control.read();
-    let connected_peer_index = *ctx.net.connected_peer_index.read();
-    let peers: Vec<PeerDisplayProps> = (*ctx.net.peers.read())
-        .iter()
-        .map(|peer| PeerDisplayProps {
-            name: (*peer.name.read()).clone(),
-            address: (*peer.address.read()).clone(),
-            is_connected: *peer.is_connected.read(),
-            route_active: *peer.route_active.read(),
-            latency_ms: *peer.latency_ms.read(),
-            index: *peer.index.read(),
-            node_id_string: (*peer.node_id_string.read()).clone(),
-        })
-        .collect();
-    let app_version = (*ctx.app_version.read()).clone();
-    let settings_display_name = (*ctx.settings.display_name.read()).clone();
-    let settings_save_status = (*ctx.settings.save_status.read()).clone();
-    let keyboard_pressed = *ctx.keyboard_pressed.read();
-    let last_keyboard_action = (*ctx.last_keyboard_action.read()).clone();
-
     rsx! {
         document::Style { "{APP_CSS}" }
 
         CalculatorUI {
-            // -- Display data (read from context signals) --
-            display_text: display_text,
-            history_text: history_text,
-            memory_indicator: memory_indicator,
-            mode_indicator: mode_indicator,
-            error_state: error_state,
-            audio_status: audio_status,
-            audio_muted: audio_muted,
-            audio_volume: audio_volume,
-            dark_mode: dark_mode,
-
-            // -- Network status --
-            network_status: network_status,
-            remote_controlled: remote_controlled,
-            executing_remotely: executing_remotely,
-
-            // -- Overlay visibility --
-            about_visible: about_visible,
-            settings_panel_visible: settings_panel_visible,
-            network_panel_visible: network_panel_visible,
-            scanning: scanning,
-            allow_remote_control: allow_remote_control,
-
-            // -- Peer / routing data --
-            peers: peers,
-            connected_peer_index: connected_peer_index,
-
-            // -- App metadata --
-            app_version: app_version,
-
-            // -- Settings --
-            settings_display_name: settings_display_name,
-            settings_save_status: settings_save_status,
-
             // -- Calculator event handlers (dispatch through bridge) --
             on_digit_pressed: { let ctx = ctx.clone(); move |d: u8| handle_digit(ctx.clone(), d) },
             on_decimal_point: { let ctx = ctx.clone(); move |_: ()| handle_action(ctx.clone(), "decimal-point") },
@@ -399,44 +349,12 @@ fn App() -> Element {
             // -- Theme toggle --
             on_toggle_theme: { let ctx = ctx.clone(); move |_: ()| toggle_theme(ctx.clone()) },
 
-            // -- About dialog --
-            on_show_about: {
-                let mut ctx = ctx.clone();
-                move |_: ()| {
-                    close_all_panels(&mut ctx);
-                    *ctx.audio.about_visible.write() = true;
-                }
-            },
-            on_close_about: { let mut ctx = ctx.clone(); move |_: ()| { *ctx.audio.about_visible.write() = false; } },
-
-            // -- Settings panel --
-            on_show_settings: {
-                let mut ctx = ctx.clone();
-                move |_: ()| {
-                    close_all_panels(&mut ctx);
-                    *ctx.settings.panel_visible.write() = true;
-                }
-            },
-            on_close_settings: { let mut ctx = ctx.clone(); move |_: ()| { *ctx.settings.panel_visible.write() = false; } },
             on_save_display_name: { let ctx = ctx.clone(); move |name: String| handle_save_display_name(ctx.clone(), name) },
-
-            // -- Network panel --
-            on_show_network_settings: {
-                let mut ctx = ctx.clone();
-                move |_: ()| {
-                    close_all_panels(&mut ctx);
-                    *ctx.net.panel_visible.write() = true;
-                }
-            },
-            on_close_network_settings: { let mut ctx = ctx.clone(); move |_: ()| { *ctx.net.panel_visible.write() = false; } },
-            on_connect_to_peer: { let ctx = ctx.clone(); move |id: String| handle_connect_peer(ctx.clone(), id) },
-            on_disconnect_peer: { let ctx = ctx.clone(); move |id: String| handle_disconnect_peer(ctx.clone(), id) },
+            on_use_executor: { let ctx = ctx.clone(); move |id: NodeId| handle_connect_peer(ctx.clone(), id.to_string()) },
+            on_stop_executor: { let ctx = ctx.clone(); move |id: NodeId| handle_disconnect_peer(ctx.clone(), id.to_string()) },
             on_scan_peers: { let ctx = ctx.clone(); move |_: ()| handle_scan_peers(ctx.clone()) },
             on_toggle_remote_control: { let ctx = ctx.clone(); move |_: ()| handle_toggle_remote_control(ctx.clone()) },
 
-            // -- Keyboard handler (dispatch through bridge) --
-            keyboard_pressed: keyboard_pressed,
-            last_keyboard_action: last_keyboard_action,
             on_keyboard_action: { let ctx = ctx.clone(); move |action: String| handle_action(ctx.clone(), &action) },
             on_keyboard_pressed: {
                 let mut ctx = ctx.clone();

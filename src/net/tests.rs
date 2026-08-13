@@ -1346,7 +1346,7 @@ mod session_identity_and_generation_tests {
     use super::*;
     use crate::net::discovery::public_key_fingerprint;
     use crate::net::protocol::ExpectedPeerIdentity;
-    use crate::net::runtime::{remove_session_if_current, should_replace_session};
+    use crate::net::session_registry::{remove_session_if_current, should_replace_session};
 
     fn active_session(session_id: SessionId) -> session::ActiveSession {
         let (sender, _receiver) = mpsc::channel(16);
@@ -1628,15 +1628,16 @@ mod resource_hardening_tests {
     fn full_ui_ingress_queue_disconnects_message_producer() {
         let (ui_tx, _ui_rx) = mpsc::channel(1);
         ui_tx
-            .try_send(crate::ui::events::UiEvent::NetworkStatusUpdate(
-                "occupied".to_string(),
-            ))
+            .try_send(crate::ui::events::UiEvent::NetworkStatus {
+                kind: crate::net::NetworkStatusKind::Enabled,
+                text: "occupied".to_string(),
+            })
             .unwrap();
         let peer = NodeId::new_v4();
         let (session_sender, _session_receiver) = mpsc::channel(1);
         let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
-        let mut active = HashMap::new();
-        active.insert(
+        let sessions = crate::net::session_registry::SessionRegistry::new();
+        sessions.lock().unwrap().insert(
             peer,
             session::ActiveSession {
                 session_id: SessionId::new_v4(),
@@ -1645,7 +1646,6 @@ mod resource_hardening_tests {
                 cancel_tx,
             },
         );
-        let sessions = std::sync::Arc::new(std::sync::Mutex::new(active));
 
         assert!(!crate::net::runtime::forward_incoming_message_to_ui(
             &ui_tx,
