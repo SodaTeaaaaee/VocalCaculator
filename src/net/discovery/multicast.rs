@@ -5,8 +5,10 @@ use std::time::Duration;
 use tokio::net::UdpSocket;
 
 use crate::net::protocol::{
-    DISCOVERY_MULTICAST_ADDR, DISCOVERY_PORT, DiscoveryMessage, PROTOCOL_MAGIC,
+    DISCOVERY_MULTICAST_ADDR, DISCOVERY_PORT, DiscoveryMessage, PROTOCOL_MAGIC, valid_display_name,
 };
+
+const MAX_DISCOVERY_DATAGRAM_LENGTH: usize = 1024;
 
 /// UDP multicast transport for LAN peer discovery.
 ///
@@ -108,7 +110,10 @@ impl MulticastTransport {
 
     /// Send a discovery announcement to the multicast group.
     pub async fn announce(&self, msg: &DiscoveryMessage) -> Result<(), anyhow::Error> {
-        let bincode_bytes = bincode::serde::encode_to_vec(msg, bincode::config::standard())?;
+        let bincode_bytes = bincode::serde::encode_to_vec(
+            msg,
+            bincode::config::standard().with_limit::<MAX_DISCOVERY_DATAGRAM_LENGTH>(),
+        )?;
         let mut payload = Vec::with_capacity(PROTOCOL_MAGIC.len() + bincode_bytes.len());
         payload.extend_from_slice(&PROTOCOL_MAGIC);
         payload.extend_from_slice(&bincode_bytes);
@@ -133,7 +138,7 @@ impl MulticastTransport {
 
     /// Wait for the next discovery announcement from the multicast group.
     pub async fn recv(&self) -> Result<(DiscoveryMessage, SocketAddr), anyhow::Error> {
-        let mut buf = vec![0u8; 1024];
+        let mut buf = vec![0u8; MAX_DISCOVERY_DATAGRAM_LENGTH];
         let (len, addr) = self.recv_socket.recv_from(&mut buf).await?;
         if len < PROTOCOL_MAGIC.len() || buf[..PROTOCOL_MAGIC.len()] != PROTOCOL_MAGIC {
             return Err(anyhow::anyhow!(
@@ -147,10 +152,89 @@ impl MulticastTransport {
                 addr,
             ));
         }
-        let (msg, _) = bincode::serde::decode_from_slice(
-            &buf[PROTOCOL_MAGIC.len()..len],
-            bincode::config::standard(),
-        )?;
+        let msg = decode_discovery_message(&buf[PROTOCOL_MAGIC.len()..len])?;
         Ok((msg, addr))
+    }
+}
+
+fn decode_discovery_message(bytes: &[u8]) -> Result<DiscoveryMessage, anyhow::Error> {
+    let (message, consumed) = bincode::serde::decode_from_slice::<DiscoveryMessage, _>(
+        bytes,
+        bincode::config::standard().with_limit::<MAX_DISCOVERY_DATAGRAM_LENGTH>(),
+    )?;
+    if consumed != bytes.len() {
+        return Err(anyhow::anyhow!(
+            "discovery message has trailing bytes: consumed {}, datagram {}",
+            consumed,
+            bytes.len(),
+        ));
+    }
+    let name_is_valid = match &message {
+        DiscoveryMessage::Announce { display_name, .. }
+        | DiscoveryMessage::AnnounceV2 { display_name, .. } => valid_display_name(display_name),
+        DiscoveryMessage::Discover => true,
+    };
+    if !name_is_valid {
+        return Err(anyhow::anyhow!(
+            "discovery message has invalid display name"
+        ));
+    }
+    Ok(message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::net::protocol::Capabilities;
+
+    #[test]
+    fn discovery_decoder_requires_full_datagram_consumption() {
+        let message = DiscoveryMessage::Announce {
+            node_id: uuid::Uuid::new_v4(),
+            display_name: "peer".to_string(),
+            tcp_port: 42420,
+            capabilities: Capabilities {
+                can_execute: true,
+                can_control: true,
+                protocol_version: crate::net::protocol::PROTOCOL_VERSION,
+            },
+        };
+        let mut encoded =
+            bincode::serde::encode_to_vec(&message, bincode::config::standard()).unwrap();
+        assert!(decode_discovery_message(&encoded).is_ok());
+        encoded.push(0xff);
+        assert!(decode_discovery_message(&encoded).is_err());
+    }
+
+    #[test]
+    fn discovery_decoder_rejects_invalid_name_and_over_limit_payload() {
+        let invalid_name = DiscoveryMessage::Announce {
+            node_id: uuid::Uuid::new_v4(),
+            display_name: "x".repeat(crate::net::protocol::MAX_DISPLAY_NAME_BYTES + 1),
+            tcp_port: 42420,
+            capabilities: Capabilities {
+                can_execute: true,
+                can_control: true,
+                protocol_version: crate::net::protocol::PROTOCOL_VERSION,
+            },
+        };
+        let encoded =
+            bincode::serde::encode_to_vec(&invalid_name, bincode::config::standard()).unwrap();
+        assert!(decode_discovery_message(&encoded).is_err());
+
+        let oversized_message = DiscoveryMessage::Announce {
+            node_id: uuid::Uuid::new_v4(),
+            display_name: "x".repeat(MAX_DISCOVERY_DATAGRAM_LENGTH),
+            tcp_port: 42420,
+            capabilities: Capabilities {
+                can_execute: true,
+                can_control: true,
+                protocol_version: crate::net::protocol::PROTOCOL_VERSION,
+            },
+        };
+        let oversized =
+            bincode::serde::encode_to_vec(&oversized_message, bincode::config::standard()).unwrap();
+        assert!(oversized.len() > MAX_DISCOVERY_DATAGRAM_LENGTH);
+        assert!(decode_discovery_message(&oversized).is_err());
     }
 }

@@ -7,21 +7,18 @@
 //!
 //! # Architecture
 //!
-//! * A thread-local [`Router`] instance dispatches calculator actions through
-//!   the routing matrix.  [`create_router`] initialises it; the `handle_*`
-//!   functions borrow it to dispatch actions.
+//! * A thread-local [`Router`] instance dispatches calculator actions locally
+//!   or to one selected remote executor. [`create_router`] initialises it;
+//!   the `handle_*` functions borrow it to dispatch actions.
 //!
 //! * A thread-local [`NetworkManager`] owns the async networking runtime.
 //!   [`init_networking`] creates and starts it; [`sync_network_state`]
 //!   reads its shared state and writes to [`NetUiState`] signals.
 //!
 //! * [`start_network_event_loop`] spawns a Dioxus coroutine that processes
-//!   [`UiEvent`]s received through an unbounded channel.  Each event
-//!   updates the corresponding [`CalcContext`] signal directly -- no
-//!   polling loop is needed.  The networking thread sends events via
-//!   [`UnboundedSender<UiEvent>`].  Pending-control-request timeouts are
-//!   tracked with a spawned `tokio::time::sleep` task instead of a poll
-//!   counter.
+//!   [`UiEvent`]s received through a bounded channel.  Each event
+//!   updates the corresponding [`CalcContext`] signal directly. The
+//!   networking thread uses a finite queue with explicit overload handling.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -31,12 +28,12 @@ use dioxus::prelude::*;
 
 use crate::app::config;
 use crate::app::network_mode::{self, NetworkMode};
-use crate::app::storage::{DeviceTrust, PairedDevice, Storage};
+use crate::app::storage::Storage;
 use crate::audio::VocalAudio;
 use crate::core::action::CalcAction;
 use crate::core::calculator::Calculator;
 use crate::core::token::BinaryOp;
-use crate::net::protocol::{ConflictPolicy, NetworkMessage, NodeId};
+use crate::net::protocol::{NetworkMessage, valid_display_name};
 use crate::net::state::NetworkState;
 use crate::net::{NetworkManager, Router};
 use crate::ui::events::UiEvent;
@@ -61,182 +58,6 @@ fn get_router() -> Option<Router> {
 /// Returns `None` if networking has not been initialised.
 fn with_nm<R>(f: impl FnOnce(&mut NetworkManager) -> R) -> Option<R> {
     NET_MANAGER.with(|cell| cell.borrow_mut().as_mut().map(f))
-}
-
-fn with_storage<R>(f: impl FnOnce(&Arc<Storage>) -> R) -> Option<R> {
-    NET_CONTEXT.with(|cell| cell.borrow().as_ref().map(|ctx| f(&ctx.storage)))
-}
-
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-
-fn refresh_router_paired_devices(storage: &Storage, router: &Router) {
-    match storage.paired_devices() {
-        Ok(devices) => {
-            router.set_paired_devices(
-                devices
-                    .into_iter()
-                    .map(|device| (device.node_id, device.public_key, device.trust_state)),
-            );
-        }
-        Err(e) => {
-            log::warn!("Failed to refresh paired-device trust table: {}", e);
-        }
-    }
-}
-
-fn existing_paired_device(storage: &Storage, node_id: NodeId) -> Option<PairedDevice> {
-    storage
-        .paired_devices()
-        .ok()
-        .and_then(|devices| devices.into_iter().find(|device| device.node_id == node_id))
-}
-
-fn peer_info_for_pairing(node_id: NodeId, router: &Router) -> Option<(String, String, [u8; 32])> {
-    NET_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let net_ctx = borrow.as_ref()?;
-        let state = net_ctx.net_state.lock().unwrap_or_else(|e| e.into_inner());
-        let peer = state.peers.get_peer(&node_id)?;
-        let public_key = if peer.public_key != [0u8; 32] {
-            peer.public_key
-        } else {
-            router.remote_public_key(&node_id)?
-        };
-        Some((
-            peer.display_name.clone(),
-            format!("{}:{}", peer.address.ip(), peer.tcp_port),
-            public_key,
-        ))
-    })
-}
-
-fn store_paired_peer(
-    storage: &Storage,
-    router: &Router,
-    node_id: NodeId,
-    default_trust: DeviceTrust,
-) -> Result<(), anyhow::Error> {
-    let (display_name, address, public_key) = peer_info_for_pairing(node_id, router)
-        .ok_or_else(|| anyhow::anyhow!("peer info missing for pairing"))?;
-    let now = now_ms();
-    let existing = existing_paired_device(storage, node_id);
-    let trust_state = existing
-        .as_ref()
-        .map(|device| device.trust_state)
-        .unwrap_or(default_trust);
-    let first_seen = existing
-        .as_ref()
-        .map(|device| device.first_seen)
-        .unwrap_or(now);
-    let paired_at = existing
-        .as_ref()
-        .map(|device| device.paired_at)
-        .unwrap_or(now);
-    let device = PairedDevice {
-        node_id,
-        display_name,
-        address,
-        public_key,
-        is_trusted: matches!(trust_state, DeviceTrust::Trusted),
-        first_seen,
-        last_seen: now,
-        paired_at,
-        trust_state,
-    };
-    storage.add_paired_device(&device)?;
-    router.upsert_paired_device(node_id, public_key, trust_state);
-    refresh_router_paired_devices(storage, router);
-    Ok(())
-}
-
-fn send_pairing_confirm_for_peer(
-    storage: &Storage,
-    router: &Router,
-    node_id: NodeId,
-) -> Result<(), anyhow::Error> {
-    let local_public_key = storage.identity().public_key_bytes();
-    let remote_public_key = router
-        .remote_public_key(&node_id)
-        .ok_or_else(|| anyhow::anyhow!("missing verified remote key"))?;
-    let payload = Router::pairing_confirm_payload(local_public_key, remote_public_key);
-    let signature = storage.identity().sign(&payload).to_bytes().to_vec();
-    router.send_pairing_confirm(node_id, signature);
-    Ok(())
-}
-
-fn trust_label(
-    trust: Option<DeviceTrust>,
-    pairing_pending: bool,
-    approval_pending: bool,
-) -> String {
-    match trust {
-        Some(DeviceTrust::Trusted) => "信任".to_string(),
-        Some(DeviceTrust::AskEachTime) => "每次询问".to_string(),
-        Some(DeviceTrust::Blocked) => "阻止".to_string(),
-        None if pairing_pending || approval_pending => "未配对 · 待授权".to_string(),
-        None => "未配对".to_string(),
-    }
-}
-
-fn handle_pairing_side_effects(ctx: &mut CalcContext, sender_id: NodeId, msg: &NetworkMessage) {
-    let Some(router) = get_router() else {
-        return;
-    };
-    let Some(storage) = with_storage(Arc::clone) else {
-        return;
-    };
-
-    match msg {
-        NetworkMessage::PairingRequest {
-            public_key,
-            pairing_code_hash,
-        } => {
-            let local_public_key = storage.identity().public_key_bytes();
-            if Router::pairing_code_hash(*public_key, local_public_key) != *pairing_code_hash {
-                return;
-            }
-            if let Some(existing) = existing_paired_device(&storage, sender_id)
-                && existing.public_key == *public_key
-                && let Err(e) = send_pairing_confirm_for_peer(&storage, &router, sender_id)
-            {
-                log::warn!("Failed to send pairing confirmation: {}", e);
-            }
-        }
-        NetworkMessage::PairingConfirm { signature } => {
-            let Some(sender_public_key) = router.remote_public_key(&sender_id) else {
-                log::warn!("Cannot persist PairingConfirm: missing verified sender key");
-                return;
-            };
-            let local_public_key = storage.identity().public_key_bytes();
-            if !Router::verify_pairing_confirm_signature(
-                sender_public_key,
-                local_public_key,
-                signature,
-            ) {
-                *ctx.net.status.write() = "配对签名无效".to_string();
-                return;
-            }
-            match store_paired_peer(&storage, &router, sender_id, DeviceTrust::AskEachTime) {
-                Ok(()) => {
-                    router.clear_pending_pairing(&sender_id);
-                    *ctx.net.status.write() = "配对已完成".to_string();
-                }
-                Err(e) => {
-                    log::warn!("Failed to persist paired device: {}", e);
-                    *ctx.net.status.write() = "配对保存失败".to_string();
-                }
-            }
-        }
-        NetworkMessage::PairingReject => {
-            *ctx.net.status.write() = "配对被拒绝".to_string();
-        }
-        _ => {}
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -428,8 +249,6 @@ pub fn set_router_user_mute(user_muted: bool) {
 /// Shared network state used by the Dioxus event bridge.
 pub struct NetworkContext {
     pub net_state: Arc<Mutex<NetworkState>>,
-    pub matrix_node_ids: Rc<RefCell<Vec<NodeId>>>,
-    pub storage: Arc<Storage>,
 }
 
 thread_local! {
@@ -446,12 +265,11 @@ thread_local! {
 /// `ui_event_tx` is the sender half of the [`UiEvent`] channel; the
 /// networking runtime uses it to push state-change events to the UI.
 ///
-/// `storage` provides the [`DeviceIdentity`] (node_id + public key)
-/// and will be used for paired-device lookups.
+/// `storage` provides the authenticated local [`DeviceIdentity`].
 ///
 /// This mirrors `src/app/bridge::init_networking` for the Dioxus UI.
 pub fn init_networking(
-    ui_event_tx: tokio::sync::mpsc::UnboundedSender<UiEvent>,
+    ui_event_tx: tokio::sync::mpsc::Sender<UiEvent>,
     storage: Arc<Storage>,
 ) -> bool {
     let app_config = storage.config();
@@ -477,42 +295,31 @@ pub fn init_networking(
     };
 
     // Extract config values before moving storage into NetworkManager.
-    let conflict_policy = app_config.network.conflict_policy.clone();
     let allow_remote_control = app_config.network.allow_remote_control;
     let display_name = app_config.network.display_name.clone();
-    let paired_devices = match storage.paired_devices() {
-        Ok(devices) => devices
-            .into_iter()
-            .map(|device| (device.node_id, device.public_key, device.trust_state))
-            .collect::<Vec<_>>(),
-        Err(e) => {
-            log::warn!("Failed to load paired-device trust table: {}", e);
-            Vec::<(NodeId, [u8; 32], DeviceTrust)>::new()
+
+    let startup_event_tx = ui_event_tx.clone();
+    let mut nm = NetworkManager::new(storage, ui_event_tx);
+
+    // Synchronise Router and NetworkManager identity. The session handshake
+    // proves possession of the corresponding Ed25519 key before a message can
+    // reach the Router.
+    router.set_local_node_id(nm.local_node_id());
+    router.set_allow_remote_control(allow_remote_control);
+    let handle = match nm.start(mode) {
+        Ok(handle) => handle,
+        Err(error) => {
+            log::error!("Networking failed to start: {}", error);
+            let _ = startup_event_tx.try_send(UiEvent::NetworkStatusUpdate(
+                "网络启动失败，本机计算器仍可正常使用".to_string(),
+            ));
+            return false;
         }
     };
-
-    let mut nm = NetworkManager::new(storage.clone(), ui_event_tx);
-
-    // Synchronise Router and NetworkManager NodeIds so that routing
-    // matrix owner IDs match session sender IDs.
-    router.set_local_node_id(nm.local_node_id());
-    router.set_local_identity(
-        storage.identity().public_key_bytes(),
-        storage.identity().signing_key(),
-    );
-    let handle = nm.start(mode);
     router.set_runtime_handle(handle.runtime_handle().clone());
     router.set_outgoing_tx(handle.outgoing_sender());
 
     let net_state = nm.state();
-
-    match conflict_policy.as_str() {
-        "exclusive" => router.set_conflict_policy(ConflictPolicy::Exclusive),
-        _ => router.set_conflict_policy(ConflictPolicy::Interleaved),
-    }
-
-    router.set_allow_remote_control(allow_remote_control);
-    router.set_paired_devices(paired_devices);
 
     log::info!(
         "Network enabled (name={}, id={})",
@@ -520,11 +327,7 @@ pub fn init_networking(
         nm.local_node_id(),
     );
 
-    let ctx = NetworkContext {
-        net_state,
-        matrix_node_ids: Rc::new(RefCell::new(Vec::new())),
-        storage,
-    };
+    let ctx = NetworkContext { net_state };
 
     NET_MANAGER.with(|cell| *cell.borrow_mut() = Some(nm));
     NET_CONTEXT.with(|cell| *cell.borrow_mut() = Some(ctx));
@@ -536,35 +339,21 @@ pub fn init_networking(
 // start_network_event_loop -- pure event-driven UiEvent consumer
 // ---------------------------------------------------------------------------
 
-/// Pending-control-request timeout duration.
-const PENDING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-
 /// Spawn an async task that consumes [`UiEvent`]s from `rx` and updates
 /// [`CalcContext`] signals.  This is a pure event-driven replacement for
 /// the old 50 ms poll timer.
 ///
 /// The networking thread sends [`UiEvent`]s through the corresponding
-/// [`UnboundedSender<UiEvent>`].  Each variant is matched and the
+/// a bounded sender. Each variant is matched and the
 /// appropriate signal in [`CalcContext`] is updated.  No polling loop
 /// is used.
-///
-/// Pending-control-request timeouts are tracked by spawning a
-/// `tokio::time::sleep` task instead of a tick counter.
 ///
 /// Can be called from a component body or a `use_hook` closure.
 pub fn start_network_event_loop(
     mut ctx: CalcContext,
-    mut rx: tokio::sync::mpsc::UnboundedReceiver<UiEvent>,
+    mut rx: tokio::sync::mpsc::Receiver<UiEvent>,
 ) {
     spawn(async move {
-        // Tracks whether a timeout task is currently sleeping for a
-        // pending control request.  Avoids spawning duplicate tasks.
-        let timeout_active = Rc::new(RefCell::new(false));
-        // The peer we are currently waiting on (if any).  Used to
-        // avoid re-spawning a timeout task when the same request is
-        // still pending across consecutive events.
-        let tracked_pending_peer: Rc<RefCell<Option<NodeId>>> = Rc::new(RefCell::new(None));
-
         loop {
             let event = match rx.recv().await {
                 Some(ev) => ev,
@@ -581,10 +370,6 @@ pub fn start_network_event_loop(
             if needs_sync {
                 sync_network_state(ctx.clone());
             }
-
-            // Spawn a timeout task for any pending control request
-            // that does not already have one running.
-            maybe_spawn_pending_timeout(&ctx, &timeout_active, &tracked_pending_peer);
         }
     });
 }
@@ -608,8 +393,6 @@ fn dispatch_event(ctx: &mut CalcContext, event: UiEvent) -> bool {
                 address: Signal::new(payload.address),
                 is_connected: Signal::new(payload.is_connected),
                 route_active: Signal::new(false),
-                approval_pending: Signal::new(false),
-                trust_label: Signal::new("未配对".to_string()),
                 latency_ms: Signal::new(payload.latency_ms),
                 index: Signal::new(payload.index),
                 node_id_string: Signal::new(payload.node_id_string),
@@ -638,6 +421,7 @@ fn dispatch_event(ctx: &mut CalcContext, event: UiEvent) -> bool {
             if let Ok(node_id) = uuid.parse::<uuid::Uuid>()
                 && let Some(router) = get_router()
             {
+                router.add_remote_session(node_id);
                 NET_CONTEXT.with(|cell| {
                     if let Some(ref net_ctx) = *cell.borrow() {
                         let state = net_ctx.net_state.lock().unwrap_or_else(|e| e.into_inner());
@@ -646,10 +430,6 @@ fn dispatch_event(ctx: &mut CalcContext, event: UiEvent) -> bool {
                         }
                     }
                 });
-                router.add_remote_session(node_id);
-                router.send_routing_sync_to(node_id);
-                router.send_signed_rows_to(node_id);
-                router.send_routing_row_request_to(node_id, node_id);
                 // Keep the Router's broadcast peer set in sync.
                 if let Some(()) = with_nm(|nm| {
                     router.set_connected_peers(nm.active_session_ids());
@@ -673,27 +453,39 @@ fn dispatch_event(ctx: &mut CalcContext, event: UiEvent) -> bool {
         UiEvent::NetworkMessage(sender_uuid, bytes) => {
             match bincode::serde::decode_from_slice::<NetworkMessage, _>(
                 &bytes,
-                bincode::config::standard(),
+                bincode::config::standard().with_limit::<4096>(),
             ) {
-                Ok((msg, _)) => {
+                Ok((msg, consumed)) if consumed == bytes.len() => {
                     if let Ok(sender_id) = sender_uuid.parse::<uuid::Uuid>() {
                         // Intercept PeerNameUpdate: update the peer's
                         // display name in NetworkState so the UI picks
                         // it up on the next sync.
                         if let NetworkMessage::PeerNameUpdate { ref display_name } = msg {
-                            NET_CONTEXT.with(|cell| {
-                                if let Some(ref net_ctx) = *cell.borrow() {
-                                    let mut state =
-                                        net_ctx.net_state.lock().unwrap_or_else(|e| e.into_inner());
-                                    state.peers.update_name(&sender_id, display_name);
-                                }
-                            });
+                            if valid_display_name(display_name) {
+                                NET_CONTEXT.with(|cell| {
+                                    if let Some(ref net_ctx) = *cell.borrow() {
+                                        let mut state = net_ctx
+                                            .net_state
+                                            .lock()
+                                            .unwrap_or_else(|e| e.into_inner());
+                                        state.peers.update_name(&sender_id, display_name);
+                                    }
+                                });
+                            } else {
+                                log::warn!("Rejected invalid peer display name from {sender_id}");
+                            }
                         }
-                        handle_pairing_side_effects(ctx, sender_id, &msg);
                         if let Some(router) = get_router() {
                             router.handle_network_message(sender_id, msg);
                         }
                     }
+                }
+                Ok((_msg, consumed)) => {
+                    log::warn!(
+                        "Rejected network message with trailing bytes: consumed {}, frame {}",
+                        consumed,
+                        bytes.len()
+                    );
                 }
                 Err(e) => {
                     log::warn!("Failed to deserialize UiEvent::NetworkMessage: {}", e);
@@ -716,18 +508,12 @@ fn dispatch_event(ctx: &mut CalcContext, event: UiEvent) -> bool {
                 "fingerprint_mismatch" => "发现信息与连接密钥不一致".to_string(),
                 other => format!("连接失败: {}", other),
             };
-            let mut needs_sync = false;
-            if let Some(router) = get_router()
-                && let Some(pending_peer) = router.pending_control_request()
-            {
-                let my_id = router.local_node_id();
-                router.set_route(my_id, pending_peer, false);
-                router.clear_pending_control_request();
-                needs_sync = true;
+            if let Some(router) = get_router() {
+                router.clear_remote_executor();
             }
             *ctx.net.status.write() = error_msg;
             *ctx.net.executing_remotely.write() = false;
-            needs_sync
+            true
         }
 
         // ---- Latency ----
@@ -743,30 +529,6 @@ fn dispatch_event(ctx: &mut CalcContext, event: UiEvent) -> bool {
             false
         }
 
-        // ---- Routing matrix ----
-        UiEvent::RoutingMatrixUpdate(data) => {
-            *ctx.net.matrix_size.write() = data.size;
-            *ctx.net.peer_names.write() = data.names;
-            *ctx.net.matrix_cells.write() = data.cells;
-            *ctx.net.my_index.write() = data.my_index;
-            *ctx.net.matrix_node_ids.write() = data.node_ids;
-            // Also persist into NET_CONTEXT so handle_route_toggled
-            // uses the same ordering as the last render (Bug 9 fix).
-            NET_CONTEXT.with(|cell| {
-                if let Some(ref net_ctx) = *cell.borrow() {
-                    let node_ids: Vec<NodeId> = ctx
-                        .net
-                        .matrix_node_ids
-                        .read()
-                        .iter()
-                        .filter_map(|s| s.parse::<uuid::Uuid>().ok())
-                        .collect();
-                    *net_ctx.matrix_node_ids.borrow_mut() = node_ids;
-                }
-            });
-            false
-        }
-
         // ---- Remote control status ----
         UiEvent::RemoteControlStatus(remote_controlled, executing_remotely) => {
             *ctx.net.remote_controlled.write() = remote_controlled;
@@ -779,94 +541,6 @@ fn dispatch_event(ctx: &mut CalcContext, event: UiEvent) -> bool {
             *ctx.net.status.write() = status;
             false
         }
-
-        // ---- Pending request timeout ----
-        UiEvent::PendingTimeout(peer_uuid) => {
-            if let Ok(pending_peer) = peer_uuid.parse::<uuid::Uuid>()
-                && let Some(router) = get_router()
-            {
-                let my_id = router.local_node_id();
-                router.set_route(my_id, pending_peer, false);
-                router.clear_pending_control_request();
-            }
-            *ctx.net.status.write() = "连接超时".to_string();
-            *ctx.net.executing_remotely.write() = false;
-            true
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// maybe_spawn_pending_timeout -- tokio::time::sleep replacement for tick counter
-// ---------------------------------------------------------------------------
-
-/// If a control-request is pending and no timeout task is currently
-/// running, spawn one that sleeps for [`PENDING_TIMEOUT`] and then
-/// resolves the request if it is still pending.
-///
-/// This replaces the old tick-counter approach (`pending_timeout_ticks`)
-/// from the poll timer with a `tokio::time::sleep` based timeout.
-fn maybe_spawn_pending_timeout(
-    ctx: &CalcContext,
-    timeout_active: &Rc<RefCell<bool>>,
-    tracked_peer: &Rc<RefCell<Option<NodeId>>>,
-) {
-    let router = match get_router() {
-        Some(r) => r,
-        None => return,
-    };
-
-    let is_pending = router.is_awaiting_grant();
-    let current_pending = router.pending_control_request();
-
-    // If the pending target changed, allow re-spawning.
-    if current_pending != *tracked_peer.borrow() {
-        *tracked_peer.borrow_mut() = current_pending;
-        *timeout_active.borrow_mut() = false;
-    }
-
-    if is_pending && !*timeout_active.borrow() {
-        *timeout_active.borrow_mut() = true;
-
-        let pending_peer = match current_pending {
-            Some(p) => p,
-            None => return,
-        };
-
-        let mut ctx_clone = ctx.clone();
-        let active_flag = timeout_active.clone();
-        let tracked = tracked_peer.clone();
-
-        spawn(async move {
-            tokio::time::sleep(PENDING_TIMEOUT).await;
-
-            // Only act if the same request is still pending.
-            if let Some(router) = get_router() {
-                let still_pending = router.is_awaiting_grant()
-                    && router.pending_control_request() == Some(pending_peer);
-
-                if still_pending {
-                    log::warn!(
-                        "Pending control request to {} timed out; reverting",
-                        pending_peer,
-                    );
-                    let my_id = router.local_node_id();
-                    router.set_route(my_id, pending_peer, false);
-                    router.clear_pending_control_request();
-                    *ctx_clone.net.status.write() = "连接超时".to_string();
-                    *ctx_clone.net.executing_remotely.write() = false;
-                    sync_network_state(ctx_clone.clone());
-                }
-            }
-
-            *active_flag.borrow_mut() = false;
-            *tracked.borrow_mut() = None;
-        });
-    } else if !is_pending && *timeout_active.borrow() {
-        // Request resolved before timeout; mark inactive so the
-        // sleeping task will see is_pending == false and no-op.
-        *timeout_active.borrow_mut() = false;
-        *tracked_peer.borrow_mut() = None;
     }
 }
 
@@ -888,18 +562,11 @@ pub fn sync_network_state(mut ctx: CalcContext) {
         None => return,
     };
 
-    // --- Matrix-based UI state: determine remote execution target ---
-    let my_id = router.local_node_id();
-    let targets = router.my_control_targets();
-    let remote_targets: Vec<NodeId> = targets.into_iter().filter(|id| *id != my_id).collect();
+    let active_target = router.active_remote_executor();
     let active_sessions = with_nm(|nm| nm.active_session_ids()).unwrap_or_default();
-    let pending_approvals = router.pending_route_approval_controllers();
-    let pending_pairings = router.pending_pairing_devices();
-    let is_muted = router.is_muted();
     let user_muted = *ctx.audio.muted.read();
-    router.set_audio_muted(user_muted || is_muted);
+    router.set_audio_muted(user_muted || router.is_executing_remotely());
 
-    // --- Sync peer list from NetworkState ---
     NET_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
         let net_ctx = match borrow.as_ref() {
@@ -910,131 +577,52 @@ pub fn sync_network_state(mut ctx: CalcContext) {
             .lock()
             .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
 
-        let mut remote_peer_name: Option<String> = None;
+        let mut active_peer_name: Option<String> = None;
         let mut connected_idx: i32 = -1;
         let mut new_peers = Vec::new();
 
         for (i, (node_id, peer)) in state.peers.iter().enumerate() {
             let nid_str: String = node_id.to_string();
-            let route_active = remote_targets.contains(node_id);
+            let route_active = active_target == Some(*node_id);
             let is_connected = active_sessions.contains(node_id);
             if route_active {
                 connected_idx = i as i32;
-                remote_peer_name = Some(peer.display_name.clone());
+                active_peer_name = Some(peer.display_name.clone());
             }
             new_peers.push(PeerDisplayInfo {
                 name: Signal::new(peer.display_name.clone()),
-                address: Signal::new(format!("{}:{}", peer.address.ip(), peer.tcp_port)),
+                address: Signal::new(
+                    peer.display_endpoint()
+                        .map(|address| address.to_string())
+                        .unwrap_or_default(),
+                ),
                 is_connected: Signal::new(is_connected),
                 route_active: Signal::new(route_active),
-                approval_pending: Signal::new(pending_approvals.contains(node_id)),
-                trust_label: Signal::new(trust_label(
-                    router.peer_trust_state(node_id),
-                    pending_pairings.contains(node_id),
-                    pending_approvals.contains(node_id),
-                )),
                 latency_ms: Signal::new(state.latency_ms.map(|v| v as i32).unwrap_or(-1)),
                 index: Signal::new(i as i32),
                 node_id_string: Signal::new(nid_str),
             });
         }
 
-        let is_any_connected = state.is_connected;
-
-        // Clean up stale remote targets (in our matrix but absent from
-        // active sessions).
-        let stale_targets = {
-            let pending = router.pending_control_request();
-            remote_targets
-                .iter()
-                .filter(|t| !active_sessions.contains(t))
-                .filter(|t| pending.as_ref() != Some(*t))
-                .copied()
-                .collect::<Vec<NodeId>>()
-        };
-        for target in &stale_targets {
-            router.cleanup_peer_disconnect(target);
-        }
-
         *ctx.net.peers.write() = new_peers;
         *ctx.net.connected_peer_index.write() = connected_idx;
 
-        // Update network-status display based on routing matrix.
-        if !pending_approvals.is_empty() {
-            *ctx.net.status.write() = "有远控请求待授权".to_string();
-            *ctx.net.executing_remotely.write() = false;
-        } else if is_muted {
-            if router.is_awaiting_grant() {
-                *ctx.net.status.write() = "等待授权...".to_string();
-                *ctx.net.executing_remotely.write() = false;
-            } else {
-                let name = remote_peer_name.as_deref().unwrap_or("未知");
-                *ctx.net.status.write() = format!("远程: {}", name);
-                *ctx.net.executing_remotely.write() = true;
-            }
-        } else if is_any_connected {
+        let executing_remotely = router.is_executing_remotely();
+        let active_controllers = router.active_remote_controllers();
+        if executing_remotely {
+            let name = active_peer_name.as_deref().unwrap_or("远程设备");
+            *ctx.net.status.write() = format!("正在使用 {} 远程计算", name);
+        } else if active_target.is_some() {
+            *ctx.net.status.write() = "正在连接设备...".to_string();
+        } else if !active_controllers.is_empty() {
+            *ctx.net.status.write() = "正在接受远程控制".to_string();
+        } else if state.is_connected {
             *ctx.net.status.write() = "已连接".to_string();
-            *ctx.net.executing_remotely.write() = false;
         } else {
             *ctx.net.status.write() = "已启用".to_string();
-            *ctx.net.executing_remotely.write() = false;
         }
-
-        // Update remote-controlled indicator (are we being controlled?).
-        let is_remote_controlled = router.my_controllers().iter().any(|id| *id != my_id);
-        *ctx.net.remote_controlled.write() = is_remote_controlled;
-
-        // --- Routing matrix UI sync ---
-        let mut node_ids = router.routing_node_ids();
-        node_ids.sort_by(|a, b| {
-            let a_name = state
-                .peers
-                .get_peer(a)
-                .map(|p| p.display_name.clone())
-                .unwrap_or_default();
-            let b_name = state
-                .peers
-                .get_peer(b)
-                .map(|p| p.display_name.clone())
-                .unwrap_or_default();
-            a_name
-                .cmp(&b_name)
-                .then_with(|| a.to_string().cmp(&b.to_string()))
-        });
-        node_ids.dedup();
-
-        let n = node_ids.len();
-        let mut names = Vec::with_capacity(n);
-        let mut my_idx: i32 = -1;
-
-        for (i, nid) in node_ids.iter().enumerate() {
-            if *nid == my_id {
-                my_idx = i as i32;
-            }
-            let display_name: String = if let Some(p) = state.peers.get_peer(nid) {
-                p.display_name.clone()
-            } else if *nid == my_id {
-                "本机".to_string()
-            } else {
-                let uuid_str = nid.to_string();
-                uuid_str[..8].to_string()
-            };
-            names.push(display_name);
-        }
-        let cells = router.routing_cells_for_order(&node_ids);
-
-        // Store sorted node IDs so handle_route_toggled uses the same
-        // ordering as the last render (Bug 9 fix).
-        NET_CONTEXT.with(|ctx_cell| {
-            if let Some(ref net_ctx) = *ctx_cell.borrow() {
-                *net_ctx.matrix_node_ids.borrow_mut() = node_ids.clone();
-            }
-        });
-
-        *ctx.net.matrix_size.write() = n as i32;
-        *ctx.net.peer_names.write() = names;
-        *ctx.net.matrix_cells.write() = cells;
-        *ctx.net.my_index.write() = my_idx;
+        *ctx.net.executing_remotely.write() = executing_remotely;
+        *ctx.net.remote_controlled.write() = !active_controllers.is_empty();
     });
 }
 
@@ -1044,8 +632,8 @@ pub fn sync_network_state(mut ctx: CalcContext) {
 
 /// Initiate a connection to a peer identified by its NodeId string.
 ///
-/// The peer must have been discovered via LAN scan.  If the peer is
-/// already connected, its route is cleared (disconnect).
+/// The peer must have been discovered via LAN scan. Exactly one peer can be
+/// selected as the remote calculator executor at a time.
 pub fn handle_connect_peer(mut ctx: CalcContext, node_id_str: String) {
     let target = match node_id_str.parse::<uuid::Uuid>() {
         Ok(uuid) => uuid,
@@ -1061,52 +649,53 @@ pub fn handle_connect_peer(mut ctx: CalcContext, node_id_str: String) {
         None => return,
     };
 
-    let my_id = router.local_node_id();
-    if target == my_id {
+    if target == router.local_node_id() {
         return;
     }
 
-    // If already connected (has a route), clear the route (disconnect).
-    let targets = router.my_control_targets();
-    if targets.contains(&target) {
+    if router.active_remote_executor() == Some(target) {
         sync_network_state(ctx);
         return;
     }
 
-    // Look up peer address from NetworkState and connect via TCP.
+    router.select_remote_executor(target);
+    let has_session = with_nm(|nm| nm.active_session_ids().contains(&target)).unwrap_or(false);
+    if has_session {
+        *ctx.net.status.write() = "已选择远程计算设备".to_string();
+        *ctx.net.executing_remotely.write() = true;
+        log::trace!(
+            "Using existing session for peer {}; no TCP reconnect",
+            target
+        );
+        return;
+    }
+
+    // Look up the stable service endpoint from NetworkState and connect via TCP.
     let peer_addr = NET_CONTEXT.with(|cell| {
         cell.borrow().as_ref().and_then(|net_ctx| {
             let state = net_ctx.net_state.lock().unwrap_or_else(|e| e.into_inner());
             state
                 .peers
                 .get_peer(&target)
-                .map(|p| std::net::SocketAddr::new(p.address.ip(), p.tcp_port))
+                .and_then(|p| p.service_endpoint)
         })
     });
 
     match peer_addr {
         Some(addr) => {
             log::info!("Connecting to peer {} at {}", target, addr);
-            for old_target in router.my_control_targets() {
-                if old_target != my_id && old_target != target {
-                    router.send_release_to(old_target);
-                    router.set_route(my_id, old_target, false);
-                }
-            }
-
-            router.set_route(my_id, target, true);
-            router.clear_pending_control_request();
-            router.set_pending_control_request(target);
-            *ctx.net.status.write() = "等待授权...".to_string();
+            *ctx.net.status.write() = "正在连接设备...".to_string();
             *ctx.net.executing_remotely.write() = false;
 
-            if let Some(()) = with_nm(|nm| {
-                nm.connect_to_peer(addr, Some(target));
-            }) {
+            if with_nm(|nm| nm.connect_to_peer(addr, Some(target))).unwrap_or(false) {
                 log::trace!("Connect command sent for {}", target);
+            } else {
+                router.clear_remote_executor_if(target);
+                *ctx.net.status.write() = "无法启动连接".to_string();
             }
         }
         None => {
+            router.clear_remote_executor_if(target);
             log::warn!("Peer {} not found in discovery table", target);
             *ctx.net.status.write() = "未找到设备".to_string();
         }
@@ -1115,10 +704,9 @@ pub fn handle_connect_peer(mut ctx: CalcContext, node_id_str: String) {
 
 /// Disconnect from a peer identified by its NodeId string.
 ///
-/// Clears the routing matrix route for this peer, which stops sending
-/// actions to it.  The TCP session remains alive (for potential
-/// re-routing) but the control relationship is severed.
-pub fn handle_disconnect_peer(ctx: CalcContext, node_id_str: String) {
+/// Stops sending calculator actions to this peer. The authenticated TCP
+/// session may remain available for later reuse.
+pub fn handle_disconnect_peer(mut ctx: CalcContext, node_id_str: String) {
     let target = match node_id_str.parse::<uuid::Uuid>() {
         Ok(uuid) => uuid,
         Err(e) => {
@@ -1132,59 +720,14 @@ pub fn handle_disconnect_peer(ctx: CalcContext, node_id_str: String) {
         None => return,
     };
 
-    let my_id = router.local_node_id();
-    if target == my_id {
+    if target == router.local_node_id() {
         return;
     }
 
-    router.set_route(my_id, target, false);
-    router.send_release_to(target);
-    router.clear_pending_control_request();
-    log::info!("Disconnected from peer {}", target);
-    sync_network_state(ctx);
-}
-
-/// Approve or deny an inbound remote-control request from a peer.
-pub fn handle_route_approval(mut ctx: CalcContext, node_id_str: String, approve: bool) {
-    let controller = match node_id_str.parse::<uuid::Uuid>() {
-        Ok(uuid) => uuid,
-        Err(e) => {
-            log::warn!("Invalid node ID '{}': {}", node_id_str, e);
-            return;
-        }
-    };
-
-    let Some(router) = get_router() else {
-        return;
-    };
-
-    let was_unpaired = router.peer_trust_state(&controller).is_none();
-    if approve && was_unpaired {
-        let Some(storage) = with_storage(Arc::clone) else {
-            router.respond_to_pending_route_request(controller, false);
-            *ctx.net.status.write() = "配对保存失败".to_string();
-            sync_network_state(ctx);
-            return;
-        };
-        if let Err(e) = store_paired_peer(&storage, &router, controller, DeviceTrust::AskEachTime)
-            .and_then(|_| send_pairing_confirm_for_peer(&storage, &router, controller))
-        {
-            log::warn!("Failed to complete pairing for {}: {}", controller, e);
-            router.respond_to_pending_route_request(controller, false);
-            *ctx.net.status.write() = "配对保存失败".to_string();
-            sync_network_state(ctx);
-            return;
-        }
-    } else if !approve && was_unpaired {
-        router.send_pairing_reject(controller);
-    }
-
-    router.respond_to_pending_route_request(controller, approve);
-    *ctx.net.status.write() = if approve {
-        "已授权远控".to_string()
-    } else {
-        "已拒绝远控".to_string()
-    };
+    router.clear_remote_executor_if(target);
+    *ctx.net.executing_remotely.write() = false;
+    *ctx.net.status.write() = "已停止远程执行".to_string();
+    log::info!("Stopped remote execution on peer {}", target);
     sync_network_state(ctx);
 }
 
@@ -1212,10 +755,10 @@ pub fn handle_scan_peers(mut ctx: CalcContext) {
     });
 }
 
-/// Toggle whether this node accepts paired-device remote-control requests.
+/// Toggle the sole inbound remote-control permission boundary.
 ///
-/// When enabled, paired and trusted peers may enter the route authorization
-/// flow. This does not grant control to arbitrary connected peers.
+/// Authenticated sessions may submit valid calculator actions only while this
+/// persisted switch is enabled. Turning it off takes effect immediately.
 pub fn handle_toggle_remote_control(mut ctx: CalcContext) {
     let current = *ctx.net.allow_remote_control.read();
     let next = !current;
@@ -1228,22 +771,14 @@ pub fn handle_toggle_remote_control(mut ctx: CalcContext) {
 
     if let Some(router) = get_router() {
         router.set_allow_remote_control(next);
-        if !next {
-            router.deny_all_pending_route_requests("remote_control_disabled");
-            let my_id = router.local_node_id();
-            let controllers: Vec<_> = router
-                .my_controllers()
-                .into_iter()
-                .filter(|id| *id != my_id)
-                .collect();
-            for controller_id in controllers {
-                router.send_route_revoke_directed(controller_id, my_id);
-                router.revoke_remote_route(controller_id, my_id);
-            }
-        }
     }
 
-    sync_network_state(ctx);
+    sync_network_state(ctx.clone());
+    *ctx.net.status.write() = if next {
+        "远程控制已开启".to_string()
+    } else {
+        "远程控制已关闭".to_string()
+    };
 
     log::info!(
         "Remote control {}",
@@ -1257,8 +792,8 @@ pub fn handle_toggle_remote_control(mut ctx: CalcContext) {
 /// connected peers via `PeerNameUpdate`.
 pub fn handle_save_display_name(mut ctx: CalcContext, name: String) {
     let trimmed = name.trim().to_string();
-    if trimmed.is_empty() {
-        *ctx.settings.save_status.write() = "名称不能为空".to_string();
+    if !valid_display_name(&trimmed) {
+        *ctx.settings.save_status.write() = "名称需为 1-64 字节且不能含控制字符".to_string();
         return;
     }
 
@@ -1284,125 +819,19 @@ pub fn handle_save_display_name(mut ctx: CalcContext, name: String) {
     }
 }
 
-/// Handle a routing matrix cell toggle (user clicks a cell in the
-/// NetworkPanel grid).
-///
-/// `row` and `col` are indices into the sorted node-ID list maintained
-/// in `matrix_node_ids`.  `value` is the desired route state (`true` =
-/// grant control, `false` = revoke).
-///
-/// The row must correspond to this node (only the row owner can modify
-/// their own routes).  Toggling control of another peer initiates the
-/// ControlRequest handshake; revoking is immediate.
-pub fn handle_route_toggled(mut ctx: CalcContext, row: i32, col: i32, value: bool) {
-    let node_ids: Vec<NodeId> = NET_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .map(|c| c.matrix_node_ids.borrow().clone())
-            .unwrap_or_default()
-    });
-
-    if node_ids.is_empty() {
-        log::warn!("handle_route_toggled: matrix_node_ids is empty");
-        return;
-    }
-
-    let row_idx = row as usize;
-    let col_idx = col as usize;
-
-    if row_idx >= node_ids.len() || col_idx >= node_ids.len() {
-        log::warn!(
-            "handle_route_toggled: index out of bounds (row={}, col={}, len={})",
-            row,
-            col,
-            node_ids.len()
-        );
-        return;
-    }
-
-    let from_id = node_ids[row_idx];
-    let to_id = node_ids[col_idx];
-
-    let router = match get_router() {
-        Some(r) => r,
-        None => return,
-    };
-
-    let my_id = router.local_node_id();
-
-    // Only the row owner can modify their own row.
-    if from_id != my_id {
-        log::warn!(
-            "handle_route_toggled: row {} is not ours ({}), ignoring",
-            row,
-            my_id
-        );
-        return;
-    }
-
-    // Don't allow toggling the self-control diagonal.
-    if to_id == my_id {
-        log::trace!("handle_route_toggled: ignoring diagonal toggle");
-        return;
-    }
-
-    if value {
-        let has_session = with_nm(|nm| nm.active_session_ids().contains(&to_id)).unwrap_or(false);
-        if has_session {
-            let ok = router.set_route(from_id, to_id, true);
-            if ok {
-                router.clear_pending_control_request();
-                router.set_pending_control_request(to_id);
-                *ctx.net.status.write() = "等待授权...".to_string();
-                *ctx.net.executing_remotely.write() = false;
-                log::info!("Route set: {} -> {}", from_id, to_id);
-            } else {
-                log::warn!("Route set failed: {} -> {}", from_id, to_id);
-            }
-        } else {
-            let peer_addr = NET_CONTEXT.with(|cell| {
-                cell.borrow().as_ref().and_then(|net_ctx| {
-                    let state = net_ctx.net_state.lock().unwrap_or_else(|e| e.into_inner());
-                    state
-                        .peers
-                        .get_peer(&to_id)
-                        .map(|p| std::net::SocketAddr::new(p.address.ip(), p.tcp_port))
-                })
-            });
-            if let Some(addr) = peer_addr {
-                for old_target in router.my_control_targets() {
-                    if old_target != my_id && old_target != to_id {
-                        router.send_release_to(old_target);
-                        router.set_route(my_id, old_target, false);
-                    }
-                }
-                router.set_route(from_id, to_id, true);
-                router.clear_pending_control_request();
-                router.set_pending_control_request(to_id);
-                *ctx.net.status.write() = "等待授权...".to_string();
-                *ctx.net.executing_remotely.write() = false;
-                if let Some(()) = with_nm(|nm| nm.connect_to_peer(addr, Some(to_id))) {}
-            } else {
-                log::warn!(
-                    "Route toggle: peer {} not found in discovery table, cannot connect",
-                    to_id,
-                );
-            }
-        }
-    } else {
-        // Revoking control: clear the route.
-        router.set_route(from_id, to_id, false);
-        router.send_release_to(to_id);
-        router.clear_pending_control_request();
-        log::info!("Route revoked: {} -/-> {}", from_id, to_id);
-    }
-
-    sync_network_state(ctx);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn peer_display_name_schema_rejects_empty_oversized_and_control_text() {
+        assert!(valid_display_name("Calculator 1"));
+        assert!(!valid_display_name("   "));
+        assert!(!valid_display_name(
+            &"x".repeat(crate::net::protocol::MAX_DISPLAY_NAME_BYTES + 1)
+        ));
+        assert!(!valid_display_name("bad\nname"));
+    }
 
     // -------------------------------------------------------------------
     // parse_action tests (mirrors src/app/callbacks.rs test suite)

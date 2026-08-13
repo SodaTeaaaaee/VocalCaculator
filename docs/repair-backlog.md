@@ -71,6 +71,8 @@
 
 优先级：P0
 
+状态：**已实现并通过自动化测试（2026-07-15）**。
+
 按消息语义处理背压：
 
 - action 保序，不可静默丢；队列满则断开/报告 overload；
@@ -78,6 +80,8 @@
 - UI refresh 合并。
 
 验收：压力测试中内存有上界，UI 不因 10 倍正常流量无限积压。
+
+实现说明：Router→runtime、runtime→UI、runtime command 和 per-session 队列均有明确容量。Router action 队列满时停止使用饱和的远端并将当前动作回落到本机执行；可替代状态丢弃 newest。UI 普通状态事件满载时丢弃 newest；未限速的远端消息若无法进入 UI 队列则取消该 peer session。容量和满载策略均有确定性测试。
 
 ## 2. Phase 1：Windows 固定端口与 automation-safe 网络模式
 
@@ -97,13 +101,13 @@
 
 - `Lan`：正式 TCP/UDP discovery/session——已实现；
 - `Offline`：从组合根处不构造 NetworkManager，不创建任何 network socket——已实现；
-- `LoopbackTest`：只能绑定 loopback 和临时端口，不启动 mDNS/multicast——已实现；
+- `LoopbackTest`：listener 绑定 loopback 临时端口并跳过 mDNS/multicast——已实现；测试调用方仍必须保证所有显式 peer 地址为 loopback，完整 outbound guard 另行收尾；
 - CLI `--network-mode` 优先于环境变量，环境变量优先于 config——已实现；
-- 非法模式值必须显式失败，不能回退到 LAN——已实现，`main()` exit code 2。
+- 显式非法模式字符串必须失败，不能回退到 LAN——已实现，`main()` exit code 2；配置文件缺失仍使用产品默认，现存但不可读、损坏或字段类型错误的配置 fail-closed 为 Offline；未初始化全局模式也默认 Offline。
 
 验收结果：
-- unit test 证明 NetworkManager 未构造——**已实现并验证（自动化）**，`cargo test --locked --lib` 328 项通过，覆盖优先级、非法值、legacy 迁移共 17+1 项新测试。
-- offline GUI smoke 中应用进程没有非 loopback socket——**已实现但未做真实 Windows LAN / 双机 / clean-VM 验证**：没有启动真实进程后审计 OS socket 列表的 smoke test（见 AUTO-002，仍未实现）。
+- 模式解析和配置 fail-closed 行为——**已实现并通过定向自动化测试**；覆盖优先级、显式非法值、legacy 迁移、缺失配置默认值及现存配置读取/解析失败。全量 `cargo test --locked --lib` 仍是所有并行修复线合并后的质量门。
+- NetworkManager 未构造及 offline GUI 进程没有非 loopback socket——**代码门禁已实现，直接组合根测试和进程级验收未实现**：`init_networking` 的 return 位于 `NetworkManager::new` 前，但没有 constructor-spy 测试，也没有启动真实进程后审计 OS socket 列表的 smoke test（见 AUTO-002，仍未实现）。
 
 ### WIN-002 固定 TCP/UDP 42420
 
@@ -151,7 +155,7 @@
 - `#Requires -RunAsAdministrator`，不静默自提升——**未按原文字面实现**：脚本改为运行时自检管理员身份（`WindowsPrincipal.IsInRole`），非管理员时报中文错误并 exit 1，而不是用 `#Requires` 在加载阶段拒绝——这一设计变更已记录为 ADR 修订，见 `docs/windows-portable-firewall-policy.md` §6；不静默自提升这一条本身仍然成立。
 
 验收结果：
-- 幂等运行、Public 不开放、删除不影响其他规则、错误返回非零退出码——**已实现并验证（自动化）**，dry-run 测试断言了这些属性在生成计划中的存在/缺失（23 项断言全部通过）。
+- dry-run/WhatIf 计划、默认 sibling/相对路径绝对化、Public/Domain 不开放的参数契约、精确 Name、严格 Private 读回逻辑和管理员 guard——**已实现并验证（自动化）**，43 项无 NetSecurity 副作用断言全部通过。真实幂等 mutation、真实规则读回、删除不影响其他规则和真实错误退出码仍需 clean VM/管理员人工验收。
 - 移动目录后刷新路径——**已实现但未做真实 Windows LAN / 双机 / clean-VM 验证**：脚本逻辑上每次都重新解析路径并先删后建，但没有在真实 Windows 环境里实际移动目录并重跑脚本核对过。
 
 ### AUTO-001 固化 agent/CI 网络测试分层
@@ -187,7 +191,7 @@
 
 优先级：P1，依赖 WIN-001
 
-状态：**仍未实现**。启动 offline app 后检查进程关联 socket、只允许 loopback WebView/IPC、不允许 `0.0.0.0`/`::`/LAN interface listener 的端到端 smoke test 仍不存在。本次任务改用一组确定性的组合根/传输层单元测试替代（覆盖 `init_networking` 的 Offline 门禁调用路径、`session_bind_addr`、discovery 跳过逻辑），这些测试不启动真实进程、不做进程级 OS socket 枚举，因此不能满足本条目"若 future refactor 意外启动 discovery/listener，CI smoke 明确失败"的原始验收标准。AUTO-002 应视为独立于本次网络模式重构的后续工作，仍在待办清单中。
+状态：**仍未实现**。启动 offline app 后检查进程关联 socket、只允许 loopback WebView/IPC、不允许 `0.0.0.0`/`::`/LAN interface listener 的端到端 smoke test仍不存在。当前只有模式/配置和底层地址选择器测试，以及 `init_networking` 在 `NetworkManager::new` 前返回的静态代码证据；没有直接组合根 constructor-spy 测试，更没有进程级 OS socket 枚举。因此不能满足本条目“若 future refactor 意外启动 discovery/listener，CI smoke 明确失败”的原始验收标准。
 
 验收：若 future refactor 意外启动 discovery/listener，CI smoke 明确失败而不是弹窗等待——**仍未实现**。
 
@@ -256,17 +260,27 @@ discovery 失败只改变 presence 状态，不关闭 transport/runtime；按平
 
 优先级：P1
 
+状态：**已实现并通过自动化测试（2026-07-15）**。
+
 删除或迁移 RouteRequest/Grant/Deny、Trusted/AskEachTime/Blocked、pending timeout 和相关 UI。
 
 验收：设备列表点击后直接连接；接收端总开关关闭时拒绝动作，开启时无需弹窗。
+
+实现说明：`allow_remote_control` 是唯一持久化的入站权限边界；逐设备 trust、pending approval/timeout、批准/拒绝按钮均已删除。旧 v5 消息保留 wire discriminant 以兼容既有协议，但 Router 明确忽略且不再发送。测试覆盖开关即时生效、开启后无需审批，以及旧授权消息不能改变产品状态。
+
+迁移说明：旧 `conflict_policy` 配置键被 serde 安全忽略；旧 `paired_devices` 表保留为不解释的 opaque 数据，损坏旧行不会阻止 schema 升级或授予权限。若持久化存储/identity 整体无法打开，组合根禁用网络但继续启动本机计算器。
 
 ### PROD-002 用 active session 取代授权路由矩阵
 
 优先级：P1
 
+状态：**已实现并通过自动化测试（2026-07-15）**。
+
 保留必要的 peer/session 显示，不再复制 NxN 授权 cell、signed row 和 row version。
 
 验收：Router 生产代码明显缩减；不再存在远端写本机 row version 的路径。
+
+实现说明：控制端只保存一个 selected remote executor；认证 session 存在时 action 直接发往该设备，否则安全回落到本机计算。UI 仅展示设备列表、连接/执行状态和一个入站总开关，不再维护 NxN cell、signed row 或 row version。
 
 ### ARCH-002 拆分 Router 与 UI bridge
 
@@ -287,6 +301,8 @@ discovery 失败只改变 presence 状态，不关闭 transport/runtime；按平
 ### UI-002 LocalSend 式设备面板
 
 优先级：P2
+
+状态：**核心产品切片已实现；真实双机 UX 尚未验证（2026-07-15）**。
 
 设备卡片状态限定为发现中/连接中/已连接/不可达；删除路由矩阵和逐次批准；增加非阻塞“正在被控制”提示与可选屏蔽。
 

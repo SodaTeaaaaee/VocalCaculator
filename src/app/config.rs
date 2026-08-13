@@ -27,8 +27,8 @@ fn generate_random_name() -> String {
 pub struct NetworkConfig {
     pub enabled: bool,
     pub display_name: String,
+    /// The sole persisted inbound remote-control permission boundary.
     pub allow_remote_control: bool,
-    pub conflict_policy: String,
     /// Explicit network mode ("lan" | "offline" | "loopback-test"), as
     /// parsed by [`crate::app::network_mode`]. `None` when absent from
     /// an older config file; in that case `enabled` is used as a legacy
@@ -45,7 +45,6 @@ impl Default for NetworkConfig {
             enabled: true,
             display_name: generate_random_name(),
             allow_remote_control: false,
-            conflict_policy: "interleaved".to_string(),
             mode: None,
         }
     }
@@ -77,17 +76,60 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
-    /// Load config from the standard config directory, or return default.
+    /// Build a fail-closed fallback for an existing configuration file that
+    /// could not be read or parsed.
+    ///
+    /// A genuinely missing file still uses [`Default`] (and therefore the
+    /// product's normal LAN default).  Once a configuration file exists,
+    /// however, corruption, a type error, or an I/O failure must never turn
+    /// networking back on implicitly.
+    fn fail_closed_offline() -> Self {
+        let mut config = Self::default();
+        config.network.enabled = false;
+        config.network.mode = Some("offline".to_string());
+        config
+    }
+
+    fn load_from_path(config_file: &std::path::Path) -> Self {
+        let contents = match std::fs::read_to_string(config_file) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Self::default();
+            }
+            Err(error) => {
+                log::error!(
+                    "Failed to read existing config file {}: {}. Networking is forced offline.",
+                    config_file.display(),
+                    error
+                );
+                return Self::fail_closed_offline();
+            }
+        };
+
+        match toml::from_str(&contents) {
+            Ok(config) => config,
+            Err(error) => {
+                log::error!(
+                    "Failed to parse existing config file {}: {}. Networking is forced offline.",
+                    config_file.display(),
+                    error
+                );
+                Self::fail_closed_offline()
+            }
+        }
+    }
+
+    /// Load config from the standard config directory.
+    ///
+    /// A missing file uses the normal defaults.  An existing file that is
+    /// unreadable or invalid fails closed to explicit offline mode.
     pub fn load() -> Self {
         let config_dir = match sysdirs::config_dir() {
             Some(dir) => dir.join("vocal_calculator"),
             None => return Self::default(),
         };
         let config_file = config_dir.join("config.toml");
-        match std::fs::read_to_string(&config_file) {
-            Ok(contents) => toml::from_str(&contents).unwrap_or_default(),
-            Err(_) => Self::default(),
-        }
+        Self::load_from_path(&config_file)
     }
 
     /// Save config to the standard config directory.
@@ -107,6 +149,17 @@ impl AppConfig {
 mod tests {
     use super::*;
 
+    fn assert_networking_forced_offline(cfg: &AppConfig) {
+        use crate::app::network_mode::{NetworkMode, resolve_network_mode};
+
+        assert!(!cfg.network.enabled);
+        assert_eq!(cfg.network.mode.as_deref(), Some("offline"));
+        assert_eq!(
+            resolve_network_mode(&[], None, &cfg.network),
+            Ok(NetworkMode::Offline)
+        );
+    }
+
     #[test]
     fn app_config_default_roundtrip() {
         let original = AppConfig::default();
@@ -123,10 +176,6 @@ mod tests {
             original.network.allow_remote_control,
             deserialized.network.allow_remote_control
         );
-        assert_eq!(
-            original.network.conflict_policy,
-            deserialized.network.conflict_policy
-        );
     }
 
     #[test]
@@ -134,7 +183,6 @@ mod tests {
         let nc = NetworkConfig::default();
         assert!(nc.enabled);
         assert!(!nc.allow_remote_control);
-        assert_eq!(nc.conflict_policy, "interleaved");
         // display_name is a random "Adjective Noun" pair
         assert!(!nc.display_name.is_empty());
         assert!(
@@ -162,22 +210,49 @@ mod tests {
     }
 
     #[test]
-    fn invalid_toml_falls_back_to_defaults() {
-        let garbage = "not [[[ valid toml";
-        let result = toml::from_str::<AppConfig>(garbage);
-        // `toml::from_str` returns an error for invalid TOML.
-        // `AppConfig::load` uses `unwrap_or_default()` on this error path.
-        assert!(result.is_err());
+    fn missing_config_file_uses_normal_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = AppConfig::load_from_path(&dir.path().join("missing-config.toml"));
 
-        // Simulate the same fallback behaviour `AppConfig::load` uses.
-        let cfg = result.unwrap_or_default();
-        assert_eq!(cfg.audio_mode, "normal");
-        assert_eq!(cfg.volume, 0.5);
-        assert!(!cfg.muted);
-        assert!(!cfg.dark_mode);
-        assert!(cfg.music_assets_path.is_none());
         assert!(cfg.network.enabled);
-        assert_eq!(cfg.network.conflict_policy, "interleaved");
+        assert!(cfg.network.mode.is_none());
+        assert_eq!(
+            crate::app::network_mode::resolve_network_mode(&[], None, &cfg.network),
+            Ok(crate::app::network_mode::NetworkMode::Lan)
+        );
+    }
+
+    #[test]
+    fn invalid_toml_forces_networking_offline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "not [[[ valid toml").unwrap();
+
+        let cfg = AppConfig::load_from_path(&path);
+
+        assert_networking_forced_offline(&cfg);
+    }
+
+    #[test]
+    fn invalid_network_mode_type_forces_networking_offline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[network]\nmode = 123\n").unwrap();
+
+        let cfg = AppConfig::load_from_path(&path);
+
+        assert_networking_forced_offline(&cfg);
+    }
+
+    #[test]
+    fn unreadable_existing_config_path_forces_networking_offline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::create_dir(&path).unwrap();
+
+        let cfg = AppConfig::load_from_path(&path);
+
+        assert_networking_forced_offline(&cfg);
     }
 
     #[test]
@@ -203,8 +278,9 @@ conflict_policy = "strict"
         assert_eq!(cfg.music_assets_path.as_deref(), Some("/assets"));
         assert!(!cfg.network.enabled);
         assert_eq!(cfg.network.display_name, "TestHost");
+        // Legacy routing-policy keys are ignored rather than interpreted as
+        // remote-control permission.
         assert!(!cfg.network.allow_remote_control);
-        assert_eq!(cfg.network.conflict_policy, "strict");
         assert!(cfg.network.mode.is_none());
     }
 
@@ -224,7 +300,6 @@ display_name = "Existing"
         assert!(cfg.network.enabled);
         assert_eq!(cfg.network.display_name, "Existing");
         assert!(!cfg.network.allow_remote_control);
-        assert_eq!(cfg.network.conflict_policy, "interleaved");
         assert!(cfg.network.mode.is_none());
     }
 
@@ -271,7 +346,6 @@ display_name = "LegacyHost"
                 enabled: false,
                 display_name: "MyDevice".to_string(),
                 allow_remote_control: false,
-                conflict_policy: "strict".to_string(),
                 mode: None,
             },
         };
@@ -289,10 +363,6 @@ display_name = "LegacyHost"
         assert_eq!(
             cfg.network.allow_remote_control,
             deserialized.network.allow_remote_control
-        );
-        assert_eq!(
-            cfg.network.conflict_policy,
-            deserialized.network.conflict_policy
         );
     }
 }

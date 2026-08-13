@@ -6,6 +6,7 @@ use crate::net::state::PeerInfo;
 
 /// Peers not re-announced within this window are pruned from the table.
 const PEER_EXPIRY_DURATION: Duration = Duration::from_secs(90);
+const MAX_DISCOVERED_PEERS: usize = 64;
 
 /// In-memory table of discovered peers, keyed by [`NodeId`].
 ///
@@ -13,7 +14,10 @@ const PEER_EXPIRY_DURATION: Duration = Duration::from_secs(90);
 /// - **Deduplication**: a node discovered via multiple transports (e.g. both
 ///   multicast announce and a direct TCP connect) is stored as a single entry.
 ///   When an existing node is re-added, the entry is updated in-place with the
-///   latest metadata and `last_seen` is refreshed.
+///   latest metadata and `last_seen` is refreshed. Discovery service endpoints
+///   and concrete session peer addresses are merged independently so an
+///   inbound connection's ephemeral source port cannot overwrite the endpoint
+///   peers should dial.
 /// - **Expiry**: [`PeerTable::remove_expired`] prunes any entry whose
 ///   `last_seen` timestamp is older than [`PEER_EXPIRY_DURATION`].
 #[derive(Clone, Debug)]
@@ -31,18 +35,22 @@ impl PeerTable {
 
     /// Insert or update a peer.
     ///
-    /// If a peer with the same [`NodeId`] already exists, its `display_name`,
-    /// `address`, and `tcp_port` are overwritten with the new values and its
-    /// `last_seen` is refreshed. This ensures that a node arriving via a
-    /// second transport does not create a duplicate entry.
+    /// If a peer with the same [`NodeId`] already exists, independently known
+    /// service/session endpoints are merged and its `last_seen` is refreshed.
+    /// This ensures that a node arriving via a second transport does not
+    /// create a duplicate entry or corrupt its stable service endpoint.
     pub fn add_peer(&mut self, peer: PeerInfo) {
         let now = peer.last_seen;
         match self.peers.get_mut(&peer.node_id) {
             Some(existing) => {
                 // Merge: update mutable fields and refresh the timestamp.
                 existing.display_name = peer.display_name;
-                existing.address = peer.address;
-                existing.tcp_port = peer.tcp_port;
+                if peer.service_endpoint.is_some() {
+                    existing.service_endpoint = peer.service_endpoint;
+                }
+                if peer.session_peer_addr.is_some() {
+                    existing.session_peer_addr = peer.session_peer_addr;
+                }
                 if peer.public_key != [0u8; 32] {
                     existing.public_key = peer.public_key;
                 }
@@ -52,6 +60,15 @@ impl PeerTable {
                 existing.last_seen = now;
             }
             None => {
+                if self.peers.len() >= MAX_DISCOVERED_PEERS
+                    && let Some(oldest) = self
+                        .peers
+                        .iter()
+                        .min_by_key(|(_, peer)| peer.last_seen)
+                        .map(|(node_id, _)| *node_id)
+                {
+                    self.peers.remove(&oldest);
+                }
                 self.peers.insert(peer.node_id, peer);
             }
         }
@@ -133,8 +150,8 @@ mod tests {
         PeerInfo {
             node_id: id,
             display_name: name.to_string(),
-            address: SocketAddr::new("192.168.1.1".parse().unwrap(), port),
-            tcp_port: port,
+            service_endpoint: Some(SocketAddr::new("192.168.1.1".parse().unwrap(), port)),
+            session_peer_addr: None,
             last_seen: Instant::now(),
             public_key: [0u8; 32],
             public_key_fingerprint: None,
@@ -149,7 +166,7 @@ mod tests {
 
         let peer = table.get_peer(&id).expect("peer should exist");
         assert_eq!(peer.display_name, "Alice");
-        assert_eq!(peer.tcp_port, 4242);
+        assert_eq!(peer.service_endpoint.unwrap().port(), 4242);
     }
 
     #[test]
@@ -165,7 +182,39 @@ mod tests {
         assert_eq!(table.len(), 1, "should deduplicate by NodeId");
         let peer = table.get_peer(&id).unwrap();
         assert_eq!(peer.display_name, "Alice-v2");
-        assert_eq!(peer.tcp_port, 5000);
+        assert_eq!(peer.service_endpoint.unwrap().port(), 5000);
+    }
+
+    #[test]
+    fn inbound_session_source_port_does_not_overwrite_service_endpoint() {
+        let mut table = PeerTable::new();
+        let id = NodeId::new_v4();
+        let service = SocketAddr::new("192.168.1.10".parse().unwrap(), 42420);
+        let ephemeral_source = SocketAddr::new("192.168.1.10".parse().unwrap(), 53124);
+
+        table.add_peer(PeerInfo {
+            node_id: id,
+            display_name: "Alice".to_string(),
+            service_endpoint: Some(service),
+            session_peer_addr: None,
+            last_seen: Instant::now(),
+            public_key: [0u8; 32],
+            public_key_fingerprint: Some("expected".to_string()),
+        });
+        table.add_peer(PeerInfo {
+            node_id: id,
+            display_name: "Alice".to_string(),
+            service_endpoint: None,
+            session_peer_addr: Some(ephemeral_source),
+            last_seen: Instant::now(),
+            public_key: [7u8; 32],
+            public_key_fingerprint: None,
+        });
+
+        let peer = table.get_peer(&id).unwrap();
+        assert_eq!(peer.service_endpoint, Some(service));
+        assert_eq!(peer.session_peer_addr, Some(ephemeral_source));
+        assert_eq!(peer.public_key_fingerprint.as_deref(), Some("expected"));
     }
 
     #[test]
@@ -204,5 +253,14 @@ mod tests {
         let table = PeerTable::default();
         assert!(table.is_empty());
         assert_eq!(table.len(), 0);
+    }
+
+    #[test]
+    fn peer_table_is_bounded_under_identity_flood() {
+        let mut table = PeerTable::new();
+        for index in 0..100u128 {
+            table.add_peer(make_peer(NodeId::from_u128(index + 1), "peer", 42420));
+        }
+        assert_eq!(table.len(), MAX_DISCOVERED_PEERS);
     }
 }

@@ -6,7 +6,9 @@ These rules apply to every automated agent working in this repository.
 
 The desktop application starts LAN discovery and a fixed-port TCP listener when networking is enabled (`NetworkMode::Lan`, the default). Launching it in that mode on Windows can trigger an interactive Windows Defender Firewall prompt. An unattended agent must never cause that prompt.
 
-An offline mode now exists (`NetworkMode::Offline`, see `src/app/network_mode.rs`): with it selected, the composition root (`ui::bridge::init_networking`) never constructs `NetworkManager` and never opens a socket. There is also `NetworkMode::LoopbackTest`, which binds only `127.0.0.1:0`/`::1:0` and never starts discovery/mDNS.
+An offline mode now exists (`NetworkMode::Offline`, see `src/app/network_mode.rs`): with it selected, the composition root (`ui::bridge::init_networking`) returns before constructing `NetworkManager`. An uninitialised process-wide mode also fails closed to `Offline`. A missing config file still uses the product default (`Lan`), while an existing unreadable or invalid config file fails closed to explicit `Offline`.
+
+There is also `NetworkMode::LoopbackTest`, whose listener binds `127.0.0.1:0` and whose runtime skips discovery/mDNS. Use it only for tests whose explicit peer addresses are also loopback; unattended code must never send `ConnectToPeer` to a non-loopback address. Use `Offline` when no networking at all is required.
 
 ### Commands that are safe by default
 
@@ -18,7 +20,7 @@ An offline mode now exists (`NetworkMode::Offline`, see `src/app/network_mode.rs
 - `cargo clippy`
 - Network tests that bind only to `127.0.0.1` or `::1`
 - `packaging/windows/configure-firewall.ps1 -DryRun` and `packaging/windows/remove-firewall.ps1 -DryRun` (or `-WhatIf`) — verified to perform zero admin check and zero `Get/New/Remove-NetFirewallRule` calls; only print a plan and exit.
-- `powershell -File packaging/windows/tests/firewall-scripts.tests.ps1` — the scripts' own dry-run test harness (23 assertions, non-elevated).
+- `powershell -File packaging/windows/tests/firewall-scripts.tests.ps1` — the scripts' own dry-run/WhatIf test harness (43 assertions, non-elevated, with every NetSecurity cmdlet shadowed by a fail-fast mock).
 
 ### Commands and actions that require explicit user direction
 
@@ -32,7 +34,7 @@ An offline mode now exists (`NetworkMode::Offline`, see `src/app/network_mode.rs
 
 ### Automated GUI/smoke tests
 
-`--network-mode=offline` and `VOCAL_CALCULATOR_NETWORK_MODE=offline` are implemented (`src/app/network_mode.rs`, `src/main.rs`). Passing both makes `init_networking` return before `NetworkManager::new` or any socket call — this is covered by deterministic unit tests on the composition-root gating logic and on `session_bind_addr`/`should_start_mdns`/`run_network_runtime`'s early-return path, not by an end-to-end process-level socket-audit smoke test. No such smoke test exists yet (see `docs/repair-backlog.md` AUTO-002, still open) — an agent must not claim "no LAN socket is opened" was verified by actually launching the GUI process and inspecting its sockets, because that has not been done.
+`--network-mode=offline` and `VOCAL_CALCULATOR_NETWORK_MODE=offline` are implemented (`src/app/network_mode.rs`, `src/main.rs`). Passing both reaches an explicit `init_networking` branch that returns before `NetworkManager::new`; mode resolution, fail-closed config loading, listener-address selection and the Windows mDNS selector have unit tests. There is currently no constructor-spy test that directly exercises the Dioxus composition root, and no end-to-end process-level socket-audit smoke test (see `docs/repair-backlog.md` AUTO-002, still open). An agent must therefore not claim "no LAN socket is opened" was verified by launching the GUI process and inspecting its sockets.
 
 Given that gap, unattended launches of the actual GUI executable — even in offline mode with both flags set — are still not something an agent should do proactively for smoke testing; treat it as requiring explicit user direction until AUTO-002 (or equivalent process-level verification) lands. Real LAN tests remain opt-in as described above and are forbidden by default.
 

@@ -1,22 +1,73 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use ed25519_dalek::SigningKey;
 use socket2::{Domain, Protocol, Socket, Type};
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::{Semaphore, mpsc, watch};
 
 use super::discovery::{DiscoveryEndpoint, DiscoveryService, public_key_fingerprint};
 use super::protocol::{
-    ConnectionDirection, DiscoveryMessage, NetworkCommand, NetworkMessage, NodeId, SESSION_TCP_PORT,
+    ConnectionDirection, DiscoveryMessage, ExpectedPeerIdentity, NetworkCommand, NetworkMessage,
+    NodeId, OutboundConnectRequest, SESSION_TCP_PORT, SessionId,
 };
-use super::session::{self, SessionSender};
+use super::session::{self, ActiveSession};
 use super::state::{NetworkState, PeerInfo};
 use crate::app::network_mode::NetworkMode;
 use crate::ui::events::{PeerDiscoveryPayload, UiEvent};
 
 const DISCOVERY_ENDPOINT_RETRY_SECS: u64 = 30;
+const MAX_DISCOVERY_ENDPOINT_ATTEMPTS: usize = 256;
+const MAX_INBOUND_SESSIONS: usize = 16;
+const MAX_IN_FLIGHT_CONNECTS: usize = 32;
+const SESSION_COMMAND_CAPACITY: usize = 256;
+const MERGED_COMMAND_CAPACITY: usize = 512;
+const SCAN_COMMAND_CAPACITY: usize = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ConnectAttemptKey {
+    Peer(NodeId),
+    Address(SocketAddr),
+}
+
+impl ConnectAttemptKey {
+    fn from_request(request: &OutboundConnectRequest) -> Self {
+        request
+            .expected_peer
+            .as_ref()
+            .map(|peer| Self::Peer(peer.node_id))
+            .unwrap_or(Self::Address(request.addr))
+    }
+}
+
+pub(crate) fn outbound_addr_allowed(mode: NetworkMode, addr: SocketAddr) -> bool {
+    match mode {
+        NetworkMode::Lan => true,
+        NetworkMode::LoopbackTest => addr.ip().is_loopback(),
+        NetworkMode::Offline => false,
+    }
+}
+
+/// Apply the network-mode policy before invoking the actual connector.
+/// Keeping this generic makes the "no syscall on rejection" boundary directly
+/// testable without touching a real LAN interface.
+pub(crate) async fn connect_tcp_checked<F, Fut, T>(
+    mode: NetworkMode,
+    addr: SocketAddr,
+    connector: F,
+) -> std::io::Result<T>
+where
+    F: FnOnce(SocketAddr) -> Fut,
+    Fut: std::future::Future<Output = std::io::Result<T>>,
+{
+    if !outbound_addr_allowed(mode, addr) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("network mode {mode:?} forbids outbound address {addr}"),
+        ));
+    }
+    connector(addr).await
+}
 
 /// Pure selection of the TCP session-listener bind address for a given
 /// [`NetworkMode`].
@@ -32,14 +83,11 @@ const DISCOVERY_ENDPOINT_RETRY_SECS: u64 = 30;
 pub(crate) fn session_bind_addr(mode: NetworkMode) -> SocketAddr {
     match mode {
         NetworkMode::Lan => SocketAddr::new(
-            "0.0.0.0".parse().expect("valid constant address"),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
             SESSION_TCP_PORT,
         ),
-        NetworkMode::LoopbackTest => {
-            SocketAddr::new("127.0.0.1".parse().expect("valid constant address"), 0)
-        }
-        NetworkMode::Offline => {
-            SocketAddr::new("127.0.0.1".parse().expect("valid constant address"), 0)
+        NetworkMode::LoopbackTest | NetworkMode::Offline => {
+            SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 0)
         }
     }
 }
@@ -57,7 +105,10 @@ fn peer_payload(
             if id == node_id {
                 Some(PeerDiscoveryPayload {
                     name: peer.display_name.clone(),
-                    address: format!("{}:{}", peer.address.ip(), peer.tcp_port),
+                    address: peer
+                        .display_endpoint()
+                        .map(|address| address.to_string())
+                        .unwrap_or_default(),
                     is_connected,
                     latency_ms: state.latency_ms.map(|v| v as i32).unwrap_or(-1),
                     index: index as i32,
@@ -80,12 +131,11 @@ pub(super) async fn run_network_runtime(
     local_pubkey: [u8; 32],
     local_signing_key: SigningKey,
     net_state: Arc<Mutex<NetworkState>>,
-    sessions: Arc<Mutex<HashMap<NodeId, SessionSender>>>,
-    mut outgoing_rx: mpsc::UnboundedReceiver<(NodeId, NetworkMessage)>,
-    ui_event_tx: mpsc::UnboundedSender<UiEvent>,
-    mut command_rx: mpsc::UnboundedReceiver<NetworkCommand>,
-    shutdown: Arc<AtomicBool>,
-    shutdown_notify: Arc<Notify>,
+    sessions: Arc<Mutex<HashMap<NodeId, ActiveSession>>>,
+    mut outgoing_rx: mpsc::Receiver<(NodeId, NetworkMessage)>,
+    ui_event_tx: mpsc::Sender<UiEvent>,
+    mut command_rx: mpsc::Receiver<NetworkCommand>,
+    shutdown: watch::Receiver<bool>,
     mode: NetworkMode,
 ) {
     log::info!(
@@ -115,14 +165,15 @@ pub(super) async fn run_network_runtime(
 
     // Session tasks send commands back to the runtime through this channel.
     // It is merged with the external command_rx below.
-    let (session_cmd_tx, session_cmd_rx) = mpsc::unbounded_channel::<NetworkCommand>();
-    let (merged_cmd_tx, merged_cmd_rx) = mpsc::unbounded_channel::<NetworkCommand>();
+    let (session_cmd_tx, session_cmd_rx) =
+        mpsc::channel::<NetworkCommand>(SESSION_COMMAND_CAPACITY);
+    let (merged_cmd_tx, merged_cmd_rx) = mpsc::channel::<NetworkCommand>(MERGED_COMMAND_CAPACITY);
 
     // Forward external commands (from NetworkHandle) into the merged channel.
     let merger_ext = merged_cmd_tx.clone();
     tokio::spawn(async move {
         while let Some(cmd) = command_rx.recv().await {
-            if merger_ext.send(cmd).is_err() {
+            if merger_ext.send(cmd).await.is_err() {
                 break;
             }
         }
@@ -133,7 +184,7 @@ pub(super) async fn run_network_runtime(
     tokio::spawn(async move {
         let mut rx = session_cmd_rx;
         while let Some(cmd) = rx.recv().await {
-            if merger_ses.send(cmd).is_err() {
+            if merger_ses.send(cmd).await.is_err() {
                 break;
             }
         }
@@ -143,16 +194,17 @@ pub(super) async fn run_network_runtime(
     let mut command_rx = merged_cmd_rx;
 
     // Scan signal channel: command processor -> discovery task.
-    let (scan_cmd_tx, mut scan_cmd_rx) = mpsc::unbounded_channel::<()>();
+    let (scan_cmd_tx, mut scan_cmd_rx) = mpsc::channel::<()>(SCAN_COMMAND_CAPACITY);
 
     // Clone the session command sender for the listener task.
     let listener_cmd_tx = session_cmd_tx.clone();
+    let inbound_limiter = inbound_session_limiter();
 
     // In `Lan` mode this binds the fixed session port on all interfaces so
     // peers can reach it without an out-of-band port exchange; in
     // `LoopbackTest` it binds an OS-assigned ephemeral port on loopback only.
     let bind_addr = session_bind_addr(mode);
-    let session_listener = match bind_tcp_with_reuse(bind_addr) {
+    let session_listener = match bind_tcp_listener(bind_addr) {
         Ok(l) => {
             match l.local_addr() {
                 Ok(addr) => log::info!("TCP session listener bound on {}", addr),
@@ -166,7 +218,10 @@ pub(super) async fn run_network_runtime(
                 bind_addr,
                 e
             );
-            let _ = ui_event_tx.send(UiEvent::ConnectionError("bind_failed".to_string()));
+            try_emit_ui_event(
+                &ui_event_tx,
+                UiEvent::ConnectionError("bind_failed".to_string()),
+            );
             let status = if mode == NetworkMode::Lan {
                 format!(
                     "网络端口 {} 被占用或不可用，局域网协作暂时无法使用，本机计算器仍可正常使用",
@@ -175,7 +230,7 @@ pub(super) async fn run_network_runtime(
             } else {
                 "网络端口无法监听，本机计算器仍可正常使用".to_string()
             };
-            let _ = ui_event_tx.send(UiEvent::NetworkStatusUpdate(status));
+            try_emit_ui_event(&ui_event_tx, UiEvent::NetworkStatusUpdate(status));
             return;
         }
     };
@@ -183,8 +238,14 @@ pub(super) async fn run_network_runtime(
         Ok(addr) => addr.port(),
         Err(e) => {
             log::error!("Failed to read assigned session port: {}", e);
-            let _ = ui_event_tx.send(UiEvent::ConnectionError("bind_failed".to_string()));
-            let _ = ui_event_tx.send(UiEvent::NetworkStatusUpdate("网络端口无法监听".to_string()));
+            try_emit_ui_event(
+                &ui_event_tx,
+                UiEvent::ConnectionError("bind_failed".to_string()),
+            );
+            try_emit_ui_event(
+                &ui_event_tx,
+                UiEvent::NetworkStatusUpdate("网络端口无法监听".to_string()),
+            );
             return;
         }
     };
@@ -194,11 +255,11 @@ pub(super) async fn run_network_runtime(
     // since discovery does not run in that mode.
     log::debug!("Session listener local port resolved to {}", session_port);
 
-    let listener_handle = tokio::spawn(async move {
+    let mut listener_handle = tokio::spawn(async move {
         let listener = session_listener;
 
         loop {
-            if listener_shutdown.load(Ordering::Relaxed) {
+            if *listener_shutdown.borrow() {
                 break;
             }
 
@@ -207,6 +268,18 @@ pub(super) async fn run_network_runtime(
 
             match accept_result {
                 Ok(Ok((stream, peer_addr))) => {
+                    let permit = match inbound_limiter.clone().try_acquire_owned() {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            log::warn!(
+                                "Inbound session limit ({}) reached; rejecting {} before handshake",
+                                MAX_INBOUND_SESSIONS,
+                                peer_addr,
+                            );
+                            drop(stream);
+                            continue;
+                        }
+                    };
                     // Disable Nagle's algorithm — every button press is a
                     // small message and Nagle would buffer it for up to 200ms.
                     stream.set_nodelay(true).unwrap_or_else(|e| {
@@ -218,8 +291,8 @@ pub(super) async fn run_network_runtime(
                     let id = listener_id;
                     let pubkey = local_pubkey;
                     let signing_key = listener_signing_key.clone();
-
                     tokio::spawn(async move {
+                        let _permit = permit;
                         session::run_accepted_session(
                             stream,
                             peer_addr,
@@ -255,15 +328,15 @@ pub(super) async fn run_network_runtime(
     let discovery_shutdown = shutdown.clone();
     let discovery_ui = ui_event_tx.clone();
 
-    // Channel for discovered peers -> command processor (TCP connect).
-    let (discovered_peer_tx, mut discovered_peer_rx) = mpsc::unbounded_channel::<SocketAddr>();
+    // Discovery and user-triggered connects share one command path so mode
+    // policy, active-session dedup, and expected-identity checks cannot drift.
+    let discovery_connect_tx = session_cmd_tx.clone();
 
     if mode != NetworkMode::Lan {
         log::info!(
             "Discovery skipped for network mode {:?} (loopback-only, no LAN sockets)",
             mode
         );
-        drop(discovered_peer_tx);
     } else {
         tokio::spawn(async move {
             let discovery = match DiscoveryService::new(
@@ -291,7 +364,7 @@ pub(super) async fn run_network_runtime(
                 HashMap::new();
 
             loop {
-                if discovery_shutdown.load(Ordering::Relaxed) {
+                if *discovery_shutdown.borrow() {
                     break;
                 }
 
@@ -303,13 +376,23 @@ pub(super) async fn run_network_runtime(
                         match result {
                             Ok(endpoint) => {
                                 let node_id = endpoint.node_id;
+                                let expected_peer = ExpectedPeerIdentity {
+                                    node_id,
+                                    public_key_fingerprint: endpoint.public_key_fingerprint.clone(),
+                                };
                                 let peer_addr = register_discovered_endpoint(
                                     endpoint,
                                     &discovery_state,
                                     &discovery_ui,
                                 );
                                 if should_attempt_discovered_session(&mut endpoint_attempts, node_id, peer_addr) {
-                                    let _ = discovered_peer_tx.send(peer_addr);
+                                    let _ = discovery_connect_tx.try_send(NetworkCommand::ConnectToPeer(
+                                        OutboundConnectRequest {
+                                            addr: peer_addr,
+                                            expected_peer: Some(expected_peer),
+                                            report_errors: false,
+                                        },
+                                    ));
                                 }
                             }
                             Err(e) => {
@@ -325,26 +408,37 @@ pub(super) async fn run_network_runtime(
                         match result {
                             Ok((msg, udp_addr)) => {
                                 if matches!(msg, DiscoveryMessage::Discover) {
-                                    let disc = discovery.clone();
                                     let name = read_display_name(&discovery_display);
-                                    let msg = disc.announce_msg(&name);
-                                    tokio::spawn(async move {
-                                        if let Err(e) = disc.announce(&msg).await {
-                                            log::warn!("Discovery reply-announce error: {}", e);
-                                        }
-                                    });
+                                    let msg = discovery.announce_msg(&name);
+                                    // Keep unauthenticated discovery replies
+                                    // serialized inside this single task. A
+                                    // LAN packet flood must not create an
+                                    // unbounded number of child futures.
+                                    if let Err(e) = discovery.announce(&msg).await {
+                                        log::warn!("Discovery reply-announce error: {}", e);
+                                    }
                                     continue;
                                 }
 
                                 if let Some(endpoint) = discovery.endpoint_from_announcement(&msg, udp_addr) {
                                     let node_id = endpoint.node_id;
+                                    let expected_peer = ExpectedPeerIdentity {
+                                        node_id,
+                                        public_key_fingerprint: endpoint.public_key_fingerprint.clone(),
+                                    };
                                     let peer_addr = register_discovered_endpoint(
                                         endpoint,
                                         &discovery_state,
                                         &discovery_ui,
                                     );
                                     if should_attempt_discovered_session(&mut endpoint_attempts, node_id, peer_addr) {
-                                        let _ = discovered_peer_tx.send(peer_addr);
+                                        let _ = discovery_connect_tx.try_send(NetworkCommand::ConnectToPeer(
+                                            OutboundConnectRequest {
+                                                addr: peer_addr,
+                                                expected_peer: Some(expected_peer),
+                                                report_errors: false,
+                                            },
+                                        ));
                                     }
                                 }
                             }
@@ -358,34 +452,28 @@ pub(super) async fn run_network_runtime(
                     // Scan command from the command processor.
                     // -------------------------------------------------------
                     _ = scan_cmd_rx.recv() => {
-                        let disc = discovery.clone();
                         let name = read_display_name(&discovery_display);
-                        if let Err(e) = disc.update_display_name(&name) {
+                        if let Err(e) = discovery.update_display_name(&name) {
                             log::warn!("Discovery display-name update failed: {}", e);
                         }
-                        let msg = disc.announce_msg(&name);
-                        tokio::spawn(async move {
-                            if let Err(e) = disc.announce(&DiscoveryMessage::Discover).await {
-                                log::warn!("Discovery scan discover error: {}", e);
-                            }
-                            if let Err(e) = disc.announce(&msg).await {
-                                log::warn!("Discovery scan announce error: {}", e);
-                            }
-                        });
+                        let msg = discovery.announce_msg(&name);
+                        if let Err(e) = discovery.announce(&DiscoveryMessage::Discover).await {
+                            log::warn!("Discovery scan discover error: {}", e);
+                        }
+                        if let Err(e) = discovery.announce(&msg).await {
+                            log::warn!("Discovery scan announce error: {}", e);
+                        }
                     }
 
                     // -------------------------------------------------------
                     // Low-rate UDP fallback announce.
                     // -------------------------------------------------------
                     _ = announce_interval.tick() => {
-                        let disc = discovery.clone();
                         let name = read_display_name(&discovery_display);
-                        let msg = disc.announce_msg(&name);
-                        tokio::spawn(async move {
-                            if let Err(e) = disc.announce(&msg).await {
-                                log::warn!("Discovery announce error: {}", e);
-                            }
-                        });
+                        let msg = discovery.announce_msg(&name);
+                        if let Err(e) = discovery.announce(&msg).await {
+                            log::warn!("Discovery announce error: {}", e);
+                        }
                     }
                 }
             }
@@ -397,23 +485,25 @@ pub(super) async fn run_network_runtime(
     // -- Task 3: Outgoing message router ------------------------------------
     let router_sessions = sessions.clone();
 
-    let router_handle = tokio::spawn(async move {
+    let mut router_handle = tokio::spawn(async move {
         while let Some((target_id, msg)) = outgoing_rx.recv().await {
-            let sender = {
+            let active_session = {
                 router_sessions
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .get(&target_id)
                     .cloned()
             };
-            match sender {
-                Some(tx) => {
-                    if tx.send(msg).is_err() {
+            match active_session {
+                Some(session) => {
+                    if session.sender.try_send(msg).is_err() {
                         log::trace!("Session {} closed; removing from registry", target_id);
-                        router_sessions
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .remove(&target_id);
+                        let _ = session.cancel_tx.send(true);
+                        remove_session_if_current(
+                            &mut router_sessions.lock().unwrap_or_else(|e| e.into_inner()),
+                            target_id,
+                            session.session_id,
+                        );
                     }
                 }
                 None => {
@@ -433,14 +523,11 @@ pub(super) async fn run_network_runtime(
     let cmd_session_tx = session_cmd_tx;
     let cmd_scan_tx = scan_cmd_tx;
 
-    // Track sessions that were replaced by dedup so their
-    // UnregisterSession doesn't remove the winning session.
-    let mut replaced_sessions: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
     // Track in-flight connect attempts to prevent duplicate TCP connects.
-    let in_flight_connects: Arc<Mutex<std::collections::HashSet<SocketAddr>>> =
+    let in_flight_connects: Arc<Mutex<std::collections::HashSet<ConnectAttemptKey>>> =
         Arc::new(Mutex::new(std::collections::HashSet::new()));
 
-    let cmd_handle = tokio::spawn(async move {
+    let mut cmd_handle = tokio::spawn(async move {
         loop {
             tokio::select! {
                 // Commands from the NetworkHandle and session tasks.
@@ -451,7 +538,23 @@ pub(super) async fn run_network_runtime(
                     };
                     match cmd {
                         NetworkCommand::RegisterSession(reg) => {
-                            let node_id = reg.node_id;
+                            let super::protocol::SessionRegister {
+                                session_id,
+                                node_id,
+                                sender,
+                                info,
+                                direction,
+                                cancel_tx,
+                                decision_tx,
+                            } = reg;
+                            if decision_tx.is_closed() {
+                                log::trace!(
+                                    "Ignoring expired registration for {} generation {}",
+                                    node_id,
+                                    session_id,
+                                );
+                                continue;
+                            }
                             let fingerprint_ok = {
                                 let state = cmd_state
                                     .lock()
@@ -460,7 +563,7 @@ pub(super) async fn run_network_runtime(
                                     Some(peer) => match &peer.public_key_fingerprint {
                                         Some(expected) => {
                                             let actual =
-                                                public_key_fingerprint(&reg.info.public_key);
+                                                public_key_fingerprint(&info.public_key);
                                             if *expected != actual {
                                                 log::warn!(
                                                     "Session fingerprint mismatch for {}: expected {}, got {}",
@@ -479,115 +582,140 @@ pub(super) async fn run_network_runtime(
                                 }
                             };
                             if !fingerprint_ok {
-                                drop(reg.sender);
-                                let _ = cmd_incoming.send(UiEvent::ConnectionError(
-                                    "fingerprint_mismatch".to_string(),
-                                ));
+                                let _ = decision_tx.send(false);
+                                try_emit_ui_event(
+                                    &cmd_incoming,
+                                    UiEvent::ConnectionError("fingerprint_mismatch".to_string()),
+                                );
                                 continue;
                             }
                             log::info!(
                                 "Session registered: {} ({}) dir={:?}",
-                                reg.info.display_name,
+                                info.display_name,
                                 node_id,
-                                reg.direction,
+                                direction,
                             );
-                            // Dedup: if a session already exists for this node,
-                            // apply NodeId-ordered tie-break to decide which
-                            // connection survives. Lower NodeId keeps its
-                            // outbound connection; higher NodeId keeps inbound.
-                            {
+                            let (accepted, replaced_session) = {
                                 let mut sessions = cmd_sessions
                                     .lock()
                                     .unwrap_or_else(|e| e.into_inner());
-                                if sessions.contains_key(&node_id) {
-                                    let keep_new = if cmd_id < node_id {
-                                        // We are lower: keep outbound, reject inbound.
-                                        reg.direction == ConnectionDirection::Outbound
-                                    } else {
-                                        // We are higher: keep inbound, reject outbound.
-                                        reg.direction == ConnectionDirection::Inbound
-                                    };
-                                    if keep_new {
+                                let keep_new = sessions
+                                    .get(&node_id)
+                                    .map(|existing| {
+                                        should_replace_session(
+                                            cmd_id,
+                                            node_id,
+                                            existing.direction,
+                                            direction,
+                                        )
+                                    })
+                                    .unwrap_or(true);
+                                if keep_new {
+                                    if let Some(existing) = sessions.get(&node_id) {
                                         log::info!(
-                                            "Dedup: replacing session for {} (we are {:?})",
-                                            node_id, reg.direction,
+                                            "Dedup: replacing session {} generation {} with {}",
+                                            node_id,
+                                            existing.session_id,
+                                            session_id,
                                         );
-                                        // Remove the old sender from the map.
-                                        // The session task holds its own clone,
-                                        // but removing ours reduces the refcount.
-                                        // The old session will detect channel
-                                        // closure on its next send attempt.
-                                        sessions.remove(&node_id);
-                                        sessions.insert(node_id, reg.sender);
-                                    } else {
-                                        log::info!(
-                                            "Dedup: rejecting duplicate session for {} (we are {:?})",
-                                            node_id, reg.direction,
-                                        );
-                                        // Mark this session as replaced so its
-                                        // UnregisterSession won't remove the
-                                        // winning session's entry.
-                                        replaced_sessions.insert(node_id);
-                                        // Drop the new sender — the new session
-                                        // task will detect channel closure and exit.
-                                        drop(reg.sender);
-                                        // Still update the peer info.
-                                        let mut state = cmd_state
-                                            .lock()
-                                            .unwrap_or_else(|e| e.into_inner());
-                                        state.peers.add_peer(reg.info);
-                                        if let Some(payload) = peer_payload(&state, &node_id, true) {
-                                            let _ = cmd_incoming.send(UiEvent::PeerDiscovered(payload));
-                                        }
-                                        continue;
                                     }
+                                    let replaced = sessions.insert(
+                                        node_id,
+                                        ActiveSession {
+                                            session_id,
+                                            sender,
+                                            direction,
+                                            cancel_tx,
+                                        },
+                                    );
+                                    (true, replaced)
                                 } else {
-                                    // No existing session — insert directly.
-                                    sessions.insert(node_id, reg.sender);
+                                    log::info!(
+                                        "Dedup: rejecting duplicate session {} generation {} dir={:?}",
+                                        node_id,
+                                        session_id,
+                                        direction,
+                                    );
+                                    (false, None)
                                 }
+                            };
+                            if decision_tx.send(accepted).is_err() {
+                                if accepted {
+                                    let mut sessions = cmd_sessions
+                                        .lock()
+                                        .unwrap_or_else(|e| e.into_inner());
+                                    if sessions
+                                        .get(&node_id)
+                                        .is_some_and(|session| session.session_id == session_id)
+                                    {
+                                        sessions.remove(&node_id);
+                                        if let Some(previous) = replaced_session {
+                                            sessions.insert(node_id, previous);
+                                        }
+                                    }
+                                }
+                                continue;
+                            }
+                            if let Some(previous) = replaced_session {
+                                let _ = previous.cancel_tx.send(true);
                             }
                             {
                                 let mut state = cmd_state
                                     .lock()
                                     .unwrap_or_else(|e| e.into_inner());
-                                state.peers.add_peer(reg.info);
+                                state.peers.add_peer(info);
                                 state.is_connected = !cmd_sessions
                                     .lock()
                                     .unwrap_or_else(|e| e.into_inner())
                                     .is_empty();
                                 if let Some(payload) = peer_payload(&state, &node_id, true) {
-                                    let _ = cmd_incoming.send(UiEvent::PeerDiscovered(payload));
+                                    try_emit_ui_event(
+                                        &cmd_incoming,
+                                        UiEvent::PeerDiscovered(payload),
+                                    );
                                 }
                             }
-                            let _ = cmd_incoming.send(UiEvent::SessionEstablished(node_id.to_string()));
-                        }
-                        NetworkCommand::UnregisterSession(node_id) => {
-                            // If this session was replaced by dedup, skip
-                            // removal — the winning session is still active.
-                            if replaced_sessions.remove(&node_id) {
-                                log::info!(
-                                    "Session unregistered (replaced by dedup): {}",
-                                    node_id,
+                            if accepted {
+                                try_emit_ui_event(
+                                    &cmd_incoming,
+                                    UiEvent::SessionEstablished(node_id.to_string()),
                                 );
-                                // Don't remove from sessions map — the winning
-                                // session's entry is still valid.
-                            } else {
-                                log::info!("Session unregistered: {}", node_id);
-                                let has_sessions = {
-                                    let mut sessions = cmd_sessions
-                                        .lock()
-                                        .unwrap_or_else(|e| e.into_inner());
-                                    sessions.remove(&node_id);
-                                    !sessions.is_empty()
-                                };
+                            }
+                        }
+                        NetworkCommand::UnregisterSession { node_id, session_id } => {
+                            let (removed, has_sessions) = {
+                                let mut sessions = cmd_sessions
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner());
+                                let removed = remove_session_if_current(
+                                    &mut sessions,
+                                    node_id,
+                                    session_id,
+                                );
+                                (removed, !sessions.is_empty())
+                            };
+                            if removed {
+                                log::info!("Session unregistered: {} generation {}", node_id, session_id);
                                 let mut state = cmd_state
                                     .lock()
                                     .unwrap_or_else(|e| e.into_inner());
                                 state.is_connected = has_sessions;
                                 if let Some(payload) = peer_payload(&state, &node_id, false) {
-                                    let _ = cmd_incoming.send(UiEvent::PeerDiscovered(payload));
+                                    try_emit_ui_event(
+                                        &cmd_incoming,
+                                        UiEvent::PeerDiscovered(payload),
+                                    );
                                 }
-                                let _ = cmd_incoming.send(UiEvent::SessionLost(node_id.to_string()));
+                                try_emit_ui_event(
+                                    &cmd_incoming,
+                                    UiEvent::SessionLost(node_id.to_string()),
+                                );
+                            } else {
+                                log::trace!(
+                                    "Ignoring stale unregister for {} generation {}",
+                                    node_id,
+                                    session_id,
+                                );
                             }
                         }
                         NetworkCommand::IncomingMessage(sender_id, msg) => {
@@ -608,30 +736,72 @@ pub(super) async fn run_network_runtime(
                             // third-party rows.
                             // Serialize the message and forward as a UiEvent
                             // so the UI event loop can dispatch it.
-                            match bincode::serde::encode_to_vec(&msg, bincode::config::standard()) {
-                                Ok(bytes) => {
-                                    let _ = cmd_incoming.send(
-                                        UiEvent::NetworkMessage(sender_id.to_string(), bytes),
+                            forward_incoming_message_to_ui(
+                                &cmd_incoming,
+                                &cmd_sessions,
+                                sender_id,
+                                msg,
+                            );
+                        }
+                        NetworkCommand::ConnectToPeer(request) => {
+                            let addr = request.addr;
+                            if !outbound_addr_allowed(mode, addr) {
+                                log::warn!(
+                                    "Runtime refused outbound connection to {} in mode {:?}",
+                                    addr,
+                                    mode,
+                                );
+                                if request.report_errors {
+                                    try_emit_ui_event(
+                                        &cmd_incoming,
+                                        UiEvent::ConnectionError(
+                                            "loopback_address_required".to_string(),
+                                        ),
                                     );
                                 }
-                                Err(e) => {
-                                    log::warn!("Failed to serialize NetworkMessage for UiEvent: {}", e);
-                                }
+                                continue;
                             }
-                        }
-                        NetworkCommand::ConnectToPeer(addr, target_node_id) => {
-                            // Dedup: skip if a connect to this addr is already in-flight.
+                            if request.expected_peer.as_ref().is_some_and(|expected| {
+                                cmd_sessions
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .contains_key(&expected.node_id)
+                            }) {
+                                log::trace!("Peer already has an active session; skipping connect");
+                                continue;
+                            }
+                            let attempt_key = ConnectAttemptKey::from_request(&request);
                             {
                                 let mut in_flight = in_flight_connects
                                     .lock()
                                     .unwrap_or_else(|e| e.into_inner());
-                                if in_flight.contains(&addr) {
+                                if in_flight.contains(&attempt_key) {
                                     log::info!("Connect to {} already in-flight, skipping", addr);
                                     continue;
                                 }
-                                in_flight.insert(addr);
+                                if in_flight.len() >= MAX_IN_FLIGHT_CONNECTS {
+                                    log::warn!(
+                                        "Outbound connect limit ({}) reached; rejecting {}",
+                                        MAX_IN_FLIGHT_CONNECTS,
+                                        addr,
+                                    );
+                                    if request.report_errors {
+                                        try_emit_ui_event(
+                                            &cmd_incoming,
+                                            UiEvent::ConnectionError(
+                                                "connect_overloaded".to_string(),
+                                            ),
+                                        );
+                                    }
+                                    continue;
+                                }
+                                in_flight.insert(attempt_key);
                             }
-                            log::info!("Connecting to peer at {} (target={:?})", addr, target_node_id);
+                            log::info!(
+                                "Connecting to peer at {} (target={:?})",
+                                addr,
+                                request.expected_peer.as_ref().map(|peer| peer.node_id),
+                            );
                             let ses_tx = cmd_session_tx.clone();
                             let name = read_display_name(&cmd_display);
                             let id = cmd_id;
@@ -639,12 +809,18 @@ pub(super) async fn run_network_runtime(
                             let signing_key = cmd_signing_key.clone();
                             let incoming = cmd_incoming.clone();
                             let in_flight = in_flight_connects.clone();
+                            let expected_peer = request.expected_peer;
+                            let report_errors = request.report_errors;
 
                             tokio::spawn(async move {
                                 // TCP connect with 5-second timeout.
                                 let connect_result = tokio::time::timeout(
                                     std::time::Duration::from_secs(5),
-                                    tokio::net::TcpStream::connect(addr),
+                                    connect_tcp_checked(
+                                        mode,
+                                        addr,
+                                        tokio::net::TcpStream::connect,
+                                    ),
                                 )
                                 .await;
 
@@ -660,13 +836,17 @@ pub(super) async fn run_network_runtime(
                                             name,
                                             pubkey,
                                             signing_key,
+                                            expected_peer,
                                             ses_tx,
                                         )
                                         .await {
                                             log::warn!("Session failed to {}: {}", addr, e);
-                                            let _ = incoming.send(
-                                                UiEvent::ConnectionError(e),
-                                            );
+                                            if report_errors {
+                                                try_emit_ui_event(
+                                                    &incoming,
+                                                    UiEvent::ConnectionError(e),
+                                                );
+                                            }
                                         }
                                     }
                                     Ok(Err(e)) => {
@@ -680,20 +860,26 @@ pub(super) async fn run_network_runtime(
                                             std::io::ErrorKind::PermissionDenied => "permission_denied",
                                             _ => "connect_error",
                                         }.to_string();
-                                        let _ = incoming.send(
-                                            UiEvent::ConnectionError(reason),
-                                        );
+                                        if report_errors {
+                                            try_emit_ui_event(
+                                                &incoming,
+                                                UiEvent::ConnectionError(reason),
+                                            );
+                                        }
                                     }
                                     Err(_) => {
                                         log::warn!("Connect to {} timed out", addr);
-                                        let _ = incoming.send(
-                                            UiEvent::ConnectionError("timeout".to_string()),
-                                        );
+                                        if report_errors {
+                                            try_emit_ui_event(
+                                                &incoming,
+                                                UiEvent::ConnectionError("timeout".to_string()),
+                                            );
+                                        }
                                     }
                                 }
                                 // Remove from in-flight tracking.
                                 if let Ok(mut s) = in_flight.lock() {
-                                    s.remove(&addr);
+                                    s.remove(&attempt_key);
                                 }
                             });
                         }
@@ -703,67 +889,18 @@ pub(super) async fn run_network_runtime(
                                 .unwrap_or_else(|e| e.into_inner());
                             state.latency_ms = Some(ms);
                             for (node_id, _) in state.peers.iter() {
-                                let _ = cmd_incoming.send(
+                                try_emit_ui_event(
+                                    &cmd_incoming,
                                     UiEvent::LatencyUpdate(node_id.to_string(), ms as i32),
                                 );
                             }
                         }
                         NetworkCommand::Scan => {
-                            let _ = cmd_scan_tx.send(());
+                            let _ = cmd_scan_tx.try_send(());
                         }
                     }
                 }
 
-                // Discovered peers from the discovery task -> establish sessions.
-                Some(peer_addr) = discovered_peer_rx.recv() => {
-                    log::info!("Discovery: establishing session with peer at {}", peer_addr);
-                    let ses_tx = cmd_session_tx.clone();
-                    let name = read_display_name(&cmd_display);
-                    let id = cmd_id;
-                    let pubkey = local_pubkey;
-                    let signing_key = cmd_signing_key.clone();
-
-                    tokio::spawn(async move {
-                        // TCP connect with 5-second timeout (same as user-initiated).
-                        let connect_result = tokio::time::timeout(
-                            std::time::Duration::from_secs(5),
-                            tokio::net::TcpStream::connect(peer_addr),
-                        )
-                        .await;
-
-                        match connect_result {
-                            Ok(Ok(stream)) => {
-                                stream.set_nodelay(true).unwrap_or_else(|e| {
-                                    log::warn!("set_nodelay failed on discovered peer stream: {e}");
-                                });
-                                // Discovery connections don't set pending_control_request,
-                                // so we don't need to propagate errors to the UI.
-                                let _ = session::run_connecting_session(
-                                    stream,
-                                    peer_addr,
-                                    id,
-                                    name,
-                                    pubkey,
-                                    signing_key,
-                                    ses_tx,
-                                )
-                                .await;
-                            }
-                            Ok(Err(e)) => {
-                                log::debug!(
-                                    "Failed to connect to discovered peer {}: {}",
-                                    peer_addr, e,
-                                );
-                            }
-                            Err(_) => {
-                                log::debug!(
-                                    "Connect to discovered peer {} timed out",
-                                    peer_addr,
-                                );
-                            }
-                        }
-                    });
-                }
             }
         }
     });
@@ -774,28 +911,90 @@ pub(super) async fn run_network_runtime(
     // never tears down the listener/router/command-processor tasks or the
     // local calculator's ability to keep running.
     tokio::select! {
-        _ = listener_handle => log::info!("TCP session listener exited"),
-        _ = router_handle => log::info!("Outgoing router exited"),
-        _ = cmd_handle => log::info!("Command processor exited"),
-        _ = wait_for_shutdown(shutdown, shutdown_notify) => {
+        _ = &mut listener_handle => log::info!("TCP session listener exited"),
+        _ = &mut router_handle => log::info!("Outgoing router exited"),
+        _ = &mut cmd_handle => log::info!("Command processor exited"),
+        _ = wait_for_shutdown(shutdown) => {
             log::info!("Shutdown signal received");
         }
     }
 
+    for session in sessions.lock().unwrap_or_else(|e| e.into_inner()).values() {
+        let _ = session.cancel_tx.send(true);
+    }
+    listener_handle.abort();
+    router_handle.abort();
+    cmd_handle.abort();
+    let _ = listener_handle.await;
+    let _ = router_handle.await;
+    let _ = cmd_handle.await;
+
     log::info!("Network runtime stopped");
 }
 
-async fn wait_for_shutdown(flag: Arc<AtomicBool>, notify: Arc<Notify>) {
-    // Fast path: flag was already set before we started waiting.
-    if flag.load(Ordering::Relaxed) {
+pub(crate) async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
+    // Level-triggered fast path: a cancellation sent before this future is
+    // first polled is retained by the watch channel.
+    if *shutdown.borrow() {
         return;
     }
-    // Park until the shutdown() call fires notify_waiters().
-    // Loop to handle spurious wakeups.
-    loop {
-        notify.notified().await;
-        if flag.load(Ordering::Relaxed) {
+    while shutdown.changed().await.is_ok() {
+        if *shutdown.borrow_and_update() {
             return;
+        }
+    }
+    // Sender closure also means the owning manager/runtime is gone.
+}
+
+fn try_emit_ui_event(ui_tx: &mpsc::Sender<UiEvent>, event: UiEvent) -> bool {
+    match ui_tx.try_send(event) {
+        Ok(()) => true,
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            // Status/discovery events are best-effort snapshots. Drop newest
+            // rather than letting any producer allocate without bound.
+            log::warn!("UI event queue is full; dropping newest event");
+            false
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            log::trace!("UI event queue is closed");
+            false
+        }
+    }
+}
+
+pub(crate) fn forward_incoming_message_to_ui(
+    ui_tx: &mpsc::Sender<UiEvent>,
+    sessions: &Arc<Mutex<HashMap<NodeId, ActiveSession>>>,
+    sender_id: NodeId,
+    message: NetworkMessage,
+) -> bool {
+    let bytes = match bincode::serde::encode_to_vec(
+        &message,
+        bincode::config::standard().with_limit::<4096>(),
+    ) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            log::warn!("Failed to serialize NetworkMessage for UiEvent: {error}");
+            return false;
+        }
+    };
+    match ui_tx.try_send(UiEvent::NetworkMessage(sender_id.to_string(), bytes)) {
+        Ok(()) => true,
+        Err(error) => {
+            // Inbound messages are not best-effort status snapshots. If the
+            // bounded UI queue cannot accept one, disconnect the producing
+            // peer so it cannot continuously consume the pre-rate-limit
+            // ingress budget.
+            log::warn!("UI ingress queue rejected message from {sender_id}: {error}");
+            if let Some(session) = sessions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get(&sender_id)
+                .cloned()
+            {
+                let _ = session.cancel_tx.send(true);
+            }
+            false
         }
     }
 }
@@ -810,7 +1009,7 @@ fn read_display_name(display_name: &Arc<RwLock<String>>) -> String {
 fn register_discovered_endpoint(
     endpoint: DiscoveryEndpoint,
     state: &Arc<Mutex<NetworkState>>,
-    ui_tx: &mpsc::UnboundedSender<UiEvent>,
+    ui_tx: &mpsc::Sender<UiEvent>,
 ) -> SocketAddr {
     let peer_addr = endpoint.address;
     let node_id = endpoint.node_id;
@@ -822,15 +1021,15 @@ fn register_discovered_endpoint(
         state.peers.add_peer(PeerInfo {
             node_id,
             display_name: endpoint.display_name,
-            address: peer_addr,
-            tcp_port: endpoint.session_port,
+            service_endpoint: Some(peer_addr),
+            session_peer_addr: None,
             last_seen: std::time::Instant::now(),
             public_key: [0u8; 32],
             public_key_fingerprint: fingerprint.clone(),
         });
         state.peers.remove_expired();
         if let Some(payload) = peer_payload(&state, &node_id, false) {
-            let _ = ui_tx.send(UiEvent::PeerDiscovered(payload));
+            try_emit_ui_event(ui_tx, UiEvent::PeerDiscovered(payload));
         }
     }
 
@@ -848,7 +1047,7 @@ fn register_discovered_endpoint(
     peer_addr
 }
 
-fn should_attempt_discovered_session(
+pub(crate) fn should_attempt_discovered_session(
     attempts: &mut HashMap<NodeId, (SocketAddr, std::time::Instant)>,
     node_id: NodeId,
     addr: SocketAddr,
@@ -868,18 +1067,60 @@ fn should_attempt_discovered_session(
             true
         }
         None => {
+            if attempts.len() >= MAX_DISCOVERY_ENDPOINT_ATTEMPTS
+                && let Some(oldest) = attempts
+                    .iter()
+                    .min_by_key(|(_, (_, seen_at))| *seen_at)
+                    .map(|(node_id, _)| *node_id)
+            {
+                attempts.remove(&oldest);
+            }
             attempts.insert(node_id, (addr, now));
             true
         }
     }
 }
 
-/// Create a `tokio::net::TcpListener` bound to `addr` with `SO_REUSEADDR`.
+pub(crate) fn inbound_session_limiter() -> Arc<Semaphore> {
+    Arc::new(Semaphore::new(MAX_INBOUND_SESSIONS))
+}
+
+pub(crate) fn should_replace_session(
+    local_id: NodeId,
+    remote_id: NodeId,
+    existing_direction: ConnectionDirection,
+    new_direction: ConnectionDirection,
+) -> bool {
+    let preferred = if local_id < remote_id {
+        ConnectionDirection::Outbound
+    } else {
+        ConnectionDirection::Inbound
+    };
+    new_direction == preferred && existing_direction != preferred
+}
+
+pub(crate) fn remove_session_if_current(
+    sessions: &mut HashMap<NodeId, ActiveSession>,
+    node_id: NodeId,
+    session_id: SessionId,
+) -> bool {
+    if sessions
+        .get(&node_id)
+        .is_some_and(|session| session.session_id == session_id)
+    {
+        sessions.remove(&node_id);
+        true
+    } else {
+        false
+    }
+}
+
+/// Create a production TCP listener bound to `addr`.
 ///
-/// The socket is created via `socket2` so that socket options can be set
-/// before `bind()`.  After binding and listening the socket is switched to
-/// non-blocking mode and converted into a tokio listener.
-pub(crate) fn bind_tcp_with_reuse(
+/// Windows uses `SO_EXCLUSIVEADDRUSE` so a second application instance cannot
+/// share the fixed session endpoint. Other platforms retain `SO_REUSEADDR` for
+/// quick restarts; it does not change the separate UDP discovery socket.
+pub(crate) fn bind_tcp_listener(
     addr: SocketAddr,
 ) -> Result<tokio::net::TcpListener, std::io::Error> {
     let domain = if addr.is_ipv4() {
@@ -888,12 +1129,46 @@ pub(crate) fn bind_tcp_with_reuse(
         Domain::IPV6
     };
     let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
-    socket.set_reuse_address(true)?;
-    // NOTE: set_reuse_port() does not exist on Windows for TCP and is not
-    // needed here — SO_REUSEADDR alone is sufficient to allow quick rebind.
+    configure_tcp_bind_options(&socket)?;
     socket.bind(&addr.into())?;
     socket.listen(128)?;
     socket.set_nonblocking(true)?;
     let std_listener: std::net::TcpListener = socket.into();
     tokio::net::TcpListener::from_std(std_listener)
+}
+
+#[cfg(not(windows))]
+fn configure_tcp_bind_options(socket: &Socket) -> std::io::Result<()> {
+    socket.set_reuse_address(true)
+}
+
+#[cfg(windows)]
+fn configure_tcp_bind_options(socket: &Socket) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawSocket;
+    use windows_sys::Win32::Networking::WinSock::{
+        SO_EXCLUSIVEADDRUSE, SOCKET_ERROR, SOL_SOCKET, WSAGetLastError, setsockopt,
+    };
+
+    let enabled: i32 = 1;
+    // SAFETY: `socket` owns a valid Winsock SOCKET. `enabled` remains alive for
+    // the duration of the call and its byte length matches the value passed to
+    // `setsockopt`.
+    let result = unsafe {
+        setsockopt(
+            socket.as_raw_socket() as usize,
+            SOL_SOCKET,
+            SO_EXCLUSIVEADDRUSE,
+            (&enabled as *const i32).cast(),
+            std::mem::size_of_val(&enabled) as i32,
+        )
+    };
+    if result == SOCKET_ERROR {
+        // SAFETY: WSAGetLastError has no preconditions and reads thread-local
+        // Winsock error state set by the failed call above.
+        Err(std::io::Error::from_raw_os_error(unsafe {
+            WSAGetLastError()
+        }))
+    } else {
+        Ok(())
+    }
 }

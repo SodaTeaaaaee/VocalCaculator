@@ -14,7 +14,10 @@
 //!
 //! An invalid value at any of the CLI / env / config levels is a hard
 //! error -- this module never silently substitutes [`NetworkMode::Lan`]
-//! for a value it failed to parse.
+//! for a value it failed to parse. [`crate::app::config::AppConfig`] also
+//! fails closed to an explicit Offline value when an existing config file
+//! cannot be read or deserialized; a genuinely missing file still uses the
+//! product defaults.
 
 use std::sync::OnceLock;
 
@@ -70,11 +73,13 @@ pub fn set(mode: NetworkMode) {
     let _ = CURRENT_MODE.set(mode);
 }
 
-/// The currently resolved mode, or [`NetworkMode::Lan`] if [`set`] has
-/// not been called yet. In production `main()` always calls `set`
-/// before any code path can observe `current()`.
+/// The currently resolved mode, or fail-closed [`NetworkMode::Offline`] if
+/// [`set`] has not been called yet. In production `main()` always calls
+/// `set` before any code path can observe `current()`; the safe fallback
+/// protects tests and future alternate composition roots from accidentally
+/// starting LAN networking before startup resolution has completed.
 pub fn current() -> NetworkMode {
-    CURRENT_MODE.get().copied().unwrap_or(NetworkMode::Lan)
+    CURRENT_MODE.get().copied().unwrap_or(NetworkMode::Offline)
 }
 
 /// Extract the value passed to `--network-mode` from a raw argv slice,
@@ -164,7 +169,6 @@ mod tests {
             enabled,
             display_name: "Test".to_string(),
             allow_remote_control: false,
-            conflict_policy: "interleaved".to_string(),
             mode: mode.map(|s| s.to_string()),
         }
     }
@@ -291,17 +295,10 @@ mod tests {
     }
 
     #[test]
-    fn global_set_and_current_roundtrip() {
-        // NetworkMode is Copy/Eq; exercise the OnceLock helpers directly
-        // via a value not asserted elsewhere in this process to avoid
-        // interference from other tests calling `set`.
-        set(NetworkMode::LoopbackTest);
-        // `set` only succeeds once per process; `current()` must return
-        // *some* valid mode either way.
-        let mode = current();
-        assert!(matches!(
-            mode,
-            NetworkMode::Lan | NetworkMode::Offline | NetworkMode::LoopbackTest
-        ));
+    fn current_is_offline_before_global_initialization() {
+        // No unit test calls `set`, so the fail-closed pre-initialisation
+        // behavior can be asserted deterministically without racing a
+        // process-global OnceLock write.
+        assert_eq!(current(), NetworkMode::Offline);
     }
 }

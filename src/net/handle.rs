@@ -11,14 +11,14 @@ use crate::net::protocol::{NetworkMessage, NodeId};
 #[derive(Clone)]
 pub struct NetworkHandle {
     /// Send a message to a specific peer (routed to the correct session).
-    outgoing_tx: mpsc::UnboundedSender<(NodeId, NetworkMessage)>,
+    outgoing_tx: mpsc::Sender<(NodeId, NetworkMessage)>,
     /// Tokio runtime handle for `block_on` from the sync UI thread.
     runtime_handle: tokio::runtime::Handle,
 }
 
 impl NetworkHandle {
     /// Get a clone of the outgoing message sender for routing messages to peers.
-    pub fn outgoing_sender(&self) -> mpsc::UnboundedSender<(NodeId, NetworkMessage)> {
+    pub fn outgoing_sender(&self) -> mpsc::Sender<(NodeId, NetworkMessage)> {
         self.outgoing_tx.clone()
     }
 
@@ -30,7 +30,7 @@ impl NetworkHandle {
 
 // Constructor used by NetworkManager::start().
 pub(super) fn new_handle(
-    outgoing_tx: mpsc::UnboundedSender<(NodeId, NetworkMessage)>,
+    outgoing_tx: mpsc::Sender<(NodeId, NetworkMessage)>,
     runtime_handle: tokio::runtime::Handle,
 ) -> NetworkHandle {
     NetworkHandle {

@@ -51,17 +51,17 @@ LocalSend 官方协议默认使用同一个 53317 数值端口承载 TCP 和 UDP
 
 ## 3. 本项目当前实现（2026-07-15 更新）
 
-第 5-9 节的方案已落地为代码，状态如下（自动化验证 = 单元测试 / `cargo test --locked --lib`，共 328 项通过；未做真实 Windows LAN / 双机 / clean-VM 验证的部分单独标注）：
+第 5-9 节的方案已落地为代码，状态如下（自动化验证包含 `cargo test --locked --lib`；未做真实 Windows LAN / 双机 / clean-VM 验证的部分单独标注）：
 
-- `NetworkMode::{Lan, Offline, LoopbackTest}` 已实现（`src/app/network_mode.rs`），CLI `--network-mode` > 环境变量 `VOCAL_CALCULATOR_NETWORK_MODE` > `config.mode` > 旧版 `enabled` 回退优先级已实现并有单元测试；非法值总是硬 `Err`，`main()` 以 exit code 2 终止——**已实现并验证（自动化）**。
+- `NetworkMode::{Lan, Offline, LoopbackTest}` 已实现（`src/app/network_mode.rs`），CLI `--network-mode` > 环境变量 `VOCAL_CALCULATOR_NETWORK_MODE` > `config.mode` > 旧版 `enabled` 回退优先级已实现并有单元测试；显式非法字符串为硬 `Err`，`main()` 以 exit code 2 终止。缺失配置文件仍使用产品默认 Lan，现存但不可读、损坏或字段类型错误的配置 fail-closed 为 Offline；未初始化全局模式也为 Offline——**已实现并验证（自动化）**。
 - TCP session listener：`Lan` 模式下固定绑定 `0.0.0.0:42420`（`session_bind_addr`，`src/net/runtime.rs`），不再是 OS 随机端口；`LoopbackTest` 绑定 `127.0.0.1:0`——**已实现并验证（自动化）**。
 - 自定义 UDP multicast：仍是 `224.0.0.167:42420`，`42420` 现在只有 `LAN_FIXED_PORT`（`src/net/protocol.rs`）一个权威字面量来源，`DISCOVERY_PORT`/`SESSION_TCP_PORT` 均为其别名——**已实现并验证（自动化）**。
 - mDNS：Windows 上已禁用（`should_start_mdns(target_os) = target_os != "windows"`，`src/net/discovery/mod.rs`），非 Windows 平台（含 Android）保持启用——**已实现并验证（自动化）**；跨平台真实互通（Windows↔Android）**仍未做真实验证**。
 - discovery 不再发布随机 session port，announce 消息携带固定 `SESSION_TCP_PORT`——**已实现并验证（自动化）**。
 - `NetworkConfig::default()` 的旧 `enabled = true` 字段仍存在（向后兼容），新增 `mode: Option<String>` 字段作为优先数据源——**已实现并验证（自动化）**。
-- `Offline` 模式下组合根（`ui::bridge::init_networking`）在构造 `NetworkManager` 之前直接返回，不创建任何 socket；`run_network_runtime` 内部也有一层防御性重复检查——**已实现但未做真实 Windows LAN / 双机 / clean-VM 验证**：目前的证据停留在函数调用路径的单元测试层面，没有启动真实 GUI 进程后审计其操作系统 socket 列表的 smoke test。
-- 防火墙 dry-run/configure/remove 脚本已实现于 `packaging/windows/`，非 admin 环境下 `-DryRun` 已实测通过（23 项断言），真实（非 dry-run）创建/删除规则、clean VM 上的提示行为、便携目录移动后的规则刷新——**仍未做真实 Windows LAN / 双机 / clean-VM 验证**。
-- discovery task 的 `JoinHandle` 不再纳入顶层 `select!`，其 panic/退出不再拖垮 listener/router/command 任务——**已实现并验证（自动化）**。
+- `Offline` 模式下组合根（`ui::bridge::init_networking`）在构造 `NetworkManager` 之前直接返回；`run_network_runtime` 内部也有一层防御性重复检查——**代码门禁已实现但未做进程级验证**：模式和底层地址选择有单元测试，没有直接组合根 constructor-spy 测试，也没有启动真实 GUI 进程后审计其操作系统 socket 列表的 smoke test。
+- 防火墙 dry-run/configure/remove 脚本已实现于 `packaging/windows/`，非 admin 环境下 `-DryRun`/`-WhatIf` 已实测通过（43 项断言，全部 NetSecurity cmdlet 由 fail-fast mock 遮蔽）；真实（非 dry-run）创建/删除规则、clean VM 上的提示行为、便携目录移动后的规则刷新——**仍未做真实 Windows LAN / 双机 / clean-VM 验证**。
+- discovery task 的 `JoinHandle` 不再纳入顶层 `select!`，静态控制流显示其退出不会直接拖垮 listener/router/command 任务——**代码已实现，直接故障注入测试未实现**。
 - `tests/discovery_multicast.rs`、`tests/test_udp_transport.rs` 已归入非默认 Cargo feature `real-network-tests`，且测试本身额外 `#[ignore]` 并要求 `VOCAL_CALCULATOR_ALLOW_LAN_TESTS=1`——**已实现并验证（自动化）**；真实 LAN 环境下这些测试的实际运行结果**仍未验证**（本次任务未设置该环境变量、未启用该 feature 运行）。
 
 真正跨越"这是文档设想"到"这是已提交代码"边界后仍然为空的部分：两台 Windows 实机互相发现/控制、clean（无既有规则）VM 上的真实防火墙提示行为、便携目录实际移动后的规则刷新操作、Android 与 Windows 的跨平台 multicast/session 互通。这些都需要真实网络环境或人工介入，不属于本次自动化验证范围。
@@ -129,15 +129,15 @@ Android 或其他平台可以继续保留 mDNS 作为平台内 fallback，但跨
 
 ### T0：静态和纯逻辑验证
 
-fmt、Clippy、`cargo test --lib`、build，不启动 executable，不接触防火墙。当前不能默认使用 `cargo test --all-targets`，因为两个 integration target 会绑定 `0.0.0.0` 并运行真实 multicast/broadcast。
+fmt、Clippy、`cargo test --lib`、build，不启动 executable，不接触防火墙。现在也可以默认使用 `cargo test --all-targets`：两个真实网络 integration target 受非默认 `real-network-tests` feature、`#[ignore]` 和 `VOCAL_CALCULATOR_ALLOW_LAN_TESTS=1` 三层门禁保护，默认构建为 0 tests。
 
 ### T1：loopback 网络测试
 
-只绑定 `127.0.0.1`/`::1` 和临时端口；不启动 mDNS、multicast 或 LAN listener。
+listener 只绑定 `127.0.0.1`/`::1` 和临时端口；不启动 mDNS、multicast 或 LAN listener。测试中的任何显式 peer 地址也必须保持为 loopback。
 
 ### T2：GUI smoke
 
-必须使用尚待实现的：
+必须同时使用已经实现的：
 
 ```text
 --network-mode=offline
@@ -146,7 +146,7 @@ VOCAL_CALCULATOR_NETWORK_MODE=offline
 
 offline 必须从组合根处完全不构造 NetworkManager，而不是启动后再关闭。
 
-在该模式实现前，agent 不得直接启动 Windows GUI。仓库根 `AGENTS.md` 已固化该限制。
+虽然模式门禁已实现，但 AUTO-002 进程级 socket 审计仍缺失；agent 不得主动启动 Windows GUI 做 smoke test，除非用户明确指示。仓库根 `AGENTS.md` 已固化该限制。
 
 ### T3：真实 LAN 测试
 
@@ -181,7 +181,7 @@ VOCAL_CALCULATOR_ALLOW_LAN_TESTS=1
 ## 9. 实施顺序（2026-07-15 状态更新）
 
 1. 实现 `NetworkMode::{Lan,Offline,LoopbackTest}`——**已实现并验证（自动化）**。
-2. 为 agent 添加 offline 启动门禁测试——**已实现但未做真实 Windows LAN / 双机 / clean-VM 验证**：组合根门禁有单元测试，但没有进程级 socket 审计 smoke test（对应 `repair-backlog.md` AUTO-002，仍未实现）。
+2. 为 agent 添加 offline 启动门禁——**代码已实现、直接组合根测试与进程级验证未实现**：模式解析和底层选择器有单元测试，但没有 constructor-spy 直接执行 `init_networking`，也没有进程级 socket 审计 smoke test（对应 `repair-backlog.md` AUTO-002，仍未实现）。
 3. TCP listener 改为固定 42420——**已实现并验证（自动化）**。
 4. Windows 禁用 mDNS，确认 custom multicast 互通——mDNS 禁用本身**已实现并验证（自动化）**；"确认 custom multicast 互通"这半句**仍未做真实验证**，因为需要真实双机环境。
 5. 实现 dry-run + configure + remove firewall scripts——**已实现并验证（自动化）**，仅限 dry-run 路径；真实（非 dry-run）执行**仍未做真实 Windows LAN / 双机 / clean-VM 验证**。

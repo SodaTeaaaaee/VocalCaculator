@@ -11,13 +11,16 @@ pub type HmacSha256 = Hmac<Sha256>;
 /// Unique identifier for a network node (UUID v4).
 pub type NodeId = Uuid;
 
-/// Policy for resolving concurrent action conflicts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ConflictPolicy {
-    /// All actions are interleaved in arrival order.
-    Interleaved,
-    /// Only the granted controller may send actions.
-    Exclusive,
+/// Human-readable peer names are shared by configuration, handshake,
+/// discovery, and steady-state name updates. Keep one byte-oriented schema at
+/// every boundary so a peer cannot bypass UI validation through another
+/// transport.
+pub const MAX_DISPLAY_NAME_BYTES: usize = 64;
+
+pub fn valid_display_name(name: &str) -> bool {
+    !name.trim().is_empty()
+        && name.len() <= MAX_DISPLAY_NAME_BYTES
+        && !name.chars().any(char::is_control)
 }
 
 /// Advertised capabilities of a network node.
@@ -73,23 +76,23 @@ pub enum NetworkMessage {
     // Steady state
     Action(ActionEnvelope),
     StateUpdate(StateSnapshot),
-    // Routing matrix
-    /// Incremental routing delta from an owner node.
+    // Legacy v5 routing/pairing variants below retain their wire positions.
+    // The calculator-first Router ignores them and never emits them.
+    /// Legacy v5 incremental routing delta.
     RoutingDelta {
         owner: NodeId,
         version: u64,
         cells: Vec<(NodeId, NodeId, bool)>,
     },
-    /// Full routing matrix snapshot.
+    /// Legacy v5 full routing snapshot.
     RoutingSync {
         entries: Vec<(NodeId, NodeId, bool, u64)>,
     },
-    /// Request an owner-signed routing row. The receiver may answer from its
-    /// own row or from a cached owner-signed row.
+    /// Legacy v5 request for an owner-signed routing row.
     RoutingRowRequest {
         owner: NodeId,
     },
-    /// Owner-signed routing row that can be relayed by intermediate peers.
+    /// Legacy v5 owner-signed routing row.
     RoutingRowAnnounce {
         owner: NodeId,
         version: u64,
@@ -97,37 +100,37 @@ pub enum NetworkMessage {
         owner_public_key: [u8; 32],
         signature: Vec<u8>,
     },
-    /// Revoke a specific route.
+    /// Legacy v5 route revocation.
     RouteRevoke {
         from: NodeId,
         to: NodeId,
         version: u64,
     },
-    /// Ask an executor to allow this controller to route actions to it.
+    /// Legacy v5 per-request permission request.
     RouteRequest {
         request_id: u64,
         controller: NodeId,
         executor: NodeId,
     },
-    /// Authorize a pending route request.
+    /// Legacy v5 per-request grant.
     RouteGrant {
         request_id: u64,
         controller: NodeId,
         executor: NodeId,
     },
-    /// Deny a pending route request.
+    /// Legacy v5 per-request denial.
     RouteDenied {
         request_id: u64,
         controller: NodeId,
         executor: NodeId,
         reason: String,
     },
-    /// Release an authorized or pending route.
+    /// Legacy v5 route release.
     RouteRelease {
         controller: NodeId,
         executor: NodeId,
     },
-    /// Challenge used by protocol v4 peers to prove key ownership.
+    /// Challenge used by protocol v5 peers to prove key ownership.
     AuthChallenge {
         nonce: [u8; 32],
     },
@@ -143,19 +146,18 @@ pub enum NetworkMessage {
     PeerNameUpdate {
         display_name: String,
     },
-    // Pairing (ed25519)
-    /// Request to pair with a remote node, carrying sender's public key and a
-    /// SHA-256 hash of the pairing code for out-of-band verification.
+    // Legacy v5 application-level pairing. Session identity is still proven
+    // with the authenticated Ed25519 handshake.
+    /// Legacy v5 pairing request.
     PairingRequest {
         public_key: [u8; 32],
         pairing_code_hash: [u8; 32],
     },
-    /// Confirmation that the remote node accepted the pairing, signed with the
-    /// sender's Ed25519 private key over the concatenation of both public keys.
+    /// Legacy v5 pairing confirmation.
     PairingConfirm {
         signature: Vec<u8>,
     },
-    /// The remote node rejected the pairing request.
+    /// Legacy v5 pairing rejection.
     PairingReject,
     // Connection failure notification (local-only, not sent over the wire).
     /// A TCP connection attempt failed. Used to propagate errors from the
@@ -166,6 +168,14 @@ pub enum NetworkMessage {
         /// The peer we were trying to connect to (if known).
         target_node_id: Option<NodeId>,
     },
+}
+
+impl NetworkMessage {
+    /// Messages retained in the v5 enum for local compatibility but forbidden
+    /// on an authenticated peer session.
+    pub fn is_local_only(&self) -> bool {
+        matches!(self, Self::ConnectionFailed { .. })
+    }
 }
 
 /// Hint to peers indicating which transport mechanism the sender used.
@@ -203,8 +213,13 @@ pub enum DiscoveryMessage {
     },
 }
 
-/// Current protocol version for handshake negotiation (v4 = explicit route auth messages).
-pub const PROTOCOL_VERSION: u16 = 4;
+/// Current protocol version for handshake negotiation.
+///
+/// Version 5 freezes the wire layout after adding owner-signed routing-row
+/// messages and the mandatory Ed25519 challenge/proof exchange.  Those
+/// additions changed bincode enum discriminants and are therefore not wire
+/// compatible with protocol v4.
+pub const PROTOCOL_VERSION: u16 = 5;
 /// Minimum Hello protocol version that carries Ed25519 public keys.
 pub const HELLO_VERSION_WITH_KEYS: u16 = 3;
 /// IPv4 multicast address used for LAN peer discovery.
@@ -253,13 +268,45 @@ pub(crate) enum ConnectionDirection {
     Outbound,
 }
 
+/// Unique generation identifier for one concrete TCP session.
+///
+/// A node may have overlapping old/new session tasks during reconnect and
+/// deterministic deduplication.  Commands that mutate the active-session map
+/// carry this ID so a late teardown from an old task cannot remove its
+/// replacement.
+pub(crate) type SessionId = Uuid;
+
+/// Identity asserted by discovery or by a user-selected peer entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExpectedPeerIdentity {
+    pub node_id: NodeId,
+    pub public_key_fingerprint: Option<String>,
+}
+
+/// One outbound TCP connection request after policy resolution.
+#[derive(Debug, Clone)]
+pub(crate) struct OutboundConnectRequest {
+    pub addr: std::net::SocketAddr,
+    pub expected_peer: Option<ExpectedPeerIdentity>,
+    /// Discovery retries are intentionally quiet; direct user actions report
+    /// failures through the UI event channel.
+    pub report_errors: bool,
+}
+
 /// A session registration request (sent by a session task after handshake).
 pub(crate) struct SessionRegister {
+    pub session_id: SessionId,
     pub node_id: NodeId,
     pub sender: SessionSender,
     pub info: PeerInfo,
     /// Whether this connection was inbound or outbound (for dedup).
     pub direction: ConnectionDirection,
+    /// Cancellation signal retained by the active-session registry. Replacing
+    /// a generation sets it to `true`, which stops the old relay promptly.
+    pub cancel_tx: tokio::sync::watch::Sender<bool>,
+    /// The runtime must explicitly accept or reject the registration before
+    /// the session enters its steady-state relay loop.
+    pub decision_tx: tokio::sync::oneshot::Sender<bool>,
 }
 
 /// Commands from the tokio tasks back to the NetworkManager runtime.
@@ -267,14 +314,46 @@ pub(crate) enum NetworkCommand {
     /// A new session completed handshake and wants to register.
     RegisterSession(SessionRegister),
     /// A session has closed; remove from the active set.
-    UnregisterSession(NodeId),
+    UnregisterSession {
+        node_id: NodeId,
+        session_id: SessionId,
+    },
     /// An inbound message that should be forwarded to the Router.
     /// The `NodeId` is the sender of the message.
     IncomingMessage(NodeId, NetworkMessage),
     /// Initiate an outbound TCP connection to a peer.
-    ConnectToPeer(std::net::SocketAddr, Option<NodeId>),
+    ConnectToPeer(OutboundConnectRequest),
     /// Update the measured round-trip latency (in milliseconds).
     UpdateLatency(u32),
     /// Trigger a LAN peer discovery scan.
     Scan,
+}
+
+#[cfg(test)]
+mod compatibility_tests {
+    use super::*;
+
+    fn encoded(message: &NetworkMessage) -> Vec<u8> {
+        bincode::serde::encode_to_vec(message, bincode::config::standard()).unwrap()
+    }
+
+    #[test]
+    fn protocol_v5_number_is_stable() {
+        assert_eq!(PROTOCOL_VERSION, 5);
+    }
+
+    #[test]
+    fn deprecated_v5_variant_discriminants_remain_stable() {
+        let id = NodeId::nil();
+        assert_eq!(
+            encoded(&NetworkMessage::RouteRequest {
+                request_id: 0,
+                controller: id,
+                executor: id,
+            })[0],
+            11
+        );
+        assert_eq!(encoded(&NetworkMessage::Ping), vec![17]);
+        assert_eq!(encoded(&NetworkMessage::PairingReject), vec![22]);
+    }
 }

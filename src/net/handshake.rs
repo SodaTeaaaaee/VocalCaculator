@@ -18,21 +18,24 @@
 //! sends HelloAck.  The *client* (outgoing connection) sends Hello + HMAC,
 //! then receives HelloAck.
 //!
-//! After HMAC verification, the caller can check `paired_devices` to
-//! determine whether the remote's public key is paired and trusted.
+//! A session is admitted only after the Ed25519 proof binds its node ID to the
+//! advertised public key. Product permission for inbound calculator actions is
+//! then governed solely by the persisted `allow_remote_control` switch.
 
 use super::protocol::{
     APP_ID, APP_KEY, HmacSha256, NetworkMessage, NodeId, PROTOCOL_MAGIC, PROTOCOL_VERSION,
+    valid_display_name,
 };
-use super::session::{FramedStream, recv_msg, send_msg};
+use super::session::{FramedStream, decode_network_message, recv_msg, send_msg};
 use crate::app::identity::derive_node_id;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use futures::{SinkExt, StreamExt};
 use hmac::Mac;
 
-const AUTH_DOMAIN: &[u8] = b"vocal-calculator-auth-v4";
+const AUTH_DOMAIN: &[u8] = b"vocal-calculator-auth-v5";
 const CLIENT_PROOF_ROLE: &[u8] = b"client";
 const SERVER_PROOF_ROLE: &[u8] = b"server";
+const HANDSHAKE_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 // ---------------------------------------------------------------------------
 // Server-side handshake
@@ -46,8 +49,7 @@ const SERVER_PROOF_ROLE: &[u8] = b"server";
 /// 4. Verify the HMAC against the raw Hello bytes.
 /// 5. Send HelloAck (with `app_id` and local public key).
 ///
-/// Returns `(remote_node_id, remote_display_name, remote_public_key, framed)`.
-/// The caller can then check `paired_devices` to determine pairing status.
+/// Returns the authenticated remote identity and framed stream.
 pub(super) async fn server_handshake(
     mut framed: FramedStream,
     local_id: NodeId,
@@ -55,6 +57,9 @@ pub(super) async fn server_handshake(
     local_pubkey: [u8; 32],
     local_signing_key: &SigningKey,
 ) -> Result<(NodeId, String, [u8; 32], FramedStream), Box<dyn std::error::Error>> {
+    if !valid_display_name(local_name) {
+        return Err("Invalid local display name".into());
+    }
     // -- Receive Hello ----------------------------------------------------
     let (msg, hello_raw) = recv_msg_with_raw(&mut framed)
         .await?
@@ -70,6 +75,9 @@ pub(super) async fn server_handshake(
         } => (node_id, display_name, protocol_version, app_id, public_key),
         other => return Err(format!("Expected Hello, got {:?}", other).into()),
     };
+    if !valid_display_name(&remote_name) {
+        return Err("Invalid remote Hello display name".into());
+    }
 
     // -- App ID check -----------------------------------------------------
     if remote_app_id != APP_ID {
@@ -175,8 +183,7 @@ pub(super) async fn server_handshake(
 ///    send Hello (magic-prefixed) followed by the raw 32-byte HMAC tag.
 /// 2. Receive HelloAck and verify `app_id`.
 ///
-/// Returns `(remote_node_id, remote_display_name, remote_public_key, framed)`.
-/// The caller can then check `paired_devices` to determine pairing status.
+/// Returns the authenticated remote identity and framed stream.
 pub(super) async fn client_handshake(
     mut framed: FramedStream,
     local_id: NodeId,
@@ -184,6 +191,9 @@ pub(super) async fn client_handshake(
     local_pubkey: [u8; 32],
     local_signing_key: &SigningKey,
 ) -> Result<(NodeId, String, [u8; 32], FramedStream), Box<dyn std::error::Error>> {
+    if !valid_display_name(local_name) {
+        return Err("Invalid local display name".into());
+    }
     let hello = NetworkMessage::Hello {
         node_id: local_id,
         display_name: local_name.to_string(),
@@ -193,7 +203,10 @@ pub(super) async fn client_handshake(
     };
 
     // Compute HMAC over the raw bincode-serialized Hello.
-    let hello_bytes = bincode::serde::encode_to_vec(&hello, bincode::config::standard())?;
+    let hello_bytes = bincode::serde::encode_to_vec(
+        &hello,
+        bincode::config::standard().with_limit::<{ super::session::MAX_FRAME_LENGTH }>(),
+    )?;
     let mut mac =
         HmacSha256::new_from_slice(APP_KEY).map_err(|e| format!("HMAC init error: {}", e))?;
     mac.update(&hello_bytes);
@@ -218,6 +231,9 @@ pub(super) async fn client_handshake(
         } => (node_id, display_name, protocol_version, app_id, public_key),
         other => return Err(format!("Expected HelloAck, got {:?}", other).into()),
     };
+    if !valid_display_name(&remote_name) {
+        return Err("Invalid remote HelloAck display name".into());
+    }
 
     if remote_app_id != APP_ID {
         return Err(format!(
@@ -267,7 +283,7 @@ fn verify_remote_identity(
     remote_pubkey: &[u8; 32],
 ) -> Result<VerifyingKey, Box<dyn std::error::Error>> {
     if *remote_pubkey == [0u8; 32] {
-        return Err("Protocol v4 requires an Ed25519 public key".into());
+        return Err("Protocol v5 requires an Ed25519 public key".into());
     }
     let verifying_key = VerifyingKey::from_bytes(remote_pubkey)
         .map_err(|e| format!("Invalid Ed25519 public key: {e}"))?;
@@ -394,7 +410,7 @@ async fn recv_msg_with_raw(
             }
             let bytes = bytes.freeze();
             let raw = bytes.slice(PROTOCOL_MAGIC.len()..);
-            let (msg, _) = bincode::serde::decode_from_slice(&raw, bincode::config::standard())?;
+            let msg = decode_network_message(&raw)?;
             Ok(Some((msg, raw)))
         }
         Some(Err(e)) => Err(e.into()),
@@ -412,10 +428,18 @@ async fn send_raw(
     framed: &mut FramedStream,
     data: &[u8],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    framed
-        .send(tokio_util::bytes::Bytes::from(data.to_vec()))
-        .await?;
-    Ok(())
+    match tokio::time::timeout(
+        HANDSHAKE_WRITE_TIMEOUT,
+        framed.send(tokio_util::bytes::Bytes::from(data.to_vec())),
+    )
+    .await
+    {
+        Ok(result) => {
+            result?;
+            Ok(())
+        }
+        Err(_) => Err("handshake write timed out".into()),
+    }
 }
 
 /// Receive a single raw frame (no magic checking).

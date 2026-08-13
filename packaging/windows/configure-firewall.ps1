@@ -61,6 +61,24 @@ function Resolve-DefaultExecutablePath {
     Join-Path -Path $PSScriptRoot -ChildPath 'vocal-calculator-app.exe'
 }
 
+function ConvertTo-AbsoluteExecutablePath {
+    param(
+        [Parameter(Mandatory)] [string] $Path
+    )
+
+    try {
+        # Unlike Resolve-Path, GetUnresolvedProviderPathFromPSPath also works
+        # when the executable has not been copied into place yet.  Using this
+        # same normalized path before both dry-run and real execution keeps
+        # their Program argument identical for relative input paths.
+        $providerPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+        return [System.IO.Path]::GetFullPath($providerPath)
+    }
+    catch {
+        throw "无法解析可执行文件路径 '$Path'：$($_.Exception.Message)"
+    }
+}
+
 function Write-DryRunPlan {
     param(
         [Parameter(Mandatory)] [string] $ExePath,
@@ -96,8 +114,9 @@ function Write-DryRunPlan {
         Write-Output ''
     }
 
-    Write-Output 'Planned post-creation verification: read back each rule plus its'
-    Write-Output 'application/port/address filters and confirm every value above matches.'
+    Write-Output 'Planned post-creation verification: require exactly one rule for each stable Name,'
+    Write-Output 'then read its application/port/address filters and require every value above to'
+    Write-Output 'match exactly (including Profile = Private only).'
     Write-Output ''
     Write-Output 'No firewall rules were read or modified (dry run).'
 }
@@ -152,17 +171,19 @@ function Invoke-RealConfiguration {
     $failures = @()
 
     foreach ($rule in $Script:RuleDefinitions) {
-        $created = Get-NetFirewallRule -Name $rule.Name -ErrorAction SilentlyContinue
-        if (-not $created) {
-            $failures += "规则 '$($rule.Name)' 创建后未能读取到。"
+        $createdRules = @(Get-NetFirewallRule -Name $rule.Name -ErrorAction SilentlyContinue)
+        if ($createdRules.Count -ne 1) {
+            $failures += "规则 '$($rule.Name)' 创建后应恰好存在一条，实际为 $($createdRules.Count) 条。"
             continue
         }
+        $created = $createdRules[0]
 
+        if ($created.Name -ne $rule.Name) { $failures += "规则 '$($rule.Name)' 的 Name 不匹配。" }
         if ($created.DisplayName -ne $rule.DisplayName) { $failures += "规则 '$($rule.Name)' 的 DisplayName 不匹配。" }
         if ($created.Direction -ne 'Inbound') { $failures += "规则 '$($rule.Name)' 的 Direction 不是 Inbound。" }
         if ($created.Action -ne 'Allow') { $failures += "规则 '$($rule.Name)' 的 Action 不是 Allow。" }
         if ($created.Enabled -ne 'True' -and $created.Enabled -ne $true) { $failures += "规则 '$($rule.Name)' 未启用。" }
-        if ($created.Profile -notmatch 'Private') { $failures += "规则 '$($rule.Name)' 的 Profile 不是 Private。" }
+        if ([string] $created.Profile -ne 'Private') { $failures += "规则 '$($rule.Name)' 的 Profile 必须且只能是 Private。" }
         if ($created.EdgeTraversalPolicy -ne 'Block') { $failures += "规则 '$($rule.Name)' 的 EdgeTraversalPolicy 不是 Block。" }
 
         $addressFilter = $created | Get-NetFirewallAddressFilter
@@ -191,6 +212,14 @@ function Invoke-RealConfiguration {
 
 if (-not $ExecutablePath) {
     $ExecutablePath = Resolve-DefaultExecutablePath
+}
+
+try {
+    $ExecutablePath = ConvertTo-AbsoluteExecutablePath -Path $ExecutablePath
+}
+catch {
+    Write-Error $_.Exception.Message
+    exit 1
 }
 
 if ($DryRun -or $WhatIfPreference) {

@@ -50,12 +50,8 @@ pub struct PeerDisplayInfo {
     pub address: Signal<String>,
     /// Active TCP session with this peer.
     pub is_connected: Signal<bool>,
-    /// Local routing matrix currently sends calculator actions to this peer.
+    /// This peer is the single selected remote calculator executor.
     pub route_active: Signal<bool>,
-    /// This peer has asked to control us and is waiting for user approval.
-    pub approval_pending: Signal<bool>,
-    /// Pairing/trust policy shown in the network panel.
-    pub trust_label: Signal<String>,
     pub latency_ms: Signal<i32>,
     pub index: Signal<i32>,
     pub node_id_string: Signal<String>,
@@ -65,7 +61,7 @@ pub struct PeerDisplayInfo {
 // NetUiState
 // ---------------------------------------------------------------------------
 
-/// Network panel and routing-matrix UI state.
+/// Network panel UI state.
 #[derive(Clone)]
 pub struct NetUiState {
     pub panel_visible: Signal<bool>,
@@ -73,11 +69,6 @@ pub struct NetUiState {
     pub status: Signal<String>,
     pub connected_peer_index: Signal<i32>,
     pub peers: Signal<Vec<PeerDisplayInfo>>,
-    pub matrix_node_ids: Signal<Vec<String>>,
-    pub matrix_size: Signal<i32>,
-    pub matrix_cells: Signal<Vec<bool>>,
-    pub peer_names: Signal<Vec<String>>,
-    pub my_index: Signal<i32>,
     pub remote_controlled: Signal<bool>,
     pub executing_remotely: Signal<bool>,
     pub allow_remote_control: Signal<bool>,

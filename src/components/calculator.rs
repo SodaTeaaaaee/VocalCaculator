@@ -162,13 +162,9 @@ pub struct CalculatorUIProps {
     pub scanning: bool,
     pub allow_remote_control: bool,
 
-    // -- Peer / routing data (simplified for now) --
+    // -- Remote calculator peers --
     pub peers: Vec<PeerDisplayInfo>,
     pub connected_peer_index: i32,
-    pub matrix_size: i32,
-    pub peer_names: Vec<String>,
-    pub my_index: i32,
-    pub matrix_cells: Vec<bool>,
 
     // -- App metadata --
     pub app_version: String,
@@ -216,11 +212,8 @@ pub struct CalculatorUIProps {
     pub on_close_network_settings: EventHandler<()>,
     pub on_connect_to_peer: EventHandler<String>,
     pub on_disconnect_peer: EventHandler<String>,
-    pub on_approve_route_request: EventHandler<String>,
-    pub on_deny_route_request: EventHandler<String>,
     pub on_scan_peers: EventHandler<()>,
     pub on_toggle_remote_control: EventHandler<()>,
-    pub on_route_toggled: EventHandler<(i32, i32, bool)>,
 
     // -- Keyboard --
     pub keyboard_pressed: bool,
@@ -386,10 +379,6 @@ pub fn CalculatorUI(props: CalculatorUIProps) -> Element {
                 app_version: props.app_version.clone(),
                 peers: props.peers.clone(),
                 connected_peer_index: props.connected_peer_index,
-                matrix_size: props.matrix_size,
-                peer_names: props.peer_names.clone(),
-                my_index: props.my_index,
-                matrix_cells: props.matrix_cells.clone(),
                 on_tab_change: move |tab| workbench_tab.set(tab),
                 on_switch_audio_mode: props.on_switch_audio_mode,
                 on_toggle_mute: props.on_toggle_mute,
@@ -399,11 +388,8 @@ pub fn CalculatorUI(props: CalculatorUIProps) -> Element {
                 on_save_display_name: props.on_save_display_name,
                 on_connect_to_peer: props.on_connect_to_peer,
                 on_disconnect_peer: props.on_disconnect_peer,
-                on_approve_route_request: props.on_approve_route_request,
-                on_deny_route_request: props.on_deny_route_request,
                 on_scan_peers: props.on_scan_peers,
                 on_toggle_remote_control: props.on_toggle_remote_control,
-                on_route_toggled: props.on_route_toggled,
             }
 
             if props.network_panel_visible {
@@ -417,19 +403,12 @@ pub fn CalculatorUI(props: CalculatorUIProps) -> Element {
                     audio_muted: props.audio_muted,
                     peers: props.peers.clone(),
                     connected_peer_index: props.connected_peer_index,
-                    matrix_size: props.matrix_size,
-                    peer_names: props.peer_names.clone(),
-                    my_index: props.my_index,
-                    matrix_cells: props.matrix_cells.clone(),
                     onclose: move |_| props.on_close_network_settings.call(()),
                     onconnect: move |id| props.on_connect_to_peer.call(id),
                     ondisconnect: move |id| props.on_disconnect_peer.call(id),
-                    onapprove_route: move |id| props.on_approve_route_request.call(id),
-                    ondeny_route: move |id| props.on_deny_route_request.call(id),
                     onscan: move |_| props.on_scan_peers.call(()),
                     ontoggle_remote_control: move |_| props.on_toggle_remote_control.call(()),
                     ontoggle_mute: move |_| props.on_toggle_mute.call(()),
-                    onroute_toggled: move |payload| props.on_route_toggled.call(payload),
                 }
             }
 
@@ -540,10 +519,6 @@ struct WorkbenchProps {
     app_version: String,
     peers: Vec<PeerDisplayInfo>,
     connected_peer_index: i32,
-    matrix_size: i32,
-    peer_names: Vec<String>,
-    my_index: i32,
-    matrix_cells: Vec<bool>,
     on_tab_change: EventHandler<WorkbenchTab>,
     on_switch_audio_mode: EventHandler<()>,
     on_toggle_mute: EventHandler<()>,
@@ -553,11 +528,8 @@ struct WorkbenchProps {
     on_save_display_name: EventHandler<String>,
     on_connect_to_peer: EventHandler<String>,
     on_disconnect_peer: EventHandler<String>,
-    on_approve_route_request: EventHandler<String>,
-    on_deny_route_request: EventHandler<String>,
     on_scan_peers: EventHandler<()>,
     on_toggle_remote_control: EventHandler<()>,
-    on_route_toggled: EventHandler<(i32, i32, bool)>,
 }
 
 #[component]
@@ -697,12 +669,8 @@ fn Workbench(props: WorkbenchProps) -> Element {
                                     div { class: "workbench-section__title", "当前状态" }
                                     div { class: status_class, "{net_state}" }
                                     div { class: "workbench-row",
-                                        span { class: "workbench-row__label", "路由矩阵" }
-                                        span { class: "workbench-row__value", "{props.matrix_size} x {props.matrix_size}" }
-                                    }
-                                    div { class: "workbench-row",
-                                        span { class: "workbench-row__label", "本机索引" }
-                                        span { class: "workbench-row__value", "{props.my_index}" }
+                                        span { class: "workbench-row__label", "可用设备" }
+                                        span { class: "workbench-row__value", "{props.peers.len()}" }
                                     }
                                 }
                             }
@@ -738,18 +706,11 @@ fn Workbench(props: WorkbenchProps) -> Element {
                                     audio_muted: props.audio_muted,
                                     peers: props.peers.clone(),
                                     connected_peer_index: props.connected_peer_index,
-                                    matrix_size: props.matrix_size,
-                                    peer_names: props.peer_names.clone(),
-                                    my_index: props.my_index,
-                                    matrix_cells: props.matrix_cells.clone(),
                                     onconnect: move |id| props.on_connect_to_peer.call(id),
                                     ondisconnect: move |id| props.on_disconnect_peer.call(id),
-                                    onapprove_route: move |id| props.on_approve_route_request.call(id),
-                                    ondeny_route: move |id| props.on_deny_route_request.call(id),
                                     onscan: move |_| props.on_scan_peers.call(()),
                                     ontoggle_remote_control: move |_| props.on_toggle_remote_control.call(()),
                                     ontoggle_mute: move |_| props.on_toggle_mute.call(()),
-                                    onroute_toggled: move |payload| props.on_route_toggled.call(payload),
                                 }
                             }
                         },

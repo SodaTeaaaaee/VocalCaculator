@@ -3,7 +3,7 @@
 //! Provides a typed [`UiEvent`] enum that bridges the async networking
 //! runtime with the UI thread.  Network changes (new messages,
 //! session connect/disconnect, latency measurements, connection errors)
-//! are sent through an unbounded mpsc channel and consumed by the UI
+//! are sent through a bounded mpsc channel and consumed by the UI
 //! poll loop or a dedicated event handler.
 //!
 //! # Event-driven architecture
@@ -16,30 +16,10 @@
 
 use tokio::sync::mpsc;
 
-// ---------------------------------------------------------------------------
-// RoutingMatrixData
-// ---------------------------------------------------------------------------
-
-/// A serialisable snapshot of the routing matrix, delivered to the UI
-/// as a single [`UiEvent::RoutingMatrixUpdate`] payload.
-///
-/// The matrix is stored in row-major order inside `cells`: the cell at
-/// row `i`, column `j` is `cells[i * size + j]`.  `my_index` identifies
-/// which row/column belongs to the local node.
-#[derive(Debug, Clone, PartialEq)]
-pub struct RoutingMatrixData {
-    /// Ordered list of node UUID strings.
-    pub node_ids: Vec<String>,
-    /// Human-readable display name for each node (parallel to `node_ids`).
-    pub names: Vec<String>,
-    /// Row-major adjacency matrix; `true` = controller grants remote
-    /// execution to executor.  Length is `size * size`.
-    pub cells: Vec<bool>,
-    /// Index of the local node inside `node_ids`, or `-1` if not present.
-    pub my_index: i32,
-    /// Number of nodes (matrix side length).
-    pub size: i32,
-}
+/// Hard cap between the network runtime and UI event loop. Producers use
+/// `try_send`: ordinary status events drop newest on overload, while inbound
+/// peer-message overload is handled by disconnecting that peer in the runtime.
+pub const UI_EVENT_CAPACITY: usize = 256;
 
 // ---------------------------------------------------------------------------
 // PeerDiscoveryPayload
@@ -110,11 +90,6 @@ pub enum UiEvent {
     /// measured latency in milliseconds (or `-1` if unknown).
     LatencyUpdate(String, i32),
 
-    // ---- Routing matrix ----
-    /// A complete snapshot of the routing matrix.  Replaces any
-    /// previous matrix state in the UI.
-    RoutingMatrixUpdate(RoutingMatrixData),
-
     // ---- Remote control status ----
     /// The remote-control flags changed.
     /// - `remote_controlled`: the local node is being controlled by a peer.
@@ -124,26 +99,37 @@ pub enum UiEvent {
     // ---- Status text ----
     /// The human-readable network status line changed.
     NetworkStatusUpdate(String),
-
-    // ---- Pending request timeout ----
-    /// A pending remote-control request timed out.  The string is the
-    /// target peer's node UUID.
-    PendingTimeout(String),
 }
 
 // ---------------------------------------------------------------------------
 // Channel factory
 // ---------------------------------------------------------------------------
 
-/// Create an unbounded channel pair for [`UiEvent`] delivery.
+/// Create a bounded channel pair for [`UiEvent`] delivery.
 ///
 /// Returns `(sender, receiver)`.  The sender is `Clone + Send` and can
 /// be handed out to any async task; the receiver should be polled from
 /// the UI thread (e.g. inside a Dioxus coroutine or event loop
 /// callback).
-pub fn create_ui_channel() -> (
-    mpsc::UnboundedSender<UiEvent>,
-    mpsc::UnboundedReceiver<UiEvent>,
-) {
-    mpsc::unbounded_channel()
+pub fn create_ui_channel() -> (mpsc::Sender<UiEvent>, mpsc::Receiver<UiEvent>) {
+    mpsc::channel(UI_EVENT_CAPACITY)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ui_event_channel_has_a_hard_capacity() {
+        let (sender, _receiver) = create_ui_channel();
+        for index in 0..UI_EVENT_CAPACITY {
+            sender
+                .try_send(UiEvent::NetworkStatusUpdate(index.to_string()))
+                .unwrap();
+        }
+        assert!(matches!(
+            sender.try_send(UiEvent::NetworkStatusUpdate("overflow".to_string())),
+            Err(mpsc::error::TrySendError::Full(_))
+        ));
+    }
 }

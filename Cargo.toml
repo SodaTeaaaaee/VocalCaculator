@@ -43,6 +43,9 @@ redb = "2"
 jni = "0.21"
 ndk-context = "0.1"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Networking_WinSock"] }
+
 [features]
 default = ["desktop"]
 desktop = ["dioxus/desktop"]

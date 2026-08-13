@@ -10,7 +10,7 @@ use mdns::MdnsDiscovery;
 use multicast::MulticastTransport;
 
 use crate::net::protocol::{
-    Capabilities, DiscoveryMessage, NodeId, PROTOCOL_VERSION, TransportHint,
+    Capabilities, DiscoveryMessage, NodeId, PROTOCOL_VERSION, TransportHint, valid_display_name,
 };
 
 pub use peer_table::PeerTable;
@@ -77,8 +77,8 @@ pub struct DiscoveryEndpoint {
 
 /// Discovery service that only publishes and resolves session endpoints.
 ///
-/// Identity confirmation, authorization, and routing matrix exchange happen on
-/// the session TCP connection after the normal handshake. Discovery no longer
+/// Identity confirmation happens on the session TCP connection after the
+/// normal handshake. Discovery no longer
 /// owns a TCP listener; the session endpoint it advertises is the fixed
 /// [`crate::net::protocol::SESSION_TCP_PORT`] in `Lan` mode, not a runtime-assigned ephemeral port.
 pub struct DiscoveryService {
@@ -123,6 +123,9 @@ impl DiscoveryService {
         session_port: u16,
         public_key: [u8; 32],
     ) -> Result<Self, anyhow::Error> {
+        if !valid_display_name(&display_name) {
+            return Err(anyhow::anyhow!("invalid local discovery display name"));
+        }
         let hostname = hostname::get()
             .map(|h| h.to_string_lossy().to_string())
             .unwrap_or_else(|_| "unknown".to_string());
@@ -250,6 +253,10 @@ impl DiscoveryService {
         };
 
         if node_id == self.local_node_id {
+            return None;
+        }
+        if !valid_display_name(&display_name) {
+            log::warn!("Rejected discovery endpoint with invalid display name");
             return None;
         }
 

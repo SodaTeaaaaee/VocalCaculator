@@ -26,15 +26,15 @@
    带优先级、依赖和验收标准的修复任务清单。
 
 5. [`../AGENTS.md`](../AGENTS.md)  
-   自动化 agent 的立即生效约束。offline mode 完成前禁止启动 Windows GUI 或真实 LAN tests。
+   自动化 agent 的立即生效约束。AUTO-002 进程级审计完成前，禁止把启动 Windows GUI 或真实 LAN tests 当作默认验证动作。
 
 ## 当前重要提醒（2026-07-15 更新）
 
-- `--network-mode=offline`（及等价的环境变量 `VOCAL_CALCULATOR_NETWORK_MODE=offline`）已实现（`src/app/network_mode.rs`），并有单元测试覆盖优先级、非法值和 legacy 配置迁移；但尚未有启动真实 GUI 进程后审计其 OS socket 列表的 smoke test，agent 仍不应把"启动 offline GUI 做 smoke 测试"当作默认可执行动作。
+- `--network-mode=offline`（及等价的环境变量 `VOCAL_CALCULATOR_NETWORK_MODE=offline`）已实现（`src/app/network_mode.rs`），并有单元测试覆盖优先级、显式非法值、legacy 配置迁移和现存损坏配置 fail-closed Offline；但尚无直接组合根 constructor-spy，也没有启动真实 GUI 进程后审计其 OS socket 列表的 smoke test，agent 仍不应把“启动 offline GUI 做 smoke 测试”当作默认可执行动作。
 - `cargo test --all-targets` 现在默认安全：`tests/discovery_multicast.rs`、`tests/test_udp_transport.rs` 已归入非默认 Cargo feature `real-network-tests`，且每个测试都额外 `#[ignore]` 并要求 `VOCAL_CALCULATOR_ALLOW_LAN_TESTS=1`，三者缺一都不会触发真实网络流量。
 - 默认安全测试入口仍是 `cargo test --locked --lib`，现在 `cargo test --locked --all-targets` 也可以默认运行。
 - 防火墙 PowerShell 脚本已实现，位于 `packaging/windows/`（`configure-firewall.ps1`、`remove-firewall.ps1`），支持 `-DryRun`/`-WhatIf`；`-DryRun` 路径 agent 可自行验证，真实创建/删除规则仍需用户显式要求。
-- 已实现且有自动化测试的部分：`NetworkMode` 优先级与硬失败、TCP/UDP 固定端口 42420、Windows 禁用 mDNS、offline 组合根门禁、discovery 故障隔离、真实网络测试的三层 opt-in 门禁、防火墙脚本的 dry-run 路径。
+- 已实现且有自动化测试的部分：`NetworkMode` 优先级、显式非法值硬失败、现存损坏配置 fail-closed Offline、TCP/UDP 固定端口 42420、Windows mDNS 选择器、真实网络测试的三层 opt-in 门禁，以及防火墙脚本的 dry-run/WhatIf 路径。Offline 组合根门禁和 discovery 故障隔离已有明确代码路径，但尚无直接 constructor-spy/fault-injection 测试。
+- 远控产品模型已收敛为“单一 `allow_remote_control` 入站开关 + 单 selected executor”：没有逐设备 trust、逐次批准或 NxN 路由矩阵；旧 v5 路由/配对消息只保留 wire compatibility，Router 忽略且不发送。自动化测试覆盖开关 on/off、无需审批、输入/状态边界、重放和资源上限；真实双机体验仍未验证。
 - 仍未做真实验证的部分：两台 Windows 实机互相发现/控制、clean（无既有规则）VM 上的真实防火墙提示行为、便携目录实际移动后的规则刷新、Android 与 Windows 的跨平台 multicast/session 互通、AUTO-002（进程级 socket 审计 smoke test，仍未实现）。详见 `docs/repair-backlog.md` 和 `docs/project-review-2026-07-15.md` 文末补充说明。
 - Review 和历史验证针对 dirty workspace snapshot，不能自动等同于 HEAD/origin。
-

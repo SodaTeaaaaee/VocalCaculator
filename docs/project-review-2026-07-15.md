@@ -6,7 +6,7 @@
 
 ## 1. 执行摘要
 
-项目已经具备可用的计算器核心、中文语音、Dioxus 桌面 UI、Android 编译配置和一套较完整的 LAN 网络原型。310 项 Rust 测试通过，Windows Release、Android ARM64/x86_64 check 和 ARM64 Debug APK 构建均已成功。
+项目已经具备可用的计算器核心、中文语音、Dioxus 桌面 UI、Android 编译配置和一套较完整的 LAN 网络原型。当前 328 项 Rust 库测试通过，Windows Release、Android ARM64/x86_64 check 和 ARM64 Debug APK 构建均已成功。
 
 当前最主要的问题不是“缺少更多安全授权”，而是产品范围和实现复杂度失衡：一个语音计算器承担了 NxN 路由矩阵、配对信任表、授权请求、签名路由行、版本复制、多执行器状态同步等分布式系统复杂度，但真正重要的输入边界、算术不崩溃、会话生命周期和 Windows 分发体验反而没有闭环。
 
@@ -83,9 +83,11 @@
 
 优先级：P0
 
-当前 UI、NetworkManager、runtime 和 session 广泛使用 unbounded channel；listener 可无限 spawn；入站握手没有完整 timeout；PeerTable、endpoint attempts、路由行和身份数量没有容量上限；发现到 endpoint 后会自动连接；NxN 路由 UI 随节点数近似 O(n²) 增长。
+原始审查时，UI、NetworkManager、runtime 和 session 广泛使用 unbounded channel；listener 可无限 spawn；入站握手没有完整 timeout；PeerTable、endpoint attempts、路由行和身份数量没有容量上限；发现到 endpoint 后会自动连接；NxN 路由 UI 随节点数近似 O(n²) 增长。
 
-`LengthDelimitedCodec` 默认约有 8 MiB 帧上限，并非真正无限，但对计算器动作协议仍明显过大，且解码后字段和集合仍缺少更小的应用级限制。
+截至 2026-07-15 修复收口：跨层和 per-session 队列已改为 bounded；入站 session、并发 connect、PeerTable 和 endpoint attempts 均有硬上限；握手/订阅/写入有 deadline；TCP frame 为 4 KiB 且 bincode 有显式 limit/trailing rejection；远端在进入 UI 限速前遇到满队列会被取消 session。NxN 路由 UI 和复杂授权状态也已从产品切片删除。
+
+原始审查中的 `LengthDelimitedCodec` 默认上限问题已修复为 4 KiB；discovery datagram 解码也有 1 KiB limit，并与 session 一样拒绝 trailing bytes。
 
 建议初始预算：
 
@@ -266,7 +268,7 @@ TransportActor
 
 注意：审查期间虽然执行过 `cargo test --all-targets`，但后续核验确认其中两个 integration target 会真实绑定 `0.0.0.0` 并运行 multicast/broadcast。它们不能再作为无人值守 agent 的默认命令；在隔离完成前只允许默认运行 `cargo test --lib`。**这一隔离已在本 review 日期后完成，两个 integration target 已归入非默认 `real-network-tests` feature，`cargo test --all-targets` 现在默认安全——见文末补充说明。**
 
-尚未验证：Windows GUI、固定防火墙规则、offline 模式无 socket 保证、双机 LAN、真实声卡、Android 真机生命周期、Release/AAB 签名、依赖 CVE、完整许可证、覆盖率和真实性能。**其中"固定防火墙规则"和"offline 模式无 socket 保证"的代码/自动化测试层面已完成，实机/真机部分仍未验证——见文末补充说明。**
+尚未验证：Windows GUI、真实固定防火墙规则、offline 模式的进程级无 socket 保证、双机 LAN、真实声卡、Android 真机生命周期、Release/AAB 签名、依赖 CVE、完整许可证、覆盖率和真实性能。**防火墙 dry-run 参数契约及 Offline 的模式/配置层测试已完成，但真实规则对象、直接组合根测试和进程级 socket 审计仍未完成——见文末补充说明。**
 
 ## 7. 总优先级
 
@@ -283,28 +285,30 @@ ValidatedAction + checked math
 
 ## 补充说明（2026-07-15，同日追加）
 
-本 review 正文完成后，同一天内完成了 R0-3 / WIN-001/002/003 / FW-001 / AUTO-001/001A 范围的实现。本节不改写上文正文，只补充随后发生的状态变化；正文中受影响的段落已就地加了指回本节的标注。
+本 review 正文完成后，同一天内完成了 R0-3 / WIN-001/002/003 / FW-001 / AUTO-001/001A，以及 PROD-001/002 核心范围的实现。本节不改写上文正文，只补充随后发生的状态变化；正文中受影响的段落已就地加了指回本节的标注。
 
 ### 已实现并验证（自动化）
 
-- `NetworkMode::{Lan, Offline, LoopbackTest}`（`src/app/network_mode.rs`）：CLI `--network-mode` > 环境变量 `VOCAL_CALCULATOR_NETWORK_MODE` > `config.mode` > 旧版 `enabled` 回退优先级，非法值一律硬 `Err`（`main()` exit code 2）。
+- `NetworkMode::{Lan, Offline, LoopbackTest}`（`src/app/network_mode.rs`）：CLI `--network-mode` > 环境变量 `VOCAL_CALCULATOR_NETWORK_MODE` > `config.mode` > 旧版 `enabled` 回退优先级；显式非法字符串为硬 `Err`（`main()` exit code 2），缺失配置使用产品默认，现存不可读/损坏/字段类型错误配置 fail-closed Offline，未初始化全局模式也默认 Offline。
+- Router 已改为 calculator-first 单 executor 模型；`allow_remote_control` 是唯一持久化入站权限边界。逐设备 trust、逐次 grant/deny、pending timeout、signed row/NxN 状态和相关 UI 已删除；旧 v5 变体保持 wire discriminant，但生产 Router 忽略且不发送。
+- 产品线自动化测试覆盖：总开关即时 on/off、开启后无需审批、source/session 绑定、非法 action 和 StateSnapshot 拒绝、sequence/timestamp replay 边界、action rate/peer capacity、旧授权消息无状态影响、旧存储损坏行 fail-safe 迁移，以及设备面板不再暴露批准/拒绝/矩阵 UI。
 - TCP session listener 固定绑定 `0.0.0.0:42420`（`Lan`）/ `127.0.0.1:0`（`LoopbackTest`），`LAN_FIXED_PORT` 是 src/ 下唯一 `42420` 字面量来源。
 - Windows 上通过 `should_start_mdns` 禁用 mDNS（非 Windows 平台不受影响）。
-- `ui::bridge::init_networking` 在 `Offline` 模式下于任何 socket 调用之前返回；discovery 任务的 `JoinHandle` 不再纳入顶层 `select!`，其失败不再拖垮 listener/router/command 任务。
+- 静态控制流显示 `ui::bridge::init_networking` 在 `Offline` 模式下于 `NetworkManager::new` 前返回；discovery 任务的 `JoinHandle` 不再纳入顶层 `select!`。这两点尚无直接 constructor-spy/fault-injection 测试，不能视为进程级 socket 实测。
 - `tests/discovery_multicast.rs`、`tests/test_udp_transport.rs` 已归入非默认 Cargo feature `real-network-tests`，且每个测试额外 `#[ignore]` 并要求 `VOCAL_CALCULATOR_ALLOW_LAN_TESTS=1`；默认 `cargo test --locked --all-targets` 现在不产生任何真实网络流量（`-- --list` 确认两个二进制均为 0 tests）。
-- `packaging/windows/configure-firewall.ps1`、`remove-firewall.ps1`、`packaging/windows/tests/firewall-scripts.tests.ps1` 已实现；`-DryRun`/`-WhatIf` 路径在非管理员环境下已实测，23 项断言全部通过。
-- 全量验证：`cargo test --locked --lib` 328 通过（0 失败）；`cargo check --locked`、`cargo check --locked --all-targets --features real-network-tests`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo fmt --all -- --check`、`git diff --check` 全部干净。
+- `packaging/windows/configure-firewall.ps1`、`remove-firewall.ps1`、`packaging/windows/tests/firewall-scripts.tests.ps1` 已实现；`-DryRun`/`-WhatIf` 路径在非管理员环境下已实测，43 项断言全部通过，测试中全部 NetSecurity cmdlet 均由 fail-fast mock 遮蔽。
+- 验证命令包括 `cargo test --locked --lib`、`cargo check --locked`、`cargo check --locked --all-targets --features real-network-tests`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo fmt --all -- --check` 和 `git diff --check`；具体当次测试数量以命令输出为准，避免文档随新增测试失真。
 
 ### 已实现但未做真实 Windows LAN / 双机 / clean-VM 验证
 
-- offline 模式"应用进程没有非 loopback socket"这一保证目前只有组合根调用路径和 `session_bind_addr`/discovery 门禁的单元测试支撑，没有启动真实 GUI 进程后审计其操作系统 socket 列表的 smoke test（对应 `repair-backlog.md` AUTO-002，见下）。
+- offline 模式“应用进程没有非 loopback socket”目前只有 `init_networking` 在 `NetworkManager::new` 前返回的静态代码路径，以及模式/底层地址选择器测试支撑；没有直接组合根 constructor-spy 测试，也没有启动真实 GUI 进程后审计其操作系统 socket 列表的 smoke test（对应 `repair-backlog.md` AUTO-002，见下）。
 - 防火墙脚本的真实（非 dry-run）创建/删除规则路径、clean（无既有规则）Windows VM 上的提示行为、便携目录实际移动后重新运行脚本的规则刷新——均未做真实环境验证。
 - Windows↔Windows 双机发现与远控、Windows↔Android 跨平台 multicast/session 互通——均未做真实环境验证。
 - `src/net/android.rs` 中 multicast lock 从私有字段反射改为调用公开 `WifiManager.createMulticastLock` API（并配套 `setReferenceCounted(false)`）——该改动是任务开始前已存在于工作区的未提交修改，并非本次任务所做，本次任务也未有 agent 触碰过此文件；此处提及仅因它与本次改动同处一份工作区快照。功能上看是修正而非回归，但未做 Android 真机验证。
 
 ### 仍未实现
 
-- `repair-backlog.md` AUTO-002（进程级 socket 审计 smoke test）：本次任务改用一组确定性单元测试替代，但这类测试不启动真实进程、不做 OS 层 socket 枚举，不满足 AUTO-002 原始验收标准（"若 future refactor 意外启动 discovery/listener，CI smoke 明确失败"）。AUTO-002 仍在待办清单中，需要后续单独实现。
+- `repair-backlog.md` AUTO-002（进程级 socket 审计 smoke test）：当前模式/配置和底层选择器测试不启动真实进程、不做 OS 层 socket 枚举，也没有直接执行 Dioxus 组合根，不满足 AUTO-002 原始验收标准（“若 future refactor 意外启动 discovery/listener，CI smoke 明确失败”）。AUTO-002 仍在待办清单中，需要后续单独实现。
 - clean Windows 10/11 VM 上的完整验收（提示行为、规则、Private/Public profile、软件移动）——见 `docs/windows-networking-research.md` §9 第 6 步，仍是待办项。
 
-结论：R0-3 描述的目标方案已从"决策待实现"变为"代码与自动化测试已完成，真实网络环境验证仍是独立待办"。§5 需求完成度表的 Windows 桌面行、§6 已验证/未验证列表的对应条目按上述口径更新；正文其余部分（架构、产品范围、Router/UI/持久化/音频/字体等问题）未受本次变更影响，原样保留。
+结论：R0-3 与 PROD-001/002 描述的目标方案已有主要代码和安全自动化测试，但直接组合根、discovery 故障注入、进程级 socket 审计和真实网络/防火墙/双机环境验证仍是独立待办。§5 需求完成度表的 Windows 桌面行、§6 已验证/未验证列表的对应条目按上述口径更新；正文保留为历史审查快照，当前实现状态以本补充说明和 backlog 状态为准。

@@ -12,9 +12,8 @@ use vocal_calculator::components::calculator::CalculatorUI;
 use vocal_calculator::components::network_panel::PeerDisplayInfo as PeerDisplayProps;
 use vocal_calculator::ui::bridge::{
     create_router, handle_action, handle_connect_peer, handle_digit, handle_disconnect_peer,
-    handle_operator, handle_route_approval, handle_route_toggled, handle_save_display_name,
-    handle_scan_peers, handle_toggle_remote_control, init_networking, set_router_user_mute,
-    start_network_event_loop, toggle_theme,
+    handle_operator, handle_save_display_name, handle_scan_peers, handle_toggle_remote_control,
+    init_networking, set_router_user_mute, start_network_event_loop, toggle_theme,
 };
 use vocal_calculator::ui::events::create_ui_channel;
 use vocal_calculator::ui::state::{
@@ -166,11 +165,6 @@ fn App() -> Element {
             status: Signal::new(String::new()),
             connected_peer_index: Signal::new(-1),
             peers: Signal::new(vec![]),
-            matrix_node_ids: Signal::new(vec![]),
-            matrix_size: Signal::new(0),
-            matrix_cells: Signal::new(vec![]),
-            peer_names: Signal::new(vec![]),
-            my_index: Signal::new(0),
             remote_controlled: Signal::new(false),
             executing_remotely: Signal::new(false),
             allow_remote_control: Signal::new(false),
@@ -197,10 +191,22 @@ fn App() -> Element {
             .map(|p| p.join("vocal_calculator"))
             .unwrap_or_else(|| std::path::PathBuf::from("."));
 
-        // Open persistent storage -- this also loads or generates the
-        // DeviceIdentity (Ed25519 keypair + stable node_id).
-        let storage = Storage::open(&config_dir).expect("Failed to initialise storage");
-        let app_config = storage.config().clone();
+        // Storage is required only for the authenticated network identity.
+        // A migration/identity failure must not take down the local calculator.
+        let storage = match Storage::open(&config_dir) {
+            Ok(storage) => Some(storage),
+            Err(error) => {
+                log::error!(
+                    "Persistent storage unavailable; networking disabled, local calculator remains available: {}",
+                    error
+                );
+                None
+            }
+        };
+        let app_config = storage
+            .as_ref()
+            .map(|storage| storage.config().clone())
+            .unwrap_or_else(AppConfig::load);
 
         let configured_mode = audio_mode_from_config(&app_config.audio_mode);
         let configured_volume = app_config.volume.clamp(0.0, 1.0);
@@ -247,9 +253,12 @@ fn App() -> Element {
 
         // Start networking, passing the event sender so the runtime can
         // push UiEvents, and the Storage so the NetworkManager can read
-        // identity and paired-device data.
-        let storage = Arc::new(storage);
-        init_networking(tx, storage);
+        // the stable authenticated device identity.
+        if let Some(storage) = storage {
+            init_networking(tx, Arc::new(storage));
+        } else {
+            *init_ctx.net.status.write() = "网络存储不可用，本机计算器仍可正常使用".to_string();
+        }
 
         // Spawn the async event loop that consumes UiEvents and updates
         // CalcContext signals.
@@ -278,7 +287,6 @@ fn App() -> Element {
     let scanning = *ctx.net.scanning.read();
     let allow_remote_control = *ctx.net.allow_remote_control.read();
     let connected_peer_index = *ctx.net.connected_peer_index.read();
-    let matrix_size = *ctx.net.matrix_size.read();
     let peers: Vec<PeerDisplayProps> = (*ctx.net.peers.read())
         .iter()
         .map(|peer| PeerDisplayProps {
@@ -286,16 +294,11 @@ fn App() -> Element {
             address: (*peer.address.read()).clone(),
             is_connected: *peer.is_connected.read(),
             route_active: *peer.route_active.read(),
-            approval_pending: *peer.approval_pending.read(),
-            trust_label: (*peer.trust_label.read()).clone(),
             latency_ms: *peer.latency_ms.read(),
             index: *peer.index.read(),
             node_id_string: (*peer.node_id_string.read()).clone(),
         })
         .collect();
-    let peer_names = (*ctx.net.peer_names.read()).clone();
-    let my_index = *ctx.net.my_index.read();
-    let matrix_cells = (*ctx.net.matrix_cells.read()).clone();
     let app_version = (*ctx.app_version.read()).clone();
     let settings_display_name = (*ctx.settings.display_name.read()).clone();
     let settings_save_status = (*ctx.settings.save_status.read()).clone();
@@ -332,10 +335,6 @@ fn App() -> Element {
             // -- Peer / routing data --
             peers: peers,
             connected_peer_index: connected_peer_index,
-            matrix_size: matrix_size,
-            peer_names: peer_names,
-            my_index: my_index,
-            matrix_cells: matrix_cells,
 
             // -- App metadata --
             app_version: app_version,
@@ -432,11 +431,8 @@ fn App() -> Element {
             on_close_network_settings: { let mut ctx = ctx.clone(); move |_: ()| { *ctx.net.panel_visible.write() = false; } },
             on_connect_to_peer: { let ctx = ctx.clone(); move |id: String| handle_connect_peer(ctx.clone(), id) },
             on_disconnect_peer: { let ctx = ctx.clone(); move |id: String| handle_disconnect_peer(ctx.clone(), id) },
-            on_approve_route_request: { let ctx = ctx.clone(); move |id: String| handle_route_approval(ctx.clone(), id, true) },
-            on_deny_route_request: { let ctx = ctx.clone(); move |id: String| handle_route_approval(ctx.clone(), id, false) },
             on_scan_peers: { let ctx = ctx.clone(); move |_: ()| handle_scan_peers(ctx.clone()) },
             on_toggle_remote_control: { let ctx = ctx.clone(); move |_: ()| handle_toggle_remote_control(ctx.clone()) },
-            on_route_toggled: { let ctx = ctx.clone(); move |(row, col, value): (i32, i32, bool)| handle_route_toggled(ctx.clone(), row, col, value) },
 
             // -- Keyboard handler (dispatch through bridge) --
             keyboard_pressed: keyboard_pressed,

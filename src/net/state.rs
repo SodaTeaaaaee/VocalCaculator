@@ -12,8 +12,12 @@ use crate::net::protocol::NodeId;
 pub struct PeerInfo {
     pub node_id: NodeId,
     pub display_name: String,
-    pub address: SocketAddr,
-    pub tcp_port: u16,
+    /// Stable service endpoint advertised by discovery.
+    pub service_endpoint: Option<SocketAddr>,
+    /// Address of the concrete TCP connection.  For accepted sessions this
+    /// contains the caller's ephemeral source port and must never replace the
+    /// advertised service endpoint.
+    pub session_peer_addr: Option<SocketAddr>,
     pub last_seen: std::time::Instant,
     /// Ed25519 public key received during handshake (32 bytes).
     /// All-zeros if the remote did not provide one (legacy peer).
@@ -21,6 +25,14 @@ pub struct PeerInfo {
     /// SHA-256 fingerprint prefix advertised during discovery (mDNS `pkfp`).
     /// Used to detect discovery/session public-key mismatches before trust.
     pub public_key_fingerprint: Option<String>,
+}
+
+impl PeerInfo {
+    /// Best address for display/diagnostics.  This is not necessarily safe to
+    /// dial; callers initiating a new connection must use `service_endpoint`.
+    pub fn display_endpoint(&self) -> Option<SocketAddr> {
+        self.service_endpoint.or(self.session_peer_addr)
+    }
 }
 
 /// Snapshot of the current network state (peers, connection status, latency).

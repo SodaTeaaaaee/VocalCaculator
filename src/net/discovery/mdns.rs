@@ -3,7 +3,9 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use mdns_sd::{Receiver, ScopedIp, ServiceDaemon, ServiceEvent, ServiceInfo};
 
 use crate::net::discovery::{DiscoveryEndpoint, public_key_fingerprint};
-use crate::net::protocol::{MDNS_SERVICE_TYPE, NodeId, PROTOCOL_VERSION, TransportHint};
+use crate::net::protocol::{
+    MDNS_SERVICE_TYPE, NodeId, PROTOCOL_VERSION, TransportHint, valid_display_name,
+};
 
 pub struct MdnsDiscovery {
     daemon: ServiceDaemon,
@@ -81,6 +83,10 @@ impl MdnsDiscovery {
                         .get_property_val_str("name")
                         .map(str::to_string)
                         .unwrap_or_else(|| service.get_fullname().to_string());
+                    if !valid_display_name(&display_name) {
+                        log::debug!("mDNS resolved service has invalid display name");
+                        continue;
+                    }
                     let port = service.get_port();
                     if port == 0 {
                         continue;
@@ -140,6 +146,9 @@ fn build_service_info(
     ip: Ipv4Addr,
     fingerprint: String,
 ) -> Result<ServiceInfo, anyhow::Error> {
+    if !valid_display_name(display_name) {
+        return Err(anyhow::anyhow!("invalid mDNS display name"));
+    }
     let props = [
         ("node_id", local_node_id.to_string()),
         ("proto", PROTOCOL_VERSION.to_string()),
@@ -178,4 +187,23 @@ fn local_ipv4() -> Option<Ipv4Addr> {
 
 fn short_node_id(node_id: NodeId) -> String {
     node_id.as_simple().to_string().chars().take(12).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mdns_publication_reuses_display_name_schema() {
+        let result = build_service_info(
+            NodeId::new_v4(),
+            &"x".repeat(crate::net::protocol::MAX_DISPLAY_NAME_BYTES + 1),
+            42420,
+            "test.local.",
+            "test",
+            Ipv4Addr::LOCALHOST,
+            "fingerprint".to_string(),
+        );
+        assert!(result.is_err());
+    }
 }

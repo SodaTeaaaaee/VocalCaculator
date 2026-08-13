@@ -6,14 +6,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 use ed25519_dalek::SigningKey;
 
 use crate::net::protocol::{
-    ConnectionDirection, HEARTBEAT_INTERVAL_SECS, HEARTBEAT_TIMEOUT_SECS, NetworkCommand,
-    NetworkMessage, NodeId, PROTOCOL_MAGIC, SessionRegister,
+    ConnectionDirection, ExpectedPeerIdentity, HEARTBEAT_INTERVAL_SECS, HEARTBEAT_TIMEOUT_SECS,
+    NetworkCommand, NetworkMessage, NodeId, PROTOCOL_MAGIC, SessionId, SessionRegister,
+    valid_display_name,
 };
 use crate::net::state::PeerInfo;
 
@@ -21,12 +22,43 @@ use super::handshake::{client_handshake, server_handshake};
 
 /// Outgoing-message channel sender: the Router pushes messages here,
 /// and the session task forwards them over the TCP wire.
-pub type SessionSender = mpsc::UnboundedSender<NetworkMessage>;
+pub type SessionSender = mpsc::Sender<NetworkMessage>;
+
+/// Registry entry for the currently selected session generation of a peer.
+#[derive(Clone)]
+pub(crate) struct ActiveSession {
+    pub session_id: SessionId,
+    pub sender: SessionSender,
+    pub direction: ConnectionDirection,
+    pub cancel_tx: tokio::sync::watch::Sender<bool>,
+}
 
 /// Framed TCP stream with length-delimited codec.
 pub(super) type FramedStream = Framed<TcpStream, LengthDelimitedCodec>;
 
+#[cfg(not(test))]
+const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+#[cfg(test)]
+const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+#[cfg(not(test))]
+const SUBSCRIBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+#[cfg(test)]
+const SUBSCRIBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+const REGISTRATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const SESSION_OUTGOING_CAPACITY: usize = 256;
+pub(crate) const MAX_FRAME_LENGTH: usize = 4 * 1024;
+#[cfg(not(test))]
+const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+#[cfg(test)]
+const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
+
 // Public entry points
+
+pub(crate) fn session_codec() -> LengthDelimitedCodec {
+    let mut codec = LengthDelimitedCodec::new();
+    codec.set_max_frame_length(MAX_FRAME_LENGTH);
+    codec
+}
 
 /// Run a session for an **accepted** (inbound) TCP connection.
 ///
@@ -39,26 +71,34 @@ pub(crate) async fn run_accepted_session(
     local_display_name: String,
     local_pubkey: [u8; 32],
     local_signing_key: SigningKey,
-    command_tx: mpsc::UnboundedSender<NetworkCommand>,
+    command_tx: mpsc::Sender<NetworkCommand>,
 ) {
-    let framed = Framed::new(stream, LengthDelimitedCodec::new());
+    let framed = Framed::new(stream, session_codec());
 
     // -- Server-side handshake ------------------------------------------
-    let (remote_node_id, remote_display_name, remote_pubkey, mut framed) = match server_handshake(
-        framed,
-        local_node_id,
-        &local_display_name,
-        local_pubkey,
-        &local_signing_key,
-    )
-    .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            log::warn!("Inbound handshake failed from {}: {}", peer_addr, e);
-            return;
-        }
-    };
+    let (remote_node_id, remote_display_name, remote_pubkey, mut framed) =
+        match tokio::time::timeout(
+            HANDSHAKE_TIMEOUT,
+            server_handshake(
+                framed,
+                local_node_id,
+                &local_display_name,
+                local_pubkey,
+                &local_signing_key,
+            ),
+        )
+        .await
+        {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
+                log::warn!("Inbound handshake failed from {}: {}", peer_addr, e);
+                return;
+            }
+            Err(_) => {
+                log::warn!("Inbound handshake timed out from {}", peer_addr);
+                return;
+            }
+        };
 
     log::info!(
         "Inbound session established: {} ({}) from {}",
@@ -73,11 +113,11 @@ pub(crate) async fn run_accepted_session(
     );
 
     // Wait for Subscribe before entering steady-state.
-    match recv_msg(&mut framed).await {
-        Ok(Some(NetworkMessage::Subscribe)) => {
+    match tokio::time::timeout(SUBSCRIBE_TIMEOUT, recv_msg(&mut framed)).await {
+        Ok(Ok(Some(NetworkMessage::Subscribe))) => {
             log::trace!("Received Subscribe from {}", remote_node_id);
         }
-        Ok(other) => {
+        Ok(Ok(other)) => {
             log::warn!(
                 "Expected Subscribe from {}, got {:?}; dropping",
                 remote_node_id,
@@ -85,8 +125,12 @@ pub(crate) async fn run_accepted_session(
             );
             return;
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             log::warn!("Failed reading Subscribe from {}: {}", remote_node_id, e);
+            return;
+        }
+        Err(_) => {
+            log::warn!("Timed out waiting for Subscribe from {}", remote_node_id);
             return;
         }
     }
@@ -94,8 +138,11 @@ pub(crate) async fn run_accepted_session(
     let info = PeerInfo {
         node_id: remote_node_id,
         display_name: remote_display_name,
-        address: peer_addr,
-        tcp_port: peer_addr.port(),
+        // An accepted socket only reveals the caller's ephemeral source
+        // endpoint. Preserve any independently discovered service endpoint in
+        // PeerTable rather than deriving or overwriting it here.
+        service_endpoint: None,
+        session_peer_addr: Some(peer_addr),
         last_seen: std::time::Instant::now(),
         public_key: remote_pubkey,
         public_key_fingerprint: None,
@@ -115,6 +162,7 @@ pub(crate) async fn run_accepted_session(
 ///
 /// The client side of the handshake: sends `Hello`, waits for `HelloAck`,
 /// then sends `Subscribe`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_connecting_session(
     stream: TcpStream,
     peer_addr: std::net::SocketAddr,
@@ -122,14 +170,15 @@ pub(crate) async fn run_connecting_session(
     local_display_name: String,
     local_pubkey: [u8; 32],
     local_signing_key: SigningKey,
-    command_tx: mpsc::UnboundedSender<NetworkCommand>,
+    expected_peer: Option<ExpectedPeerIdentity>,
+    command_tx: mpsc::Sender<NetworkCommand>,
 ) -> Result<(), String> {
-    let framed = Framed::new(stream, LengthDelimitedCodec::new());
+    let framed = Framed::new(stream, session_codec());
 
     // -- Client-side handshake with 8-second timeout --------------------
     let (remote_node_id, remote_display_name, remote_pubkey, mut framed) =
         match tokio::time::timeout(
-            std::time::Duration::from_secs(8),
+            HANDSHAKE_TIMEOUT,
             client_handshake(
                 framed,
                 local_node_id,
@@ -151,6 +200,8 @@ pub(crate) async fn run_connecting_session(
             }
         };
 
+    validate_expected_peer(remote_node_id, &remote_pubkey, expected_peer.as_ref())?;
+
     log::info!(
         "Outbound session established: {} ({}) to {}",
         remote_display_name,
@@ -164,16 +215,28 @@ pub(crate) async fn run_connecting_session(
     );
 
     // Send Subscribe to start receiving state updates.
-    if let Err(e) = send_msg(&mut framed, &NetworkMessage::Subscribe).await {
-        log::warn!("Failed sending Subscribe to {}: {}", remote_node_id, e);
-        return Err(format!("subscribe: {}", e));
+    match tokio::time::timeout(
+        SUBSCRIBE_TIMEOUT,
+        send_msg(&mut framed, &NetworkMessage::Subscribe),
+    )
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            log::warn!("Failed sending Subscribe to {}: {}", remote_node_id, e);
+            return Err(format!("subscribe: {}", e));
+        }
+        Err(_) => {
+            log::warn!("Timed out sending Subscribe to {}", remote_node_id);
+            return Err("subscribe_timeout".to_string());
+        }
     }
 
     let info = PeerInfo {
         node_id: remote_node_id,
         display_name: remote_display_name,
-        address: peer_addr,
-        tcp_port: peer_addr.port(),
+        service_endpoint: Some(peer_addr),
+        session_peer_addr: Some(peer_addr),
         last_seen: std::time::Instant::now(),
         public_key: remote_pubkey,
         public_key_fingerprint: None,
@@ -190,6 +253,37 @@ pub(crate) async fn run_connecting_session(
     Ok(())
 }
 
+pub(crate) fn session_outgoing_channel()
+-> (mpsc::Sender<NetworkMessage>, mpsc::Receiver<NetworkMessage>) {
+    mpsc::channel(SESSION_OUTGOING_CAPACITY)
+}
+
+pub(crate) fn validate_expected_peer(
+    remote_node_id: NodeId,
+    remote_public_key: &[u8; 32],
+    expected_peer: Option<&ExpectedPeerIdentity>,
+) -> Result<(), String> {
+    let Some(expected) = expected_peer else {
+        return Ok(());
+    };
+    if remote_node_id != expected.node_id {
+        return Err(format!(
+            "identity_mismatch: expected node {}, handshake returned {}",
+            expected.node_id, remote_node_id,
+        ));
+    }
+    if let Some(expected_fingerprint) = &expected.public_key_fingerprint {
+        let actual = crate::net::discovery::public_key_fingerprint(remote_public_key);
+        if &actual != expected_fingerprint {
+            return Err(format!(
+                "fingerprint_mismatch: expected {}, handshake returned {}",
+                expected_fingerprint, actual,
+            ));
+        }
+    }
+    Ok(())
+}
+
 // Session main loop
 
 /// Split the framed stream, spawn the heartbeat task, and run the
@@ -197,20 +291,52 @@ pub(crate) async fn run_connecting_session(
 async fn run_session_loop(
     framed: FramedStream,
     remote_id: NodeId,
-    command_tx: mpsc::UnboundedSender<NetworkCommand>,
+    command_tx: mpsc::Sender<NetworkCommand>,
     info: PeerInfo,
     direction: ConnectionDirection,
 ) {
     let (mut writer, mut reader) = framed.split();
-    let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel::<NetworkMessage>();
+    let (outgoing_tx, mut outgoing_rx) = session_outgoing_channel();
+    let session_id = SessionId::new_v4();
+    let (decision_tx, decision_rx) = oneshot::channel();
+    let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
 
-    // Register with the NetworkManager.
-    let _ = command_tx.send(NetworkCommand::RegisterSession(SessionRegister {
+    // Register with the NetworkManager and wait for the generation-aware
+    // deduplication decision before entering the relay loop.
+    let registration = command_tx.send(NetworkCommand::RegisterSession(SessionRegister {
+        session_id,
         node_id: remote_id,
         sender: outgoing_tx.clone(),
         info: info.clone(),
         direction,
+        cancel_tx,
+        decision_tx,
     }));
+    if !matches!(
+        tokio::time::timeout(REGISTRATION_TIMEOUT, registration).await,
+        Ok(Ok(()))
+    ) {
+        return;
+    }
+    match tokio::time::timeout(REGISTRATION_TIMEOUT, decision_rx).await {
+        Ok(Ok(true)) => {}
+        Ok(Ok(false)) => {
+            log::info!(
+                "Session {} generation {} rejected by dedup",
+                remote_id,
+                session_id
+            );
+            return;
+        }
+        Ok(Err(_)) | Err(_) => {
+            log::warn!(
+                "Session {} generation {} registration decision timed out",
+                remote_id,
+                session_id,
+            );
+            return;
+        }
+    }
 
     // Shared heartbeat timestamp (seconds elapsed since reference, monotonic).
     let last_pong = Arc::new(AtomicU64::new(0));
@@ -221,6 +347,7 @@ async fn run_session_loop(
     let hb_last_pong = last_pong.clone();
     let hb_last_ping = last_ping_sent.clone();
     let hb_outgoing = outgoing_tx.clone();
+    let (heartbeat_done_tx, mut heartbeat_done_rx) = oneshot::channel::<()>();
     let hb_handle = tokio::spawn(async move {
         let mut interval =
             tokio::time::interval(std::time::Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
@@ -243,10 +370,11 @@ async fn run_session_loop(
                 .unwrap_or_default()
                 .as_millis() as u64;
             hb_last_ping.store(send_time, Ordering::Relaxed);
-            if hb_outgoing.send(NetworkMessage::Ping).is_err() {
+            if hb_outgoing.try_send(NetworkMessage::Ping).is_err() {
                 break; // session ended
             }
         }
+        let _ = heartbeat_done_tx.send(());
     });
 
     // -- Pong tracker task -----------------------------------------------
@@ -262,6 +390,7 @@ async fn run_session_loop(
 
     // -- Bidirectional relay ---------------------------------------------
     let mut relay_error = false;
+    let mut cancel_channel_open = true;
 
     loop {
         tokio::select! {
@@ -280,11 +409,8 @@ async fn run_session_loop(
                             relay_error = true;
                             break;
                         }
-                        match bincode::serde::decode_from_slice::<NetworkMessage, _>(
-                            &bytes[PROTOCOL_MAGIC.len()..],
-                            bincode::config::standard(),
-                        ) {
-                            Ok((msg, _)) => {
+                        match decode_network_message(&bytes[PROTOCOL_MAGIC.len()..]) {
+                            Ok(msg) => {
                                 if !handle_incoming_message(
                                     msg,
                                     remote_id,
@@ -325,6 +451,23 @@ async fn run_session_loop(
                     break;
                 }
             }
+            _ = &mut heartbeat_done_rx => {
+                log::warn!("Heartbeat task ended for {}; closing session", remote_id);
+                relay_error = true;
+                break;
+            }
+            changed = cancel_rx.changed(), if cancel_channel_open => {
+                if changed.is_ok() && *cancel_rx.borrow() {
+                    log::info!("Session {} generation {} cancelled", remote_id, session_id);
+                    break;
+                }
+                if changed.is_err() {
+                    // Tests and embedders may not retain a registry sender.
+                    // Channel closure alone is not a cancellation request and
+                    // must not spin this select branch.
+                    cancel_channel_open = false;
+                }
+            }
             else => {
                 // Both channels closed — session ended.
                 break;
@@ -335,6 +478,8 @@ async fn run_session_loop(
     // -- Cleanup ---------------------------------------------------------
     hb_handle.abort();
     tracker_handle.abort();
+    let _ = hb_handle.await;
+    let _ = tracker_handle.await;
 
     if relay_error {
         log::info!("Session with {} ended (error)", remote_id);
@@ -342,7 +487,14 @@ async fn run_session_loop(
         log::info!("Session with {} ended (clean)", remote_id);
     }
 
-    let _ = command_tx.send(NetworkCommand::UnregisterSession(remote_id));
+    let _ = tokio::time::timeout(
+        REGISTRATION_TIMEOUT,
+        command_tx.send(NetworkCommand::UnregisterSession {
+            node_id: remote_id,
+            session_id,
+        }),
+    )
+    .await;
 }
 
 // Message handling inside the session loop
@@ -351,15 +503,25 @@ async fn run_session_loop(
 async fn handle_incoming_message(
     msg: NetworkMessage,
     remote_id: NodeId,
-    command_tx: &mpsc::UnboundedSender<NetworkCommand>,
-    outgoing_tx: &mpsc::UnboundedSender<NetworkMessage>,
+    command_tx: &mpsc::Sender<NetworkCommand>,
+    outgoing_tx: &mpsc::Sender<NetworkMessage>,
     last_pong: &Arc<AtomicU64>,
     last_ping_sent: &Arc<AtomicU64>,
 ) -> bool {
+    if msg.is_local_only() {
+        log::warn!("Rejected local-only message from authenticated peer {remote_id}");
+        return false;
+    }
+    if let NetworkMessage::PeerNameUpdate { display_name } = &msg
+        && !valid_display_name(display_name)
+    {
+        log::warn!("Rejected invalid peer display name from {remote_id}");
+        return false;
+    }
     match msg {
         NetworkMessage::Ping => {
             // Respond directly; no Router involvement needed.
-            if outgoing_tx.send(NetworkMessage::Pong).is_err() {
+            if outgoing_tx.try_send(NetworkMessage::Pong).is_err() {
                 return false;
             }
         }
@@ -374,7 +536,7 @@ async fn handle_incoming_message(
                     .unwrap_or_default()
                     .as_millis() as u64;
                 let rtt = now.saturating_sub(ping_sent) as u32;
-                let _ = command_tx.send(NetworkCommand::UpdateLatency(rtt));
+                let _ = command_tx.send(NetworkCommand::UpdateLatency(rtt)).await;
             }
         }
         NetworkMessage::Hello { .. } | NetworkMessage::HelloAck { .. } => {
@@ -385,7 +547,9 @@ async fn handle_incoming_message(
         }
         _ => {
             // Forward to the NetworkManager -> Router bridge.
-            let _ = command_tx.send(NetworkCommand::IncomingMessage(remote_id, msg));
+            let _ = command_tx
+                .send(NetworkCommand::IncomingMessage(remote_id, msg))
+                .await;
         }
     }
     true
@@ -402,12 +566,25 @@ where
     S: futures::Sink<tokio_util::bytes::Bytes> + Unpin,
     S::Error: std::error::Error + 'static,
 {
-    let bincode_bytes = bincode::serde::encode_to_vec(msg, bincode::config::standard())?;
+    let bincode_bytes = bincode::serde::encode_to_vec(
+        msg,
+        bincode::config::standard().with_limit::<MAX_FRAME_LENGTH>(),
+    )?;
     let mut payload = Vec::with_capacity(PROTOCOL_MAGIC.len() + bincode_bytes.len());
     payload.extend_from_slice(&PROTOCOL_MAGIC);
     payload.extend_from_slice(&bincode_bytes);
-    writer.send(tokio_util::bytes::Bytes::from(payload)).await?;
-    Ok(())
+    match tokio::time::timeout(
+        WRITE_TIMEOUT,
+        writer.send(tokio_util::bytes::Bytes::from(payload)),
+    )
+    .await
+    {
+        Ok(result) => {
+            result?;
+            Ok(())
+        }
+        Err(_) => Err("network write timed out".into()),
+    }
 }
 
 /// Receive a frame, verify [`PROTOCOL_MAGIC`], and deserialize a
@@ -421,13 +598,28 @@ pub(super) async fn recv_msg(
             {
                 return Err("Invalid protocol magic bytes".into());
             }
-            let (msg, _) = bincode::serde::decode_from_slice(
-                &bytes[PROTOCOL_MAGIC.len()..],
-                bincode::config::standard(),
-            )?;
+            let msg = decode_network_message(&bytes[PROTOCOL_MAGIC.len()..])?;
             Ok(Some(msg))
         }
         Some(Err(e)) => Err(e.into()),
         None => Ok(None),
     }
+}
+
+/// Decode exactly one message from a frame. Accepting a valid prefix while
+/// ignoring attacker-controlled suffix bytes makes the framing contract
+/// ambiguous, so every ingress path requires full consumption.
+pub(super) fn decode_network_message(bytes: &[u8]) -> Result<NetworkMessage, String> {
+    let (message, consumed) = bincode::serde::decode_from_slice::<NetworkMessage, _>(
+        bytes,
+        bincode::config::standard().with_limit::<MAX_FRAME_LENGTH>(),
+    )
+    .map_err(|error| error.to_string())?;
+    if consumed != bytes.len() {
+        return Err(format!(
+            "network message has trailing bytes: consumed {consumed}, frame {}",
+            bytes.len(),
+        ));
+    }
+    Ok(message)
 }
